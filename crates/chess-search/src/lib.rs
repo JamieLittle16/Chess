@@ -136,7 +136,11 @@ mod tests {
         let root = Position::startpos();
         let legal = root.legal_moves();
         let result = search(&root, 2);
-        assert!(result.best_move.is_some_and(|mv| legal.as_slice().contains(&mv)));
+        assert!(
+            result
+                .best_move
+                .is_some_and(|mv| legal.as_slice().contains(&mv))
+        );
         assert!(result.nodes > 1);
         assert_eq!(root, Position::startpos());
     }
