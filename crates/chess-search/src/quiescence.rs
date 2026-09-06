@@ -1,5 +1,11 @@
 use super::*;
 
+// Qsearch v1 is intentionally transparent and does not yet have SEE/delta pruning. A bounded path
+// prevents pathological alternating check-evasion trees from consuming an unbounded share of a
+// search. This is a safety/performance guardrail, not a claim that 16 is an optimal chess value;
+// later M4 work should re-qualify it once tactical ordering and SEE are available.
+const MAX_QSEARCH_PATH_PLY: usize = 16;
+
 impl Searcher {
     /// Stabilise a nominal leaf by resolving forcing tactical continuations.
     ///
@@ -46,6 +52,14 @@ impl Searcher {
         }
 
         let in_check = position.is_in_check(position.side_to_move());
+
+        // Legal terminal detection still happens above the ceiling so a mate is never converted to
+        // a static score. Beyond the v1 tactical budget we return the cheap evaluator and let a
+        // future SEE/pruning-qualified qsearch replace this conservative guardrail.
+        if path_len >= MAX_QSEARCH_PATH_PLY {
+            return Some(evaluate(position));
+        }
+
         let mut best = if in_check {
             -INFINITY
         } else {
@@ -59,9 +73,8 @@ impl Searcher {
             alpha = alpha.max(best);
         }
 
-        // This is a robustness ceiling rather than a normal search boundary. Captures, promotions,
-        // repetition and the fifty-move rule make reaching it extraordinarily unlikely, but a
-        // malformed or adversarial position must never index beyond the fixed search-history stack.
+        // The qsearch ceiling above is much tighter in normal use. This remains the hard memory
+        // safety invariant for the fixed search-history stack.
         if path_len >= MAX_SEARCH_PLY {
             return Some(evaluate(position));
         }
@@ -163,6 +176,31 @@ mod tests {
             searcher.nodes > 1,
             "at least one legal evasion was searched"
         );
+        assert_eq!(position, original);
+    }
+
+    #[test]
+    fn qsearch_path_ceiling_is_bounded_and_restores_position() {
+        let mut position =
+            Position::from_fen("4r2k/8/8/8/8/8/6Q1/4K3 w - - 0 1").expect("valid FEN");
+        let original = position.clone();
+        let mut searcher = Searcher {
+            nodes: 1,
+            ..Searcher::default()
+        };
+        let score = searcher
+            .quiescence(
+                &mut position,
+                &[],
+                -INFINITY,
+                INFINITY,
+                MAX_QSEARCH_PATH_PLY as u16,
+                MAX_QSEARCH_PATH_PLY,
+                &NeverStop,
+            )
+            .expect("bounded quiescence completes");
+        assert_eq!(score, evaluate(&position));
+        assert_eq!(searcher.nodes, 1);
         assert_eq!(position, original);
     }
 }
