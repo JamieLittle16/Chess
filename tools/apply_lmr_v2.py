@@ -10,6 +10,19 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
     return text.replace(old, new, 1)
 
 
+def replace_nth(text: str, old: str, new: str, occurrence: int, label: str) -> str:
+    if occurrence < 1:
+        raise SystemExit(f"{label}: occurrence must be >= 1")
+    start = 0
+    index = -1
+    for _ in range(occurrence):
+        index = text.find(old, start)
+        if index < 0:
+            raise SystemExit(f"{label}: occurrence {occurrence} not found")
+        start = index + len(old)
+    return text[:index] + new + text[index + len(old):]
+
+
 path = Path("crates/chess-search/src/lib.rs")
 text = path.read_text()
 text = replace_once(
@@ -18,12 +31,27 @@ text = replace_once(
     "        let in_check = position.is_in_check(position.side_to_move());\n        let moves = generate_legal_moves_mut(position);\n        if moves.is_empty() {\n            let score = terminal_score(position, ply);",
     "in-check gate",
 )
-text = replace_once(
-    text,
-    "        let mut picker = MovePicker::new(&mut moves, hint);\n        let mut first_move = true;\n        while let Some(mv) = picker.next(position) {\n            let undo = position.make_move(mv);\n            let child = if first_move {",
-    "        let mut picker = MovePicker::new(&mut moves, hint);\n        let mut move_index = 0_usize;\n        while let Some(mv) = picker.next(position) {\n            let first_move = move_index == 0;\n            let quiet = !mv.kind().is_capture() && !mv.kind().is_promotion();\n            let undo = position.make_move(mv);\n            let gives_check = position.is_in_check(position.side_to_move());\n            let reduce =\n                !first_move && depth >= 3 && move_index >= 3 && quiet && !in_check && !gives_check;\n            let child = if first_move {",
-    "LMR loop setup",
+old_loop = (
+    "        let mut picker = MovePicker::new(&mut moves, hint);\n"
+    "        let mut first_move = true;\n"
+    "        while let Some(mv) = picker.next(position) {\n"
+    "            let undo = position.make_move(mv);\n"
+    "            let child = if first_move {"
 )
+new_loop = (
+    "        let mut picker = MovePicker::new(&mut moves, hint);\n"
+    "        let mut move_index = 0_usize;\n"
+    "        while let Some(mv) = picker.next(position) {\n"
+    "            let first_move = move_index == 0;\n"
+    "            let quiet = !mv.kind().is_capture() && !mv.kind().is_promotion();\n"
+    "            let undo = position.make_move(mv);\n"
+    "            let gives_check = position.is_in_check(position.side_to_move());\n"
+    "            let reduce =\n"
+    "                !first_move && depth >= 3 && move_index >= 3 && quiet && !in_check && !gives_check;\n"
+    "            let child = if first_move {"
+)
+# Root and recursive search intentionally share this shape. LMR belongs only in recursive negamax.
+text = replace_nth(text, old_loop, new_loop, 2, "recursive LMR loop")
 old_probe = '''                // Principal variation search probes later moves with a one-point
                 // window and verifies only genuine alpha improvements.
                 let probe = self.negamax(
