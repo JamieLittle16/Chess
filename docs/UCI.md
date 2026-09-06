@@ -1,8 +1,8 @@
 # UCI Interface
 
-Status: **M3 interruptible worker + standard game clocks**
+Status: **M3 interruptible worker + standard clocks + draw history**
 
-The UCI target makes the reference engine usable by standard chess tooling while keeping protocol concerns outside chess correctness and search. Protocol text is translated into `chess-engine` operations; `chess-uci` does not own chess rules or search algorithms.
+The UCI target makes the reference engine usable by standard chess tooling while keeping protocol concerns outside chess correctness and search. Protocol text is translated into `chess-engine` operations; `chess-uci` does not own chess rules, draw policy or search algorithms.
 
 ## Dependency boundary
 
@@ -10,7 +10,7 @@ The UCI target makes the reference engine usable by standard chess tooling while
 chess-core → chess-eval → chess-search → chess-engine → chess-uci
 ```
 
-`chess-uci` is allowed to allocate strings and parse text because it is not a search hot path. It must not infer castling, en-passant or promotion legality independently. Incoming coordinate moves are matched against `Position::legal_moves()` and only the matching semantic `ChessMove` is applied.
+`chess-uci` may allocate strings and parse text because it is not a search hot path. It must not infer castling, en-passant, promotion or repetition legality independently. Incoming coordinate moves are matched against `Position::legal_moves()` and only the matching semantic `ChessMove` is applied.
 
 Search policy follows the same ownership rule. UCI parses requested limits and clocks, selects the clock belonging to the actual side to move, and maps that data into `chess-engine::ClockState` / `SearchLimits`. Wall-clock budgeting itself is engine policy, not protocol policy.
 
@@ -59,6 +59,24 @@ Move text uses standard UCI long algebraic coordinate form such as `e2e4`, `e7e8
 
 A search emits a standard `info depth ... score ... nodes ...` line followed by `bestmove ...`. Mate-range internal scores are translated to `score mate N`; ordinary scores are emitted as centipawns.
 
+## Position history and transactionality
+
+`position ... moves ...` is not collapsed into only a final board. The parser builds a temporary object containing:
+
+- the final `Position`;
+- the rule-correct repetition key of every preceding position in the supplied sequence.
+
+Before each legal move is applied, the current repetition identity is appended to that temporary history. Only after the base FEN and **every** supplied move validate does the session replace live engine state with `Engine::set_position_with_prior_history`.
+
+This gives two useful guarantees:
+
+1. repetition information survives the protocol boundary and is available to search;
+2. an illegal move cannot partially mutate either the live board or its history.
+
+A no-move `position` command intentionally establishes only the supplied root because no earlier game provenance is known. The engine appends that root to its history itself.
+
+A UCI regression constructs a materially winning position, cycles both kings back to the same position three times through a legal move sequence, and verifies that `go depth 1` returns `score cp 0`. This proves repetition history survives UCI → engine → search rather than merely working in a unit-level search API.
+
 ## Game-clock mapping
 
 UCI owns only the syntactic clock packet. For a White-to-move position, `wtime`/`winc` are selected; for a Black-to-move position, `btime`/`binc` are selected. If clock fields are supplied without the relevant side's remaining time, the command is rejected explicitly rather than silently borrowing the opponent's clock.
@@ -90,9 +108,7 @@ Iterative deepening publishes only fully completed iterations. If a node, deadli
 
 If interruption happens before depth one completes, the engine returns a legal depth-zero fallback whenever legal moves exist. Search interruption therefore cannot expose a half-searched root result as though it were complete, and every speculative move is unmade before returning.
 
-## Transactionality
-
-A `position` command is assembled in a temporary `Position`. The engine's live game position is replaced only after the full FEN and every supplied move have validated. One malformed or illegal move therefore cannot leave the engine in a half-applied position.
+An external stop check occurs before a root TT exact hit, so previously cached analysis cannot bypass an already-issued `stop`.
 
 ## Deliberate current limits
 
@@ -107,23 +123,24 @@ This is not yet the final tournament UCI surface. In particular:
 
 Unsupported `go` limits are rejected explicitly rather than approximated incorrectly.
 
-The next qualification work audits draw/history semantics and then establishes reproducible match testing. Time-allocation sophistication belongs after that baseline is measurable.
+The next qualification boundary is reproducible match testing. Time-allocation sophistication and wider tournament protocol features belong after the baseline is measurable.
 
 ## Evidence gates
 
 CI tests require:
 
 1. canonical `uci`/`isready` responses;
-2. legal `position startpos moves ...` application;
-3. transactional rejection of an illegal move sequence;
-4. promotion notation round-tripping;
-5. fixed-depth `go` returning a legal move in the unchanged root;
-6. node-limited search returning a legal fallback/result without corrupting the root;
-7. zero-movetime interruption returning a legal fallback without corrupting the root;
-8. an interruptible depth search honoring an externally shared stop token;
-9. combined fixed limits preserving all constraints;
-10. White and Black clock packets selecting the actual side-to-move time/increment;
-11. `movestogo`, explicit `movetime`, game clocks and node limits composing conservatively;
-12. incomplete side-to-move clocks and unsupported/malformed requests being rejected explicitly;
-13. the threaded executable compiling under strict Clippy with the engine remaining single-owner;
-14. workspace formatting, debug tests, release tests and the pinned reference-search signature remaining green.
+2. legal `position startpos moves ...` application with complete repetition history;
+3. transactional rejection of an illegal move sequence for both board and history;
+4. a UCI-level threefold sequence producing a draw score;
+5. promotion notation round-tripping;
+6. fixed-depth `go` returning a legal move in the unchanged root;
+7. node-limited search returning a legal fallback/result without corrupting the root;
+8. zero-movetime interruption returning a legal fallback without corrupting the root;
+9. an interruptible depth search honoring an externally shared stop token;
+10. combined fixed limits preserving all constraints;
+11. White and Black clock packets selecting the actual side-to-move time/increment;
+12. `movestogo`, explicit `movetime`, game clocks and node limits composing conservatively;
+13. incomplete side-to-move clocks and unsupported/malformed requests being rejected explicitly;
+14. the threaded executable compiling under strict Clippy with the engine remaining single-owner;
+15. workspace formatting, debug tests, release tests and the pinned `reference-search-v2` signature remaining green.
