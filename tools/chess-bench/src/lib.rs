@@ -6,10 +6,12 @@
 use chess_core::Position;
 use chess_search::Searcher;
 
-/// V2 adds rule-correct draw termination. The only V1 suite delta is the promotion case, where
-/// dead-material continuations now terminate two nodes earlier without changing score or best move.
-pub const SUITE_NAME: &str = "reference-search-v2";
-pub const EXPECTED_SIGNATURE: u64 = 0x1a14_9495_c23a_7d8e;
+/// V3 introduces bounded quiescence at nominal leaves. Relative to V2, all five benchmark scores
+/// and best moves are unchanged; the reviewed delta is search shape only. In particular Kiwipete
+/// expands substantially more tactical work, which is why V3 still requires equal-time paired-game
+/// qualification before quiescence can be considered a strength improvement.
+pub const SUITE_NAME: &str = "reference-search-v3";
+pub const EXPECTED_SIGNATURE: u64 = 0xdaed_582d_f2f5_d20d;
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;

@@ -27,7 +27,9 @@ pub use chess_move::{ChessMove, MoveKind};
 pub use color::Color;
 pub use fen::{FenError, STARTPOS_FEN};
 pub use move_list::{MAX_MOVES, MoveList};
-pub use movegen::{generate_legal_moves, generate_legal_moves_mut};
+pub use movegen::{
+    generate_legal_moves, generate_legal_moves_mut, generate_legal_tactical_moves_mut,
+};
 pub use perft::{perft, perft_mut};
 pub use piece::{Piece, PieceKind};
 pub use position::{CastlingRights, Position};

@@ -4,6 +4,8 @@
 //! negamax/alpha-beta search with deterministic move ordering and a bounded direct-mapped
 //! transposition table. It is the control group for later tactical and strategic search research.
 
+mod quiescence;
+
 use chess_core::{ChessMove, MoveList, Position, generate_legal_moves_mut};
 use chess_eval::evaluate;
 
@@ -310,6 +312,10 @@ impl Searcher {
             return None;
         }
 
+        if depth == 0 {
+            return self.quiescence(position, prior_history, alpha, beta, ply, path_len, control);
+        }
+
         let repetition_key = position.repetition_key().raw();
         if is_rule_draw(
             position,
@@ -348,12 +354,6 @@ impl Searcher {
         let moves = generate_legal_moves_mut(position);
         if moves.is_empty() {
             let score = terminal_score(position, ply);
-            self.table
-                .store(key, depth, score_to_tt(score, ply), Bound::Exact, None);
-            return Some(score);
-        }
-        if depth == 0 {
-            let score = evaluate(position);
             self.table
                 .store(key, depth, score_to_tt(score, ply), Bound::Exact, None);
             return Some(score);
