@@ -18,6 +18,8 @@ jobs:
         with:
           toolchain: 1.98.1
           components: rustfmt, clippy
+      - name: Match harness tests
+        run: python3 -m unittest discover -s tests -p 'test_match_harness.py'
       - name: Formatting
         run: cargo fmt --all -- --check
       - name: Clippy
