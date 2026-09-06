@@ -3,8 +3,13 @@
 //! Protocol parsing is intentionally outside chess correctness. Coordinate moves are resolved
 //! against the current legal move list, so this crate never re-implements move semantics.
 
+use std::time::Duration;
+
 use chess_core::{ChessMove, PieceKind, Position, Square};
-use chess_engine::{Engine, MATE_SCORE, SearchResult};
+use chess_engine::{Engine, MATE_SCORE, SearchLimits, SearchResult, StopToken};
+
+/// Safety cap used when a node or movetime search has no explicit depth constraint.
+const DEFAULT_LIMIT_DEPTH: u8 = 64;
 
 /// Output produced by one input command.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,23 +85,28 @@ impl UciSession {
     }
 
     fn handle_go(&mut self, tokens: &[&str]) -> UciResponse {
-        let depth = tokens
-            .windows(2)
-            .find(|pair| pair[0] == "depth")
-            .and_then(|pair| pair[1].parse::<u8>().ok())
-            .filter(|depth| *depth > 0);
-
-        let Some(depth) = depth else {
-            return response(
-                vec![
-                    "info string only 'go depth N' is supported currently".to_owned(),
-                    "bestmove 0000".to_owned(),
-                ],
-                false,
-            );
+        let limits = match parse_go_limits(tokens) {
+            Ok(limits) => limits,
+            Err(message) => {
+                return response(
+                    vec![
+                        format!("info string {message}"),
+                        "bestmove 0000".to_owned(),
+                    ],
+                    false,
+                );
+            }
         };
 
-        let result = self.engine.search_depth(depth);
+        // Keep the ordinary fixed-depth path free of atomics/deadline checks. Cooperative control
+        // is paid for only when the caller actually requested a node or wall-clock limit.
+        let result = if limits.max_nodes.is_none() && limits.movetime.is_none() {
+            self.engine.search_depth(limits.max_depth)
+        } else {
+            self.engine
+                .search_with_limits(limits, &StopToken::new())
+                .result
+        };
         response(search_lines(result), false)
     }
 }
@@ -109,6 +119,57 @@ impl Default for UciSession {
 
 fn response(lines: Vec<String>, quit: bool) -> UciResponse {
     UciResponse { lines, quit }
+}
+
+fn parse_go_limits(tokens: &[&str]) -> Result<SearchLimits, &'static str> {
+    let mut depth = None;
+    let mut nodes = None;
+    let mut movetime = None;
+    let mut index = 1;
+
+    while index < tokens.len() {
+        let key = tokens[index];
+        let Some(value) = tokens.get(index + 1).copied() else {
+            return Err("go limit requires a value");
+        };
+
+        match key {
+            "depth" => {
+                let parsed = value
+                    .parse::<u8>()
+                    .ok()
+                    .filter(|value| *value > 0)
+                    .ok_or("go depth requires a positive integer")?;
+                depth = Some(parsed);
+            }
+            "nodes" => {
+                let parsed = value
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|value| *value > 0)
+                    .ok_or("go nodes requires a positive integer")?;
+                nodes = Some(parsed);
+            }
+            "movetime" => {
+                let parsed = value
+                    .parse::<u64>()
+                    .map_err(|_| "go movetime requires integer milliseconds")?;
+                movetime = Some(Duration::from_millis(parsed));
+            }
+            _ => return Err("unsupported go limit; use depth, nodes, or movetime"),
+        }
+        index += 2;
+    }
+
+    if depth.is_none() && nodes.is_none() && movetime.is_none() {
+        return Err("go requires depth, nodes, or movetime");
+    }
+
+    Ok(SearchLimits {
+        max_depth: depth.unwrap_or(DEFAULT_LIMIT_DEPTH),
+        max_nodes: nodes,
+        movetime,
+    })
 }
 
 fn parse_position(tokens: &[&str]) -> Result<Position, &'static str> {
@@ -233,9 +294,13 @@ fn format_score(score: i32) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use chess_core::{Color, PieceKind, Position};
 
-    use super::{UciSession, format_uci_move, resolve_uci_move};
+    use super::{
+        DEFAULT_LIMIT_DEPTH, UciSession, format_uci_move, parse_go_limits, resolve_uci_move,
+    };
 
     #[test]
     fn handshake_and_readiness_are_standard() {
@@ -289,6 +354,58 @@ mod tests {
             .expect("bestmove line");
         assert!(resolve_uci_move(&root, best).is_some());
         assert_eq!(session.engine().position(), &root);
+    }
+
+    #[test]
+    fn node_limited_go_returns_a_legal_bestmove_and_restores_root() {
+        let mut session = UciSession::new();
+        let root = session.engine().position().clone();
+        let response = session.handle_line("go nodes 20");
+        assert_eq!(response.lines().len(), 2);
+        assert!(response.lines()[0].starts_with("info depth 0 score "));
+        let best = response.lines()[1]
+            .strip_prefix("bestmove ")
+            .expect("bestmove line");
+        assert!(resolve_uci_move(&root, best).is_some());
+        assert_eq!(session.engine().position(), &root);
+    }
+
+    #[test]
+    fn zero_movetime_returns_an_immediate_legal_fallback() {
+        let mut session = UciSession::new();
+        let root = session.engine().position().clone();
+        let response = session.handle_line("go movetime 0");
+        assert_eq!(response.lines().len(), 2);
+        assert!(response.lines()[0].starts_with("info depth 0 score "));
+        let best = response.lines()[1]
+            .strip_prefix("bestmove ")
+            .expect("bestmove line");
+        assert!(resolve_uci_move(&root, best).is_some());
+        assert_eq!(session.engine().position(), &root);
+    }
+
+    #[test]
+    fn go_limits_compose_without_protocol_specific_search_logic() {
+        let limits = parse_go_limits(&["go", "depth", "7", "nodes", "1234", "movetime", "50"])
+            .expect("valid combined limits");
+        assert_eq!(limits.max_depth, 7);
+        assert_eq!(limits.max_nodes, Some(1234));
+        assert_eq!(limits.movetime, Some(Duration::from_millis(50)));
+
+        let node_only = parse_go_limits(&["go", "nodes", "8"]).expect("node limit");
+        assert_eq!(node_only.max_depth, DEFAULT_LIMIT_DEPTH);
+    }
+
+    #[test]
+    fn unsupported_or_malformed_go_is_explicitly_rejected() {
+        let mut session = UciSession::new();
+        let unsupported = session.handle_line("go wtime 1000");
+        assert!(unsupported.lines()[0].starts_with("info string unsupported go limit"));
+        assert_eq!(unsupported.lines()[1], "bestmove 0000");
+
+        let malformed = session.handle_line("go depth 0");
+        assert!(malformed.lines()[0].contains("positive integer"));
+        assert_eq!(malformed.lines()[1], "bestmove 0000");
     }
 
     #[test]
