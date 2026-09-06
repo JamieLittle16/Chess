@@ -63,8 +63,12 @@ pub(crate) fn parse(fen: &str) -> Result<Position, FenError> {
     position.set_castling_rights(parse_castling(castling)?);
     position.set_en_passant(parse_en_passant(en_passant)?);
 
-    let halfmove = halfmove.parse::<u16>().map_err(|_| FenError::InvalidHalfmove)?;
-    let fullmove = fullmove.parse::<u16>().map_err(|_| FenError::InvalidFullmove)?;
+    let halfmove = halfmove
+        .parse::<u16>()
+        .map_err(|_| FenError::InvalidHalfmove)?;
+    let fullmove = fullmove
+        .parse::<u16>()
+        .map_err(|_| FenError::InvalidFullmove)?;
     if fullmove == 0 {
         return Err(FenError::InvalidFullmove);
     }
@@ -144,7 +148,10 @@ fn parse_en_passant(field: &str) -> Result<Option<Square>, FenError> {
         return Ok(None);
     }
     let bytes = field.as_bytes();
-    if bytes.len() != 2 || !(b'a'..=b'h').contains(&bytes[0]) || !(b'1'..=b'8').contains(&bytes[1]) {
+    if bytes.len() != 2
+        || !(b'a'..=b'h').contains(&bytes[0])
+        || !(b'1'..=b'8').contains(&bytes[1])
+    {
         return Err(FenError::InvalidEnPassant);
     }
     let file = bytes[0] - b'a';
@@ -177,7 +184,10 @@ mod tests {
         assert!(position.structural_invariants_hold());
 
         let e1 = Square::from_file_rank(4, 0).expect("e1");
-        assert_eq!(position.piece_at(e1), Some(Piece::new(Color::White, PieceKind::King)));
+        assert_eq!(
+            position.piece_at(e1),
+            Some(Piece::new(Color::White, PieceKind::King))
+        );
     }
 
     #[test]
