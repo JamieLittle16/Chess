@@ -100,10 +100,10 @@ const fn generate_pawn_attacks() -> [[u64; 64]; 2] {
     let mut table = [[0_u64; 64]; 2];
     let mut square = 0_usize;
     while square < 64 {
-        table[Color::White as usize][square] = offset_mask(square, -1, 1)
-            | offset_mask(square, 1, 1);
-        table[Color::Black as usize][square] = offset_mask(square, -1, -1)
-            | offset_mask(square, 1, -1);
+        table[Color::White as usize][square] =
+            offset_mask(square, -1, 1) | offset_mask(square, 1, 1);
+        table[Color::Black as usize][square] =
+            offset_mask(square, -1, -1) | offset_mask(square, 1, -1);
         square += 1;
     }
     table
