@@ -7,7 +7,8 @@ The roadmap is ordered by dependency and evidence, not by visual excitement.
 - **M0 complete** — core representation, toolchain and CI are green.
 - **M1 complete** — legal chess and reference perft are green.
 - **M2 complete** — reversible state and deterministic position identity are green.
-- **M3 in progress** — the classical reference engine, draw/history correctness, reproducible match tooling and frozen opening corpus are in place; the first retained measured baseline is the remaining exit item.
+- **M3 complete** — the classical reference engine is timed, draw-correct, externally measurable and now has a retained Stockfish calibration.
+- **M4 in progress** — tactical strength work has started with transparent quiescence search, and every candidate is measured against frozen M3 before acceptance.
 
 ## M0 — Core foundations — complete
 
@@ -42,9 +43,9 @@ Exit condition: all selected reference perft positions agree through meaningful 
 
 Exit condition: long legal sequences unmake bit-exactly and hashes reproduce. **Met.**
 
-## M3 — Classical reference engine — in progress
+## M3 — Classical reference engine — complete
 
-Implemented:
+Implemented and qualified:
 
 - transparent material baseline evaluator;
 - negamax + alpha-beta;
@@ -67,24 +68,26 @@ Implemented:
 - hermetic match-harness tests in CI and the local gate;
 - frozen `m3-uho-lichess-100-v1` opening corpus derived deterministically from a pinned CC0 Stockfish UHO Lichess source;
 - protocol-level opening suite ID/SHA-256 enforcement before a match result directory is created;
-- independent Python provenance/rank/hash validation and Rust legality/nonterminal validation for all 100 openings.
+- independent Python provenance/rank/hash validation and Rust legality/nonterminal validation for all 100 openings;
+- first retained external calibration: 100 games at `1+0.01` against Stockfish 19 with `UCI_LimitStrength=true`, `UCI_Elo=1320`, scoring 31 wins / 9 draws / 60 losses and Fastchess relative Elo `-103.73 +/- 71.87`.
 
-Remaining before M3 exit:
+The external result is a protocol-specific development calibration, not a FIDE rating. Its exact hashes, paired-game result and retained artifact are recorded in `docs/STRENGTH_BASELINES.md`.
 
-- run the first retained completed baseline against a named external reference under `m3-baseline-v1`;
-- record the resulting relative Elo and uncertainty with its manifest/PGN/raw evidence rather than claiming an absolute rating.
+`go infinite`, ponder, configurable UCI options and richer GUI-facing features remain useful compatibility work but are no longer M3 blockers. They can be added when selected harnesses/opponents require them.
 
-`go infinite`, ponder, configurable UCI options and richer GUI-facing features are useful tournament compatibility work but are no longer correctness blockers for the first finite-time baseline match protocol. They can be added when selected harnesses/opponents require them.
+Exit condition: a correctly timed, draw-correct UCI engine with a reproducible measured baseline. **Met.**
 
-Exit condition: a correctly timed, draw-correct UCI engine with a reproducible measured baseline.
+## M4 — Tactical engine — in progress
 
-## M4 — Tactical engine
+Planned/active:
 
 - quiescence/forcing search;
 - stronger move ordering;
 - bounded tactical TT refinements;
 - carefully measured pruning/reduction mechanisms;
 - production time-management tuning.
+
+Evidence rule: every meaningful search change is first checked for correctness and deterministic benchmark drift, then plays paired games against a frozen historical engine under equal resources. A mechanism is not retained merely because it is conventional or intuitively attractive.
 
 Exit condition: strong, stable reference search and automated paired-game testing.
 
