@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "protocol_id": "m3-baseline-v1",
+  "runner": "fastchess",
+  "games": 200,
+  "time_control": "10+0.1",
+  "concurrency": 1,
+  "seed": 20260906,
+  "max_moves": 300,
+  "opening_format": "epd",
+  "openings_required": true,
+  "paired_colour_reversal": true,
+  "ponder": false,
+  "tablebases": false,
+  "evaluation_adjudication": false,
+  "notes": "First finite-time M3 qualification protocol. Games are paired by opening with colours reversed. No score-based resign/draw adjudication is used because the reference evaluator is intentionally primitive; actual game termination plus max_moves is the baseline."
+}
