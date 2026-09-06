@@ -76,6 +76,9 @@ impl MoveKind {
 pub struct ChessMove(u16);
 
 impl ChessMove {
+    /// Sentinel used only in unused slots of fixed-capacity move buffers.
+    pub const NULL: Self = Self(0);
+
     #[must_use]
     pub const fn new(from: Square, to: Square, kind: MoveKind) -> Self {
         Self((from.index() as u16) << 6 | to.index() as u16 | ((kind as u16) << 12))
