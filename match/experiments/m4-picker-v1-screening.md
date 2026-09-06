@@ -12,27 +12,32 @@ Protocol: `match/protocols/m4-picker-v1-screening.json`.
 
 ## Result
 
-The retained screening built candidate `aa8d4a8ce6eb97efc0e3f6b583e0e455b119bdd8` against accepted
-qsearch v1 `429008867c0eb40b883dc15124479c34e0df5074`, then ran 100 games at `1+0.01`,
-concurrency 1, from the frozen opening corpus with paired colour reversal.
+Candidate engine commit used by the completed run: `aa8d4a8ce6eb97efc0e3f6b583e0e455b119bdd8`.
+Reference: accepted qsearch v1 at `429008867c0eb40b883dc15124479c34e0df5074`.
+
+100 games at `1+0.01`, concurrency 1, the frozen 100-position opening corpus, paired colour reversal:
+
+- **28 wins / 7 losses / 65 draws**;
+- **60.5 / 100 (60.50%)**;
+- pentanomial `[0, 4, 25, 17, 4]`;
+- Fastchess Elo estimate **+74.06 ± 37.99**;
+- LOS **100.00%**.
+
+Recorded identities from the retained run:
 
 - candidate executable SHA-256: `f898b5723315e04a6326b67f37ce9afbbed2c22106c723cc9fe125307e529738`;
 - qsearch reference executable SHA-256: `50cd8a5755ac2681ebdf96a73480bdb114be99cc4a6d31bc46b95b4dbc8c2e74`;
 - Fastchess executable SHA-256: `3d0a8f3c8b837a96366ac838f3ddf6fe87b813abb4ad2852284c0ce409132566`;
-- opening corpus SHA-256: `599a45efb446e91952d13e79bc7fec8de319e332036a54552a3e8e4af91f9cf1`;
-- games: 100;
-- wins / losses / draws: **28 / 7 / 65**;
-- score: **60.5 / 100 (60.50%)**;
-- pentanomial: `[0, 4, 25, 17, 4]`;
-- Fastchess Elo estimate: **+74.06 ± 37.99**;
-- nElo estimate: **+137.44 ± 68.10**;
-- LOS: **100.00%**;
-- retained Actions artifact ID: `9992411493`;
-- retained artifact ZIP SHA-256: `bf7a75a146f383e6e3931f651e0f9e2252a9d0edf8b95e2e91e185dabb42041c`.
+- opening corpus SHA-256: `599a45efb446e91952d13e79bc7fec8de319e332036a54552a3e8e4af91f9cf1`.
 
-Fastchess printed a `DrawRatio` statistic of 50.00%; the raw game record above is authoritative for
-W/L/D and contains 65 drawn games. No crash or time-forfeit was observed in the completed match.
+The GitHub Actions artifact was retained as
+`m4-picker-vs-qsearch-aa8d4a8ce6eb97efc0e3f6b583e0e455b119bdd8` (artifact id `9992411493`), with
+artifact-zip digest `bf7a75a146f383e6e3931f651e0f9e2252a9d0edf8b95e2e91e185dabb42041c`.
 
-This is a short-control development screening, not a universal Elo claim. Within the frozen protocol,
-the staged picker converts its deterministic search-shape improvement into a clear positive strength
-result, so it is accepted as the next M4 baseline subject to the ordinary correctness/CI gate.
+## Decision
+
+Accept the staged allocation-free picker as the next M4 baseline. The result is a short-control
+relative-development screen, not an absolute engine rating. It does, however, agree with the
+independent deterministic evidence: tactical ordering cuts the known Kiwipete qsearch hotspot by
+66.6% while preserving the reviewed scores and best moves, and the reduced search tree translates
+into a clear equal-wall-clock strength gain under the frozen protocol.
