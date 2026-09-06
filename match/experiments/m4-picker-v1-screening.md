@@ -20,5 +20,5 @@ Acceptance evidence to retain:
 - PGN, raw runner output and UCI log;
 - any crash or time-forfeit evidence.
 
-This file records the experiment definition. The outcome is appended only after the retained artifact
-and runner output have been inspected.
+Status: screening triggered after the candidate implementation and V4 deterministic signature were
+frozen. The outcome will be appended only after the retained artifact and runner output are inspected.
