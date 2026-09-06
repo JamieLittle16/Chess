@@ -10,15 +10,21 @@ Before speed or Elo matters:
 - make/unmake round trips restore every bit of position state;
 - legal move generation is checked using published perft positions and counts;
 - random legal sequences are unmade back to the initial state;
-- optimised algorithms are cross-checked against simple reference implementations where practical.
+- optimised algorithms are cross-checked against simple reference implementations where practical;
+- repetition, move-count and dead-material draw semantics are tested independently of the TT;
+- protocol move sequences preserve game history transactionally.
 
 Perft is a correctness tool, not an Elo benchmark.
 
 ## 2. Deterministic engine benchmark
 
-The repository now contains `tools/chess-bench`, whose first versioned suite is `reference-search-v1`.
+The repository contains `tools/chess-bench`. The current draw-aware suite is `reference-search-v2` and pins:
 
-Each case starts from repository-owned FEN, creates cold search state, and runs deterministic iterative deepening to a fixed depth. The report records:
+```text
+0x1a149495c23a7d8e
+```
+
+Each case starts from a repository-owned FEN, creates cold search state, and runs deterministic iterative deepening to a fixed depth. The report records:
 
 - final score;
 - searched nodes;
@@ -34,13 +40,25 @@ cargo run --release --quiet -p chess-bench
 
 and prints the complete report/signature after the normal formatting, Clippy and test gates.
 
+### V1 → V2 review
+
+Adding rule-correct draw termination intentionally changed the deterministic search shape. The change was reviewed per-case before accepting a new signature:
+
+- startpos: unchanged;
+- Kiwipete: unchanged;
+- mate-net: unchanged;
+- en-passant: unchanged;
+- promotion: score and best move unchanged, but dead-material continuations terminate earlier (`24 → 22` nodes, `8 → 6` TT hits).
+
+The benchmark assertion now prints the complete case report when the signature drifts. A future change must therefore be inspected at the case level rather than updating an opaque hash by reflex.
+
 ### What the CI signature means
 
-The signature is a **behavior/search-shape regression marker**, not a strength score. A change in evaluator, move ordering, pruning, TT behavior or search may legitimately change it. Such a change should be understood and the benchmark baseline updated deliberately rather than being treated as automatically bad.
+The signature is a **behavior/search-shape regression marker**, not a strength score. A change in evaluator, move ordering, pruning, TT behavior, draw semantics or search may legitimately change it. Such a change must be understood and the benchmark baseline updated deliberately rather than being treated as automatically bad.
 
 Wall-clock thresholds are intentionally **not** enforced on shared CI runners. Timing claims require controlled hardware. CI establishes deterministic behavior; local/dedicated benchmark machines establish speed.
 
-As the architecture grows, the benchmark report will add the relevant counters, for example tactical nodes, strategic expansions, neural evaluations, graph hits/transposition merges and memory high-water marks.
+As the architecture grows, the benchmark report will add relevant counters, for example tactical nodes, strategic expansions, neural evaluations, graph hits/transposition merges and memory high-water marks.
 
 Node counts from different engine architectures are **not** directly comparable. Equal wall-clock strength is the important cross-engine metric.
 
@@ -51,7 +69,7 @@ Hot components are measured independently when optimisation work begins:
 - move generation;
 - make/unmake;
 - attack generation;
-- hashing;
+- hashing/repetition identity;
 - evaluator push/pop and inference;
 - tactical TT probing;
 - strategic table lookup.
@@ -60,7 +78,7 @@ Record CPU, compiler/toolchain, build flags and benchmark corpus. Optimisations 
 
 ## 4. Elo testing
 
-The engine exposes UCI so established match runners such as Fastchess can test it under controlled conditions once production time controls are available.
+The engine exposes UCI so an established match runner such as Fastchess can test it under controlled conditions. The match runner is measurement infrastructure: it must not become coupled to search internals.
 
 ### Paired-game protocol
 
@@ -72,20 +90,24 @@ For candidate `C` against reference `R`:
 4. select openings from a versioned opening suite;
 5. play each opening twice with colours reversed;
 6. retain paired (pentanomial) outcomes rather than only aggregate W/D/L;
-7. report Elo difference with uncertainty/confidence bounds and the complete protocol.
+7. retain raw runner output/PGN and exact engine revisions;
+8. report Elo difference with uncertainty/confidence bounds and the complete protocol.
 
 Typical result form:
 
 ```text
-candidate:  search-frontier-v7
+candidate:  search-frontier-v7@<sha>
 reference:  main@<sha>
 games:      20,000 (10,000 pairs)
 time:       <protocol>
+openings:   <suite + hash>
 elo:        +4.8
 95% CI:     [+1.6, +8.0]
 ```
 
 Numbers without the protocol are not accepted as evidence.
+
+The immediate M3 qualification task is to encode this protocol in repository tooling and obtain the first measured external baseline. That result will be a **relative engine Elo under the named protocol**, not an absolute human rating.
 
 ## 5. SPRT development tests
 
