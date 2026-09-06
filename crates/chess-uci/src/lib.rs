@@ -125,7 +125,8 @@ impl UciSession {
         // Synchronous fixed-depth callers keep the ordinary zero-overhead path. An interruptible
         // worker must route every search through cooperative control so `stop` can cancel depth-only
         // searches too. Node/time limits necessarily use the controlled path in both modes.
-        let controlled = self.interruptible || limits.max_nodes.is_some() || limits.movetime.is_some();
+        let controlled =
+            self.interruptible || limits.max_nodes.is_some() || limits.movetime.is_some();
         let result = if controlled {
             self.engine.search_with_limits(limits, &self.stop).result
         } else {
