@@ -3,9 +3,80 @@
 //! `Engine` owns the current game position and a reusable searcher. Protocols and frontends should
 //! depend on this crate rather than reaching into search internals directly.
 
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
+
 use chess_core::{ChessMove, Position};
-use chess_search::Searcher;
-pub use chess_search::{MATE_SCORE, SearchResult};
+use chess_search::{SearchControl, Searcher};
+pub use chess_search::{MATE_SCORE, SearchOutcome, SearchResult};
+
+/// Cloneable cooperative cancellation signal for one running search.
+#[derive(Clone, Debug, Default)]
+pub struct StopToken {
+    stopped: Arc<AtomicBool>,
+}
+
+impl StopToken {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn stop(&self) {
+        self.stopped.store(true, Ordering::Relaxed);
+    }
+
+    pub fn reset(&self) {
+        self.stopped.store(false, Ordering::Relaxed);
+    }
+
+    #[must_use]
+    pub fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::Relaxed)
+    }
+}
+
+/// Search limits owned by orchestration rather than chess/search semantics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchLimits {
+    pub max_depth: u8,
+    pub max_nodes: Option<u64>,
+    pub movetime: Option<Duration>,
+}
+
+impl SearchLimits {
+    #[must_use]
+    pub const fn depth(max_depth: u8) -> Self {
+        Self {
+            max_depth,
+            max_nodes: None,
+            movetime: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn nodes(max_depth: u8, max_nodes: u64) -> Self {
+        Self {
+            max_depth,
+            max_nodes: Some(max_nodes),
+            movetime: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn movetime(max_depth: u8, movetime: Duration) -> Self {
+        Self {
+            max_depth,
+            max_nodes: None,
+            movetime: Some(movetime),
+        }
+    }
+}
 
 /// Persistent engine state shared by protocol/deployment frontends.
 pub struct Engine {
@@ -57,6 +128,31 @@ impl Engine {
         self.searcher
             .iterative_deepening(&mut self.position, max_depth)
     }
+
+    /// Search under cooperative depth/node/time limits.
+    ///
+    /// The result always contains a legal fallback when legal moves exist, even if the stop signal
+    /// or deadline fires before depth one completes.
+    #[must_use]
+    pub fn search_with_limits(
+        &mut self,
+        limits: SearchLimits,
+        stop: &StopToken,
+    ) -> SearchOutcome {
+        let deadline = limits
+            .movetime
+            .and_then(|duration| Instant::now().checked_add(duration));
+        let control = EngineControl {
+            stop,
+            max_nodes: limits.max_nodes,
+            deadline,
+        };
+        self.searcher.iterative_deepening_controlled(
+            &mut self.position,
+            limits.max_depth,
+            &control,
+        )
+    }
 }
 
 impl Default for Engine {
@@ -65,11 +161,27 @@ impl Default for Engine {
     }
 }
 
+struct EngineControl<'a> {
+    stop: &'a StopToken,
+    max_nodes: Option<u64>,
+    deadline: Option<Instant>,
+}
+
+impl SearchControl for EngineControl<'_> {
+    fn should_stop(&self, nodes: u64) -> bool {
+        self.stop.is_stopped()
+            || self.max_nodes.is_some_and(|limit| nodes >= limit)
+            || self.deadline.is_some_and(|deadline| Instant::now() >= deadline)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use chess_core::{ChessMove, MoveKind, Square};
 
-    use super::Engine;
+    use super::{Engine, SearchLimits, StopToken};
 
     #[test]
     fn illegal_external_move_is_rejected_without_mutation() {
@@ -109,6 +221,54 @@ mod tests {
                 .best_move
                 .is_some_and(|mv| legal.as_slice().contains(&mv))
         );
+        assert_eq!(engine.position(), &root);
+    }
+
+    #[test]
+    fn node_limit_stops_cooperatively_and_restores_root() {
+        let mut engine = Engine::new();
+        let root = engine.position().clone();
+        let legal = root.legal_moves();
+        let outcome = engine.search_with_limits(SearchLimits::nodes(32, 20), &StopToken::new());
+        assert!(outcome.stopped);
+        assert!(outcome.result.nodes >= 20);
+        assert!(
+            outcome
+                .result
+                .best_move
+                .is_some_and(|mv| legal.as_slice().contains(&mv))
+        );
+        assert_eq!(engine.position(), &root);
+    }
+
+    #[test]
+    fn pre_stopped_token_returns_legal_fallback() {
+        let mut engine = Engine::new();
+        let root = engine.position().clone();
+        let legal = root.legal_moves();
+        let stop = StopToken::new();
+        stop.stop();
+        let outcome = engine.search_with_limits(SearchLimits::depth(32), &stop);
+        assert!(outcome.stopped);
+        assert_eq!(outcome.result.depth, 0);
+        assert!(
+            outcome
+                .result
+                .best_move
+                .is_some_and(|mv| legal.as_slice().contains(&mv))
+        );
+        assert_eq!(engine.position(), &root);
+    }
+
+    #[test]
+    fn expired_movetime_returns_without_corrupting_position() {
+        let mut engine = Engine::new();
+        let root = engine.position().clone();
+        let outcome = engine.search_with_limits(
+            SearchLimits::movetime(32, Duration::ZERO),
+            &StopToken::new(),
+        );
+        assert!(outcome.stopped);
         assert_eq!(engine.position(), &root);
     }
 }
