@@ -24,6 +24,11 @@ impl CastlingRights {
     pub const fn union(self, rights: Self) -> Self {
         Self(self.0 | rights.0)
     }
+
+    #[must_use]
+    pub const fn without(self, rights: Self) -> Self {
+        Self(self.0 & !rights.0)
+    }
 }
 
 /// Complete persistent chess position state.
@@ -108,6 +113,15 @@ impl Position {
     }
 
     #[must_use]
+    pub fn king_square(&self, color: Color) -> Option<Square> {
+        let mut kings = self.pieces(color, PieceKind::King);
+        if kings.count() != 1 {
+            return None;
+        }
+        kings.pop_lsb()
+    }
+
+    #[must_use]
     pub fn piece_at(&self, square: Square) -> Option<Piece> {
         if !self.occupied.contains(square) {
             return None;
@@ -125,10 +139,23 @@ impl Position {
         if self.occupied.contains(square) {
             return Err(FenError::OverlappingPieces);
         }
+        self.place_piece(piece, square);
+        Ok(())
+    }
+
+    pub(crate) fn place_piece(&mut self, piece: Piece, square: Square) {
+        debug_assert!(!self.occupied.contains(square));
         self.pieces[piece.slot()] = self.pieces[piece.slot()].with(square);
         self.occupancy[piece.color().index()] = self.occupancy[piece.color().index()].with(square);
         self.occupied = self.occupied.with(square);
-        Ok(())
+    }
+
+    pub(crate) fn take_piece(&mut self, square: Square) -> Option<Piece> {
+        let piece = self.piece_at(square)?;
+        self.pieces[piece.slot()] = self.pieces[piece.slot()].without(square);
+        self.occupancy[piece.color().index()] = self.occupancy[piece.color().index()].without(square);
+        self.occupied = self.occupied.without(square);
+        Some(piece)
     }
 
     pub(crate) fn set_side_to_move(&mut self, color: Color) {

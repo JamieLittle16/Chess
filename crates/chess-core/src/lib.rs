@@ -8,8 +8,11 @@ mod chess_move;
 mod color;
 mod fen;
 mod move_list;
+mod movegen;
+mod perft;
 mod piece;
 mod position;
+mod reference;
 mod square;
 
 pub use attacks::{
@@ -21,6 +24,8 @@ pub use chess_move::{ChessMove, MoveKind};
 pub use color::Color;
 pub use fen::{FenError, STARTPOS_FEN};
 pub use move_list::{MAX_MOVES, MoveList};
+pub use movegen::generate_legal_moves;
+pub use perft::perft;
 pub use piece::{Piece, PieceKind};
 pub use position::{CastlingRights, Position};
 pub use square::Square;

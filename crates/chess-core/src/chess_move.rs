@@ -1,4 +1,4 @@
-use crate::Square;
+use crate::{PieceKind, Square};
 
 /// Encodes the semantic kind of a chess move in four bits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -47,6 +47,17 @@ impl MoveKind {
                 | Self::PromoteCaptureRook
                 | Self::PromoteCaptureQueen
         )
+    }
+
+    #[must_use]
+    pub const fn promotion_piece(self) -> Option<PieceKind> {
+        match self {
+            Self::PromoteKnight | Self::PromoteCaptureKnight => Some(PieceKind::Knight),
+            Self::PromoteBishop | Self::PromoteCaptureBishop => Some(PieceKind::Bishop),
+            Self::PromoteRook | Self::PromoteCaptureRook => Some(PieceKind::Rook),
+            Self::PromoteQueen | Self::PromoteCaptureQueen => Some(PieceKind::Queen),
+            _ => None,
+        }
     }
 
     fn from_tag(tag: u8) -> Self {
@@ -121,7 +132,7 @@ impl core::fmt::Debug for ChessMove {
 mod tests {
     use core::mem::size_of;
 
-    use crate::{ChessMove, MoveKind, Square};
+    use crate::{ChessMove, MoveKind, PieceKind, Square};
 
     #[test]
     fn move_is_two_bytes_and_round_trips() {
@@ -132,5 +143,15 @@ mod tests {
         assert_eq!(mv.from(), from);
         assert_eq!(mv.to(), to);
         assert_eq!(mv.kind(), MoveKind::DoublePawnPush);
+    }
+
+    #[test]
+    fn promotion_kind_maps_to_promoted_piece() {
+        assert_eq!(MoveKind::PromoteQueen.promotion_piece(), Some(PieceKind::Queen));
+        assert_eq!(
+            MoveKind::PromoteCaptureKnight.promotion_piece(),
+            Some(PieceKind::Knight)
+        );
+        assert_eq!(MoveKind::Capture.promotion_piece(), None);
     }
 }
