@@ -14,6 +14,7 @@ pub const DEFAULT_TT_ENTRIES: usize = 1 << 15;
 
 const INFINITY: i32 = 32_000;
 const MATE_TT_THRESHOLD: i32 = MATE_SCORE - 1_000;
+const MAX_SEARCH_PLY: usize = 256;
 
 /// Result of one deterministic reference search.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,6 +62,7 @@ pub struct Searcher {
     table: TranspositionTable,
     nodes: u64,
     tt_hits: u64,
+    path_keys: [u64; MAX_SEARCH_PLY],
 }
 
 impl Searcher {
@@ -70,19 +72,31 @@ impl Searcher {
             table: TranspositionTable::new(entries),
             nodes: 0,
             tt_hits: 0,
+            path_keys: [0; MAX_SEARCH_PLY],
         }
     }
 
     /// Search one exact nominal depth while restoring `position` exactly.
     #[must_use]
     pub fn search_depth(&mut self, position: &mut Position, depth: u8) -> SearchResult {
+        self.search_depth_with_history(position, &[], depth)
+    }
+
+    /// Search one exact depth with repetition keys for positions preceding the supplied root.
+    #[must_use]
+    pub fn search_depth_with_history(
+        &mut self,
+        position: &mut Position,
+        prior_history: &[u64],
+        depth: u8,
+    ) -> SearchResult {
         #[cfg(debug_assertions)]
         let root = position.clone();
 
         self.nodes = 1;
         self.tt_hits = 0;
         let result = self
-            .search_root(position, depth, &NeverStop)
+            .search_root(position, prior_history, depth, &NeverStop)
             .expect("NeverStop cannot interrupt search");
 
         #[cfg(debug_assertions)]
@@ -93,15 +107,27 @@ impl Searcher {
     /// Search depths `1..=max_depth`, retaining the transposition table between iterations.
     #[must_use]
     pub fn iterative_deepening(&mut self, position: &mut Position, max_depth: u8) -> SearchResult {
-        self.iterative_deepening_controlled(position, max_depth, &NeverStop)
-            .result
+        self.iterative_deepening_with_history(position, &[], max_depth)
+    }
+
+    /// Iteratively search with repetition keys for positions preceding the supplied root.
+    #[must_use]
+    pub fn iterative_deepening_with_history(
+        &mut self,
+        position: &mut Position,
+        prior_history: &[u64],
+        max_depth: u8,
+    ) -> SearchResult {
+        self.iterative_deepening_controlled_with_history(
+            position,
+            prior_history,
+            max_depth,
+            &NeverStop,
+        )
+        .result
     }
 
     /// Iteratively search while consulting `control` at recursive node boundaries.
-    ///
-    /// If stopped during an iteration, the returned principal result is from the last completed
-    /// depth. Partial work is still included in `nodes`/`tt_hits`, and all made moves are unmade
-    /// before this function returns.
     #[must_use]
     pub fn iterative_deepening_controlled<C: SearchControl>(
         &mut self,
@@ -109,9 +135,25 @@ impl Searcher {
         max_depth: u8,
         control: &C,
     ) -> SearchOutcome {
+        self.iterative_deepening_controlled_with_history(position, &[], max_depth, control)
+    }
+
+    /// Iteratively search under cooperative control and complete game-history context.
+    ///
+    /// `prior_history` contains repetition keys for positions before the current root; the current
+    /// root itself must not be included. Search-path keys live in a fixed array owned by `Searcher`,
+    /// so recursive repetition checks add no heap allocation to the hot path.
+    #[must_use]
+    pub fn iterative_deepening_controlled_with_history<C: SearchControl>(
+        &mut self,
+        position: &mut Position,
+        prior_history: &[u64],
+        max_depth: u8,
+        control: &C,
+    ) -> SearchOutcome {
         if max_depth == 0 {
             return SearchOutcome {
-                result: self.search_depth(position, 0),
+                result: self.search_depth_with_history(position, prior_history, 0),
                 stopped: false,
             };
         }
@@ -125,7 +167,7 @@ impl Searcher {
 
         for depth in 1..=max_depth {
             self.nodes = self.nodes.saturating_add(1);
-            match self.search_root(position, depth, control) {
+            match self.search_root(position, prior_history, depth, control) {
                 Some(mut result) => {
                     result.nodes = self.nodes;
                     result.tt_hits = self.tt_hits;
@@ -138,7 +180,7 @@ impl Searcher {
                             result.tt_hits = self.tt_hits;
                             result
                         }
-                        None => self.fallback_result(position),
+                        None => self.fallback_result(position, prior_history),
                     };
                     #[cfg(debug_assertions)]
                     debug_assert_eq!(*position, root);
@@ -162,9 +204,27 @@ impl Searcher {
     fn search_root<C: SearchControl>(
         &mut self,
         position: &mut Position,
+        prior_history: &[u64],
         depth: u8,
         control: &C,
     ) -> Option<SearchResult> {
+        // Control must precede even an exact root TT hit; otherwise a cached result can make an
+        // interruptible depth-only search ignore an already-issued UCI `stop`.
+        if control.should_stop(self.nodes) {
+            return None;
+        }
+
+        let repetition_key = position.repetition_key().raw();
+        if is_rule_draw(position, repetition_key, prior_history, &[]) {
+            let moves = generate_legal_moves_mut(position);
+            let (best_move, score) = if moves.is_empty() {
+                (None, terminal_score(position, 0))
+            } else {
+                (Some(moves[0]), 0)
+            };
+            return Some(self.result(best_move, score, depth));
+        }
+
         let key = position.zobrist_key().raw();
         let table_entry = self.probe(key);
         if let Some(entry) = table_entry
@@ -178,9 +238,6 @@ impl Searcher {
                 nodes: self.nodes,
                 tt_hits: self.tt_hits,
             });
-        }
-        if control.should_stop(self.nodes) {
-            return None;
         }
 
         let moves = generate_legal_moves_mut(position);
@@ -202,10 +259,20 @@ impl Searcher {
         let mut best_move = None;
         let mut best_score = -INFINITY;
         let mut alpha = -INFINITY;
+        self.path_keys[0] = repetition_key;
 
         for mv in OrderedMoves::new(&moves, hint) {
             let undo = position.make_move(mv);
-            let child = self.negamax(position, depth - 1, -INFINITY, -alpha, 1, control);
+            let child = self.negamax(
+                position,
+                prior_history,
+                depth - 1,
+                -INFINITY,
+                -alpha,
+                1,
+                1,
+                control,
+            );
             position.unmake_move(mv, undo);
             let score = -child?;
 
@@ -226,18 +293,40 @@ impl Searcher {
         Some(self.result(best_move, best_score, depth))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn negamax<C: SearchControl>(
         &mut self,
         position: &mut Position,
+        prior_history: &[u64],
         depth: u8,
         mut alpha: i32,
         beta: i32,
         ply: u16,
+        path_len: usize,
         control: &C,
     ) -> Option<i32> {
         self.nodes = self.nodes.saturating_add(1);
         if control.should_stop(self.nodes) {
             return None;
+        }
+
+        let repetition_key = position.repetition_key().raw();
+        if is_rule_draw(
+            position,
+            repetition_key,
+            prior_history,
+            &self.path_keys[..path_len],
+        ) {
+            // Checkmate ends the game before a draw claim can be made. We only need legal move
+            // generation in the draw path when the side to move is actually in check; otherwise a
+            // claimable draw can return immediately.
+            if position.is_in_check(position.side_to_move()) {
+                let moves = generate_legal_moves_mut(position);
+                if moves.is_empty() {
+                    return Some(terminal_score(position, ply));
+                }
+            }
+            return Some(0);
         }
 
         let key = position.zobrist_key().raw();
@@ -270,13 +359,25 @@ impl Searcher {
             return Some(score);
         }
 
+        debug_assert!(path_len < MAX_SEARCH_PLY);
+        self.path_keys[path_len] = repetition_key;
+
         let hint = table_entry.and_then(|entry| entry.best_move);
         let mut best = -INFINITY;
         let mut best_move = None;
 
         for mv in OrderedMoves::new(&moves, hint) {
             let undo = position.make_move(mv);
-            let child = self.negamax(position, depth - 1, -beta, -alpha, ply + 1, control);
+            let child = self.negamax(
+                position,
+                prior_history,
+                depth - 1,
+                -beta,
+                -alpha,
+                ply + 1,
+                path_len + 1,
+                control,
+            );
             position.unmake_move(mv, undo);
             let score = -child?;
 
@@ -302,10 +403,13 @@ impl Searcher {
         Some(best)
     }
 
-    fn fallback_result(&self, position: &mut Position) -> SearchResult {
+    fn fallback_result(&self, position: &mut Position, prior_history: &[u64]) -> SearchResult {
+        let repetition_key = position.repetition_key().raw();
         let moves = generate_legal_moves_mut(position);
         let (best_move, score) = if moves.is_empty() {
             (None, terminal_score(position, 0))
+        } else if is_rule_draw(position, repetition_key, prior_history, &[]) {
+            (Some(moves[0]), 0)
         } else {
             (Some(moves[0]), evaluate(position))
         };
@@ -361,6 +465,30 @@ pub fn search_mut(position: &mut Position, depth: u8) -> SearchResult {
 pub fn iterative_deepening(position: &Position, max_depth: u8) -> SearchResult {
     let mut working = position.clone();
     Searcher::default().iterative_deepening(&mut working, max_depth)
+}
+
+fn is_rule_draw(
+    position: &Position,
+    repetition_key: u64,
+    prior_history: &[u64],
+    search_path: &[u64],
+) -> bool {
+    position.halfmove_clock() >= 100
+        || position.is_insufficient_material()
+        || has_two_prior_occurrences(repetition_key, prior_history, search_path)
+}
+
+fn has_two_prior_occurrences(key: u64, prior_history: &[u64], search_path: &[u64]) -> bool {
+    let mut matches = 0_u8;
+    for &candidate in prior_history.iter().chain(search_path) {
+        if candidate == key {
+            matches += 1;
+            if matches >= 2 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn terminal_score(position: &Position, ply: u16) -> i32 {
@@ -526,8 +654,8 @@ mod tests {
     use chess_core::{Color, Position};
 
     use super::{
-        MATE_SCORE, SearchControl, Searcher, iterative_deepening, score_from_tt, score_to_tt,
-        search, search_mut,
+        MATE_SCORE, SearchControl, Searcher, has_two_prior_occurrences, iterative_deepening,
+        score_from_tt, score_to_tt, search, search_mut,
     };
 
     struct NodeStop(u64);
@@ -605,6 +733,64 @@ mod tests {
         assert!(outcome.result.nodes >= 25);
         assert!(outcome.result.best_move.is_some());
         assert_eq!(root, original);
+    }
+
+    #[test]
+    fn cached_root_result_cannot_bypass_stop_control() {
+        let mut root = Position::startpos();
+        let original = root.clone();
+        let mut searcher = Searcher::default();
+        let _warm = searcher.search_depth(&mut root, 2);
+        let outcome = searcher.iterative_deepening_controlled(&mut root, 2, &NodeStop(1));
+        assert!(outcome.stopped);
+        assert_eq!(outcome.result.depth, 0);
+        assert_eq!(root, original);
+    }
+
+    #[test]
+    fn threefold_history_is_draw_even_with_non_draw_tt_entry() {
+        let mut root =
+            Position::from_fen("7k/8/8/8/8/8/6Q1/K7 w - - 0 1").expect("valid FEN");
+        let original = root.clone();
+        let mut searcher = Searcher::default();
+        let warm = searcher.search_depth(&mut root, 1);
+        assert!(warm.score > 0);
+
+        let key = root.repetition_key().raw();
+        let drawn = searcher.search_depth_with_history(&mut root, &[key, key], 1);
+        assert_eq!(drawn.score, 0);
+        assert!(drawn.best_move.is_some());
+        assert_eq!(root, original);
+    }
+
+    #[test]
+    fn fifty_move_rule_is_draw_but_checkmate_takes_precedence() {
+        let queen_up =
+            Position::from_fen("7k/8/8/8/8/8/6Q1/K7 w - - 100 1").expect("valid FEN");
+        assert_eq!(search(&queen_up, 2).score, 0);
+
+        let checkmate =
+            Position::from_fen("7k/6Q1/5K2/8/8/8/8/8 b - - 100 1").expect("valid FEN");
+        let result = search(&checkmate, 2);
+        assert_eq!(result.best_move, None);
+        assert_eq!(result.score, -MATE_SCORE);
+    }
+
+    #[test]
+    fn insufficient_material_is_drawn_before_static_evaluation() {
+        let root =
+            Position::from_fen("7k/8/8/8/8/8/6B1/K7 w - - 0 1").expect("valid FEN");
+        let result = search(&root, 3);
+        assert_eq!(result.score, 0);
+        assert!(result.best_move.is_some());
+    }
+
+    #[test]
+    fn repetition_counter_combines_game_and_search_history() {
+        let key = 17_u64;
+        assert!(!has_two_prior_occurrences(key, &[key], &[]));
+        assert!(has_two_prior_occurrences(key, &[key], &[key]));
+        assert!(has_two_prior_occurrences(key, &[], &[key, key]));
     }
 
     #[test]
