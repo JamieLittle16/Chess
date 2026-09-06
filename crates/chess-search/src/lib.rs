@@ -4,10 +4,12 @@
 //! negamax/alpha-beta search with deterministic move ordering and a bounded direct-mapped
 //! transposition table. It is the control group for later tactical and strategic search research.
 
+mod move_picker;
 mod quiescence;
 
-use chess_core::{ChessMove, MoveList, Position, generate_legal_moves_mut};
+use chess_core::{ChessMove, Position, generate_legal_moves_mut};
 use chess_eval::evaluate;
+use move_picker::MovePicker;
 
 /// Scores at or above this range encode forced mate rather than static evaluation.
 pub const MATE_SCORE: i32 = 30_000;
@@ -263,7 +265,9 @@ impl Searcher {
         let mut alpha = -INFINITY;
         self.path_keys[0] = repetition_key;
 
-        for mv in OrderedMoves::new(&moves, hint) {
+        let mut moves = moves;
+        let mut picker = MovePicker::new(&mut moves, hint);
+        while let Some(mv) = picker.next(position) {
             let undo = position.make_move(mv);
             let child = self.negamax(
                 position,
@@ -366,7 +370,9 @@ impl Searcher {
         let mut best = -INFINITY;
         let mut best_move = None;
 
-        for mv in OrderedMoves::new(&moves, hint) {
+        let mut moves = moves;
+        let mut picker = MovePicker::new(&mut moves, hint);
+        while let Some(mv) = picker.next(position) {
             let undo = position.make_move(mv);
             let child = self.negamax(
                 position,
@@ -593,59 +599,6 @@ impl TranspositionTable {
 
     fn slot(&self, key: u64) -> Option<usize> {
         (!self.entries.is_empty()).then(|| key as usize % self.entries.len())
-    }
-}
-
-struct OrderedMoves<'a> {
-    moves: &'a [ChessMove],
-    hint: Option<ChessMove>,
-    phase: u8,
-    index: usize,
-}
-
-impl<'a> OrderedMoves<'a> {
-    fn new(moves: &'a MoveList, hint: Option<ChessMove>) -> Self {
-        Self {
-            moves: moves.as_slice(),
-            hint,
-            phase: 0,
-            index: 0,
-        }
-    }
-}
-
-impl Iterator for OrderedMoves<'_> {
-    type Item = ChessMove;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            match self.phase {
-                0 => {
-                    self.phase = 1;
-                    if let Some(hint) = self.hint
-                        && self.moves.contains(&hint)
-                    {
-                        return Some(hint);
-                    }
-                }
-                1 | 2 => {
-                    while self.index < self.moves.len() {
-                        let mv = self.moves[self.index];
-                        self.index += 1;
-                        if Some(mv) == self.hint {
-                            continue;
-                        }
-                        let tactical = mv.kind().is_capture() || mv.kind().is_promotion();
-                        if tactical == (self.phase == 1) {
-                            return Some(mv);
-                        }
-                    }
-                    self.phase += 1;
-                    self.index = 0;
-                }
-                _ => return None,
-            }
-        }
     }
 }
 

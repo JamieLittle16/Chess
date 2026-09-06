@@ -116,7 +116,9 @@ impl Searcher {
         }
         self.path_keys[path_len] = repetition_key;
 
-        for mv in OrderedMoves::new(&moves, None) {
+        let mut moves = moves;
+        let mut picker = MovePicker::new(&mut moves, None);
+        while let Some(mv) = picker.next(position) {
             let undo = position.make_move(mv);
             self.nodes = self.nodes.saturating_add(1);
             let child = self.quiescence_inner(
