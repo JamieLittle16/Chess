@@ -7,7 +7,7 @@ The roadmap is ordered by dependency and evidence, not by visual excitement.
 - **M0 complete** — core representation, toolchain and CI are green.
 - **M1 complete** — legal chess and reference perft are green.
 - **M2 complete** — reversible state and deterministic position identity are green.
-- **M3 in progress** — the classical reference engine, UCI path and deterministic search benchmark are operational; timed match qualification remains.
+- **M3 in progress** — the classical reference engine, deterministic benchmark, cooperative search limits and synchronous UCI path are operational; asynchronous stop/clock allocation and reproducible match qualification remain.
 
 ## M0 — Core foundations — complete
 
@@ -52,13 +52,15 @@ Implemented:
 - iterative deepening;
 - bounded transposition table;
 - persistent engine orchestration;
-- initial synchronous UCI target with FEN/startpos and fixed-depth search;
+- generic cooperative cancellation in search;
+- depth, node and movetime limits owned by engine orchestration;
+- synchronous UCI target with FEN/startpos and `go depth` / `go nodes` / `go movetime` constraints;
 - versioned deterministic reference-search benchmark/signature in CI.
 
 Remaining before M3 exit:
 
-- interruptible search-limit/time-management boundary;
-- fuller UCI `go` limits;
+- asynchronous UCI worker boundary so `stop` can interrupt a live search;
+- full clock allocation (`wtime`, `btime`, increments, moves-to-go) and `go infinite` semantics;
 - automated match harness integration;
 - first reproducible baseline Elo under a documented protocol.
 
