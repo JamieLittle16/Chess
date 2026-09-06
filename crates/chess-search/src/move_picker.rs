@@ -1,38 +1,45 @@
 use chess_core::{ChessMove, MoveKind, MoveList, Position};
 
+use super::see::static_exchange_eval;
+
 const ORDER_VALUES: [i32; 6] = [100, 320, 330, 500, 900, 20_000];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Stage {
     Tt,
-    Tactical,
+    GoodTactical,
     Quiet,
+    BadTactical,
     Done,
 }
 
 /// Allocation-free staged selector over one owned legal-move buffer.
 ///
 /// The picker mutates only the ordering of the freshly generated `MoveList`. It never allocates or
-/// clones a board. The TT move is emitted first, tactical moves are selected lazily by a cheap
-/// capture/promotion score, and untouched quiets follow in generator order. Lazy selection means a
-/// beta cutoff avoids scoring/sorting moves that are never searched.
+/// clones a board. The TT move is emitted first. Tactical moves are selected lazily by a cheap
+/// capture/promotion score; SEE is evaluated only for the candidate that reaches the front. Losing
+/// exchanges are partitioned to the end of the same fixed buffer, so quiet moves are considered
+/// before them without a second list or global sort.
 ///
-/// This is deliberately a substrate rather than a final ordering policy. SEE, killers, history and
-/// counter-moves can become additional stages without changing search ownership or move generation.
+/// Killers, history and counter-moves can become additional quiet stages without changing search
+/// ownership or move generation.
 pub(super) struct MovePicker<'a> {
     moves: &'a mut [ChessMove],
     tt_move: Option<ChessMove>,
     stage: Stage,
     cursor: usize,
+    bad_start: usize,
 }
 
 impl<'a> MovePicker<'a> {
     pub(super) fn new(moves: &'a mut MoveList, tt_move: Option<ChessMove>) -> Self {
+        let len = moves.len();
         Self {
             moves: moves.as_mut_slice(),
             tt_move,
             stage: Stage::Tt,
             cursor: 0,
+            bad_start: len,
         }
     }
 
@@ -41,9 +48,9 @@ impl<'a> MovePicker<'a> {
         loop {
             match self.stage {
                 Stage::Tt => {
-                    self.stage = Stage::Tactical;
+                    self.stage = Stage::GoodTactical;
                     if let Some(tt_move) = self.tt_move
-                        && let Some(index) = self.moves[self.cursor..]
+                        && let Some(index) = self.moves[self.cursor..self.bad_start]
                             .iter()
                             .position(|&mv| mv == tt_move)
                             .map(|offset| self.cursor + offset)
@@ -54,33 +61,33 @@ impl<'a> MovePicker<'a> {
                         return Some(mv);
                     }
                 }
-                Stage::Tactical => {
-                    let mut best_index = None;
-                    let mut best_score = i32::MIN;
-                    for index in self.cursor..self.moves.len() {
-                        let mv = self.moves[index];
-                        if !is_tactical(mv) {
-                            continue;
-                        }
-                        let score = tactical_score(position, mv);
-                        if score > best_score {
-                            best_score = score;
-                            best_index = Some(index);
-                        }
+                Stage::GoodTactical => {
+                    let Some(index) = self.best_tactical_index(position) else {
+                        self.stage = Stage::Quiet;
+                        continue;
+                    };
+                    self.moves.swap(self.cursor, index);
+                    let mv = self.moves[self.cursor];
+                    if static_exchange_eval(position, mv) >= 0 {
+                        self.cursor += 1;
+                        return Some(mv);
                     }
 
-                    if let Some(index) = best_index {
-                        self.moves.swap(self.cursor, index);
+                    self.bad_start -= 1;
+                    self.moves.swap(self.cursor, self.bad_start);
+                }
+                Stage::Quiet => {
+                    if self.cursor < self.bad_start {
                         let mv = self.moves[self.cursor];
                         self.cursor += 1;
                         return Some(mv);
                     }
-                    self.stage = Stage::Quiet;
+                    self.stage = Stage::BadTactical;
                 }
-                Stage::Quiet => {
-                    if self.cursor < self.moves.len() {
-                        let mv = self.moves[self.cursor];
-                        self.cursor += 1;
+                Stage::BadTactical => {
+                    if self.bad_start < self.moves.len() {
+                        let mv = self.moves[self.bad_start];
+                        self.bad_start += 1;
                         return Some(mv);
                     }
                     self.stage = Stage::Done;
@@ -88,6 +95,23 @@ impl<'a> MovePicker<'a> {
                 Stage::Done => return None,
             }
         }
+    }
+
+    fn best_tactical_index(&self, position: &Position) -> Option<usize> {
+        let mut best_index = None;
+        let mut best_score = i32::MIN;
+        for index in self.cursor..self.bad_start {
+            let mv = self.moves[index];
+            if !is_tactical(mv) {
+                continue;
+            }
+            let score = tactical_score(position, mv);
+            if score > best_score {
+                best_score = score;
+                best_index = Some(index);
+            }
+        }
+        best_index
     }
 }
 
@@ -125,7 +149,7 @@ fn tactical_score(position: &Position, mv: ChessMove) -> i32 {
 mod tests {
     use chess_core::{Position, Square};
 
-    use super::MovePicker;
+    use super::{MovePicker, is_tactical};
 
     #[test]
     fn tt_move_is_returned_first_without_global_sorting() {
@@ -138,7 +162,7 @@ mod tests {
     }
 
     #[test]
-    fn higher_value_capture_is_selected_before_lower_value_capture() {
+    fn higher_value_winning_capture_is_selected_first() {
         let position = Position::from_fen("7k/8/8/8/3q1r2/8/3Q4/K7 w - - 0 1").expect("valid FEN");
         let d2 = Square::from_file_rank(3, 1).expect("d2");
         let d4 = Square::from_file_rank(3, 3).expect("d4");
@@ -152,6 +176,25 @@ mod tests {
         let mut picker = MovePicker::new(&mut moves, None);
 
         assert_eq!(picker.next(&position), Some(queen_capture));
+    }
+
+    #[test]
+    fn losing_capture_is_deferred_behind_quiet_moves() {
+        let position = Position::from_fen("3r3k/3p4/8/8/8/8/8/K2Q4 w - - 0 1").expect("valid FEN");
+        let d1 = Square::from_file_rank(3, 0).expect("d1");
+        let d7 = Square::from_file_rank(3, 6).expect("d7");
+        let mut moves = position.legal_moves();
+        let poisoned = moves
+            .as_slice()
+            .iter()
+            .copied()
+            .find(|mv| mv.from() == d1 && mv.to() == d7)
+            .expect("Qxd7 is legal");
+        let mut picker = MovePicker::new(&mut moves, None);
+
+        let first = picker.next(&position).expect("position has legal moves");
+        assert_ne!(first, poisoned);
+        assert!(!is_tactical(first));
     }
 
     #[test]
