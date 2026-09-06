@@ -53,8 +53,31 @@ pub fn generate_legal_moves_mut(position: &mut Position) -> MoveList {
     }
 
     let pseudo = generate_pseudo_legal_moves(position);
+    filter_legal_moves(position, &pseudo, us)
+}
+
+/// Generate only legal captures, en-passant moves and promotions.
+///
+/// This is the qsearch-facing hot path. It deliberately avoids constructing ordinary quiet pawn
+/// pushes, quiet piece moves and castles, and therefore avoids making/unmaking those moves solely to
+/// reject them after legality filtering. Quiet promotions remain tactical and are included.
+///
+/// Callers that need every legal check evasion must use [`generate_legal_moves_mut`]; this function
+/// intentionally returns only the tactical subset even if the side to move is in check.
+#[must_use]
+pub fn generate_legal_tactical_moves_mut(position: &mut Position) -> MoveList {
+    let us = position.side_to_move();
+    if position.king_square(us).is_none() {
+        return MoveList::new();
+    }
+
+    let pseudo = generate_pseudo_legal_tactical_moves(position);
+    filter_legal_moves(position, &pseudo, us)
+}
+
+fn filter_legal_moves(position: &mut Position, pseudo: &MoveList, us: Color) -> MoveList {
     let mut legal = MoveList::new();
-    for &mv in &pseudo {
+    for &mv in pseudo {
         let undo = position.make_move(mv);
         let is_legal = position
             .king_square(us)
@@ -78,6 +101,20 @@ fn generate_pseudo_legal_moves(position: &Position) -> MoveList {
     append_piece_moves(position, us, PieceKind::Queen, &mut moves);
     append_piece_moves(position, us, PieceKind::King, &mut moves);
     append_castles(position, us, &mut moves);
+
+    moves
+}
+
+fn generate_pseudo_legal_tactical_moves(position: &Position) -> MoveList {
+    let mut moves = MoveList::new();
+    let us = position.side_to_move();
+
+    append_pawn_tactical_moves(position, us, &mut moves);
+    append_piece_captures(position, us, PieceKind::Knight, &mut moves);
+    append_piece_captures(position, us, PieceKind::Bishop, &mut moves);
+    append_piece_captures(position, us, PieceKind::Rook, &mut moves);
+    append_piece_captures(position, us, PieceKind::Queen, &mut moves);
+    append_piece_captures(position, us, PieceKind::King, &mut moves);
 
     moves
 }
@@ -113,22 +150,57 @@ fn append_pawn_moves(position: &Position, us: Color, moves: &mut MoveList) {
             }
         }
 
-        for to in pawn_attacks(us, from) {
-            if capturable.contains(to) {
-                if to.rank() == promotion_rank {
-                    append_promotions(moves, from, to, true);
-                } else {
-                    moves.push(ChessMove::new(from, to, MoveKind::Capture));
-                }
-                continue;
-            }
+        append_pawn_captures(position, us, from, promotion_rank, capturable, moves);
+    }
+}
 
-            if position.en_passant() == Some(to)
-                && !occupied.contains(to)
-                && en_passant_has_capturable_pawn(position, us, to)
-            {
-                moves.push(ChessMove::new(from, to, MoveKind::EnPassant));
+fn append_pawn_tactical_moves(position: &Position, us: Color, moves: &mut MoveList) {
+    let them = us.opposite();
+    let occupied = position.occupied();
+    let enemy_king = position.pieces(them, PieceKind::King);
+    let capturable = position.occupancy(them) & !enemy_king;
+    let promotion_rank = match us {
+        Color::White => 7,
+        Color::Black => 0,
+    };
+
+    for from in position.pieces(us, PieceKind::Pawn) {
+        // A non-capturing promotion changes material immediately and therefore belongs in qsearch.
+        if let Some(one) = pawn_forward(from, us, 1)
+            && one.rank() == promotion_rank
+            && !occupied.contains(one)
+        {
+            append_promotions(moves, from, one, false);
+        }
+
+        append_pawn_captures(position, us, from, promotion_rank, capturable, moves);
+    }
+}
+
+fn append_pawn_captures(
+    position: &Position,
+    us: Color,
+    from: Square,
+    promotion_rank: u8,
+    capturable: Bitboard,
+    moves: &mut MoveList,
+) {
+    let occupied = position.occupied();
+    for to in pawn_attacks(us, from) {
+        if capturable.contains(to) {
+            if to.rank() == promotion_rank {
+                append_promotions(moves, from, to, true);
+            } else {
+                moves.push(ChessMove::new(from, to, MoveKind::Capture));
             }
+            continue;
+        }
+
+        if position.en_passant() == Some(to)
+            && !occupied.contains(to)
+            && en_passant_has_capturable_pawn(position, us, to)
+        {
+            moves.push(ChessMove::new(from, to, MoveKind::EnPassant));
         }
     }
 }
@@ -152,16 +224,34 @@ fn append_piece_moves(position: &Position, us: Color, kind: PieceKind, moves: &m
     let enemy_king = position.pieces(them, PieceKind::King);
 
     for from in position.pieces(us, kind) {
-        let attacks = match kind {
-            PieceKind::Knight => knight_attacks(from),
-            PieceKind::Bishop => bishop_attacks(from, occupied),
-            PieceKind::Rook => rook_attacks(from, occupied),
-            PieceKind::Queen => queen_attacks(from, occupied),
-            PieceKind::King => king_attacks(from),
-            PieceKind::Pawn => unreachable!("pawns are generated separately"),
-        };
+        let attacks = attacks_for_piece(kind, from, occupied);
         let targets = attacks & !friendly & !enemy_king;
         append_targets(moves, from, targets, enemy);
+    }
+}
+
+fn append_piece_captures(position: &Position, us: Color, kind: PieceKind, moves: &mut MoveList) {
+    let them = us.opposite();
+    let occupied = position.occupied();
+    let enemy_king = position.pieces(them, PieceKind::King);
+    let capturable = position.occupancy(them) & !enemy_king;
+
+    for from in position.pieces(us, kind) {
+        let targets = attacks_for_piece(kind, from, occupied) & capturable;
+        for to in targets {
+            moves.push(ChessMove::new(from, to, MoveKind::Capture));
+        }
+    }
+}
+
+fn attacks_for_piece(kind: PieceKind, from: Square, occupied: Bitboard) -> Bitboard {
+    match kind {
+        PieceKind::Knight => knight_attacks(from),
+        PieceKind::Bishop => bishop_attacks(from, occupied),
+        PieceKind::Rook => rook_attacks(from, occupied),
+        PieceKind::Queen => queen_attacks(from, occupied),
+        PieceKind::King => king_attacks(from),
+        PieceKind::Pawn => unreachable!("pawns are generated separately"),
     }
 }
 
@@ -271,7 +361,9 @@ fn square(file: u8, rank: u8) -> Square {
 
 #[cfg(test)]
 mod tests {
-    use crate::{MoveKind, Position, generate_legal_moves_mut};
+    use crate::{
+        MoveKind, Position, generate_legal_moves_mut, generate_legal_tactical_moves_mut,
+    };
 
     #[test]
     fn start_position_has_twenty_legal_moves() {
@@ -288,6 +380,39 @@ mod tests {
         let moves = generate_legal_moves_mut(&mut position);
         assert_eq!(moves.len(), 48);
         assert_eq!(position, before);
+    }
+
+    #[test]
+    fn tactical_generator_matches_full_generator_filtered_to_tactical_moves() {
+        let fens = [
+            crate::STARTPOS_FEN,
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "8/8/8/3pP3/8/8/8/K6k w - d6 0 1",
+            "7k/P7/8/8/8/8/8/K7 w - - 0 1",
+        ];
+
+        for fen in fens {
+            let mut full_position = Position::from_fen(fen).expect("valid comparison FEN");
+            let mut tactical_position = full_position.clone();
+            let mut expected: Vec<_> = generate_legal_moves_mut(&mut full_position)
+                .as_slice()
+                .iter()
+                .copied()
+                .filter(|mv| mv.kind().is_capture() || mv.kind().is_promotion())
+                .collect();
+            let mut actual = generate_legal_tactical_moves_mut(&mut tactical_position)
+                .as_slice()
+                .to_vec();
+            expected.sort_unstable_by_key(|mv| mv.raw());
+            actual.sort_unstable_by_key(|mv| mv.raw());
+
+            assert_eq!(actual, expected, "tactical mismatch for {fen}");
+            assert_eq!(full_position, Position::from_fen(fen).expect("valid FEN"));
+            assert_eq!(
+                tactical_position,
+                Position::from_fen(fen).expect("valid FEN")
+            );
+        }
     }
 
     #[test]
