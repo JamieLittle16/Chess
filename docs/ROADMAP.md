@@ -2,7 +2,14 @@
 
 The roadmap is ordered by dependency and evidence, not by visual excitement.
 
-## M0 — Core foundations (current)
+## Current status
+
+- **M0 complete** — core representation, toolchain and CI are green.
+- **M1 complete** — legal chess and reference perft are green.
+- **M2 complete** — reversible state and deterministic position identity are green.
+- **M3 in progress** — establishing the permanent classical reference engine.
+
+## M0 — Core foundations — complete
 
 - workspace/toolchain/CI;
 - compact square, colour, piece and move domain types;
@@ -11,32 +18,33 @@ The roadmap is ordered by dependency and evidence, not by visual excitement.
 - FEN parser;
 - architecture, development and benchmark contracts.
 
-Exit condition: CI clean and the representation invariants are tested.
+Exit condition: CI clean and the representation invariants are tested. **Met.**
 
-## M1 — Legal chess
+## M1 — Legal chess — complete
 
 - leaper and sliding attacks;
 - pseudo-legal generation;
-- check/pin handling;
+- check/pin handling through legal filtering;
 - fully legal move generation;
 - castling, en-passant and promotions;
 - published perft suite.
 
-Exit condition: all selected reference perft positions agree through meaningful depths.
+Exit condition: all selected reference perft positions agree through meaningful depths. **Met.**
 
-## M2 — Reversible state and identity
+## M2 — Reversible state and identity — complete
 
 - compact make/unmake stack;
-- `PositionDelta`/undo state;
-- incremental occupancy/attack-derived state where justified;
-- deterministic Zobrist hashing;
-- random-play round-trip/property tests.
+- fixed-size undo state;
+- incremental occupancy and controlled derived state;
+- deterministic incremental Zobrist hashing;
+- long-play round-trip and reconstruction tests;
+- independent immutable transition oracle retained for differential testing.
 
-Exit condition: long random legal sequences unmake bit-exactly and hashes reproduce.
+Exit condition: long legal sequences unmake bit-exactly and hashes reproduce. **Met.**
 
-## M3 — Classical reference engine
+## M3 — Classical reference engine — in progress
 
-- material/positional baseline evaluator;
+- transparent material baseline evaluator;
 - negamax + alpha-beta;
 - iterative deepening;
 - basic transposition table;
