@@ -15,5 +15,5 @@
   "ponder": false,
   "tablebases": false,
   "evaluation_adjudication": false,
-  "notes": "Short-control equal-wall-clock screening of PVS/null-window probes against the accepted staged MovePicker baseline at commit 48bfebedb9aee3017ae8b3c5e56eb93352bd874f. Aspiration windows and pruning are excluded."
+  "notes": "Accepted short-control equal-wall-clock screening of PVS/null-window probes against staged MovePicker baseline 48bfebedb9aee3017ae8b3c5e56eb93352bd874f. Result: 19W/74D/7L, +41.89 +/- 30.29 Elo, LOS 99.70%. Aspiration windows and pruning excluded."
 }
