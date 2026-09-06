@@ -70,7 +70,7 @@ jobs:
         run: |
           set -euo pipefail
           "$FASTCHESS_BIN" -version
-          sha256sum "$CANDIDATE_BIN" "$REFERENCE_BIN" "$FASTCHESS_BIN" match/openings/m3-uho-lichess-100-v1.epd
+          sha256sum "$CANDIDATE_BIN" "$REFERENCE_BIN" "$FASTCHESS_BIN" match/openings/m3-uho-lichess-100-v1.epd crates/chess-search/src/lib.rs
       - name: Run paired equal-time screening
         run: |
           set -euo pipefail
@@ -86,6 +86,12 @@ jobs:
             --fastchess "$FASTCHESS_BIN" \
             --openings match/openings/m3-uho-lichess-100-v1.epd \
             --output-dir screening-results
+      - name: Retain exact patched source
+        if: always()
+        run: |
+          mkdir -p screening-results/exact-source/crates/chess-search/src
+          cp crates/chess-search/src/lib.rs screening-results/exact-source/crates/chess-search/src/lib.rs
+          sha256sum crates/chess-search/src/lib.rs > screening-results/exact-source/chess-search-lib.sha256
       - name: Upload retained evidence
         if: always()
         uses: actions/upload-artifact@v4
