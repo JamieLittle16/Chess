@@ -1,11 +1,14 @@
 //! Transparent classical evaluation used as the permanent reference baseline.
 //!
-//! M4 E1 extends the original material-only control with a deliberately small tapered piece-square
-//! model. The tables are generated at compile time from transparent geometric rules rather than
-//! copied from another engine. Runtime evaluation remains allocation-free: iterate the existing
-//! piece bitboards, perform table lookups, and interpolate one middle-game/end-game score pair.
+//! M4 E2 extends tapered material/PSQT with cheap geometric mobility. Runtime evaluation remains
+//! allocation-free: iterate the existing piece bitboards, perform table lookups/attack queries, and
+//! interpolate one middle-game/end-game score pair. Mobility deliberately avoids legal move
+//! generation and make/unmake.
 
-use chess_core::{Color, PieceKind, Position};
+use chess_core::{
+    Bitboard, Color, PieceKind, Position, Square, bishop_attacks, knight_attacks, queen_attacks,
+    rook_attacks,
+};
 
 /// Conventional centipawn-like material values retained from the material-only reference.
 pub const PIECE_VALUES: [i32; 6] = [100, 320, 330, 500, 900, 0];
@@ -14,6 +17,13 @@ const PHASE_WEIGHTS: [i32; 6] = [0, 1, 1, 2, 4, 0];
 const MAX_PHASE: i32 = 24;
 const MG_PSQT: [[i16; 64]; 6] = generate_psqt(false);
 const EG_PSQT: [[i16; 64]; 6] = generate_psqt(true);
+
+// E2 v1 intentionally starts with a tiny linear mobility model. Knights/bishops value activity in
+// both phases; rook/queen mobility matters more as the board opens in the endgame. Pawns and kings
+// are excluded: pawn structure and king safety are separate experiments and pseudo-legal king
+// mobility would reward unsafe squares.
+const MG_MOBILITY_PER_SQUARE: [i32; 6] = [0, 4, 4, 2, 1, 0];
+const EG_MOBILITY_PER_SQUARE: [i32; 6] = [0, 4, 5, 4, 2, 0];
 
 /// Return the material owned by one side in centipawn-like units.
 #[must_use]
@@ -27,16 +37,19 @@ pub fn material(position: &Position, color: Color) -> i32 {
 /// Evaluate a position from the side-to-move perspective.
 ///
 /// Positive values favour the player to move; negative values favour their opponent. The tapered
-/// score interpolates between middle-game and end-game piece-square preferences using remaining
-/// non-pawn material. Black reuses the same tables by vertically mirroring each square.
+/// score interpolates between middle-game and end-game positional preferences using remaining
+/// non-pawn material. Black reuses the same PSQT tables by vertically mirroring each square.
 #[must_use]
 pub fn evaluate(position: &Position) -> i32 {
     let mut middle_game = 0_i32;
     let mut end_game = 0_i32;
     let mut phase = 0_i32;
+    let occupied = position.occupied();
 
     for color in Color::ALL {
         let sign = if color == Color::White { 1 } else { -1 };
+        let own_occupied = color_occupied(position, color);
+
         for kind in PieceKind::ALL {
             let mut pieces = position.pieces(color, kind);
             let count = pieces.count() as i32;
@@ -49,6 +62,10 @@ pub fn evaluate(position: &Position) -> i32 {
                 let relative_index = relative_square_index(color, square.file(), square.rank());
                 middle_game += sign * i32::from(MG_PSQT[kind.index()][relative_index]);
                 end_game += sign * i32::from(EG_PSQT[kind.index()][relative_index]);
+
+                let mobility = mobility_count(kind, square, occupied, own_occupied);
+                middle_game += sign * mobility * MG_MOBILITY_PER_SQUARE[kind.index()];
+                end_game += sign * mobility * EG_MOBILITY_PER_SQUARE[kind.index()];
             }
         }
     }
@@ -59,6 +76,32 @@ pub fn evaluate(position: &Position) -> i32 {
         Color::White => white_minus_black,
         Color::Black => -white_minus_black,
     }
+}
+
+#[inline]
+fn color_occupied(position: &Position, color: Color) -> Bitboard {
+    let mut occupied = Bitboard::EMPTY;
+    for kind in PieceKind::ALL {
+        occupied = occupied | position.pieces(color, kind);
+    }
+    occupied
+}
+
+#[inline]
+fn mobility_count(
+    kind: PieceKind,
+    square: Square,
+    occupied: Bitboard,
+    own_occupied: Bitboard,
+) -> i32 {
+    let attacks = match kind {
+        PieceKind::Knight => knight_attacks(square),
+        PieceKind::Bishop => bishop_attacks(square, occupied),
+        PieceKind::Rook => rook_attacks(square, occupied),
+        PieceKind::Queen => queen_attacks(square, occupied),
+        PieceKind::Pawn | PieceKind::King => return 0,
+    };
+    (attacks & !own_occupied).count() as i32
 }
 
 #[inline]
@@ -181,9 +224,9 @@ const fn abs_i32(value: i32) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use chess_core::Position;
+    use chess_core::{Color, PieceKind, Position, Square};
 
-    use super::evaluate;
+    use super::{color_occupied, evaluate, mobility_count};
 
     #[test]
     fn starting_position_is_positionally_equal() {
@@ -217,5 +260,36 @@ mod tests {
         let central = Position::from_fen("7k/8/8/8/3K4/8/8/8 w - - 0 1").expect("valid FEN");
         let corner = Position::from_fen("7k/8/8/8/8/8/8/K7 w - - 0 1").expect("valid FEN");
         assert!(evaluate(&central) > evaluate(&corner));
+    }
+
+    #[test]
+    fn bishop_mobility_excludes_own_blockers() {
+        let position = Position::from_fen("7k/8/8/2P1P3/3B4/2P1P3/8/7K w - - 0 1")
+            .expect("valid FEN");
+        let d4 = Square::from_file_rank(3, 3).expect("d4");
+        assert_eq!(
+            mobility_count(
+                PieceKind::Bishop,
+                d4,
+                position.occupied(),
+                color_occupied(&position, Color::White),
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn open_bishop_receives_full_geometric_mobility() {
+        let position = Position::from_fen("7k/8/8/8/3B4/8/8/7K w - - 0 1").expect("valid FEN");
+        let d4 = Square::from_file_rank(3, 3).expect("d4");
+        assert_eq!(
+            mobility_count(
+                PieceKind::Bishop,
+                d4,
+                position.occupied(),
+                color_occupied(&position, Color::White),
+            ),
+            13
+        );
     }
 }
