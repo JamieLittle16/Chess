@@ -1,0 +1,127 @@
+name: M4 history integration
+
+on:
+  push:
+    branches:
+      - m4/history-killers-v1
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    if: github.event.head_commit.message == 'ci: trigger history integration'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: m4/history-killers-v1
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt
+      - name: Integrate searcher-owned quiet heuristics
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path('crates/chess-search/src/lib.rs')
+          text = path.read_text()
+
+          replacements = [
+              (
+                  'use chess_core::{ChessMove, Position, generate_legal_moves_mut};\nuse chess_eval::evaluate;\nuse move_picker::MovePicker;',
+                  'use chess_core::{ChessMove, Color, Position, generate_legal_moves_mut};\nuse chess_eval::evaluate;\nuse move_picker::{HistoryTable, MovePicker, is_quiet};',
+              ),
+              (
+                  '    path_keys: [u64; MAX_SEARCH_PLY],\n}',
+                  '    path_keys: [u64; MAX_SEARCH_PLY],\n    killers: [[Option<ChessMove>; 2]; MAX_SEARCH_PLY],\n    history: HistoryTable,\n}',
+              ),
+              (
+                  '            path_keys: [0; MAX_SEARCH_PLY],\n        }',
+                  '            path_keys: [0; MAX_SEARCH_PLY],\n            killers: [[None; 2]; MAX_SEARCH_PLY],\n            history: HistoryTable::new(),\n        }',
+              ),
+          ]
+          for old, new in replacements:
+              if old not in text:
+                  raise SystemExit(f'missing expected integration anchor: {old!r}')
+              text = text.replace(old, new, 1)
+
+          picker_anchor = '        let mut picker = MovePicker::new(&mut moves, hint);'
+          if text.count(picker_anchor) != 2:
+              raise SystemExit(f'expected exactly two normal-search picker anchors, got {text.count(picker_anchor)}')
+          text = text.replace(
+              picker_anchor,
+              '        let killers = self.killers[0];\n        let mut picker = MovePicker::with_killers(&mut moves, hint, killers);',
+              1,
+          )
+          text = text.replace(
+              picker_anchor,
+              '        let killers = self\n            .killers\n            .get(usize::from(ply))\n            .copied()\n            .unwrap_or([None, None]);\n        let mut picker = MovePicker::with_killers(&mut moves, hint, killers);',
+              1,
+          )
+
+          next_anchor = '        while let Some(mv) = picker.next(position) {'
+          if text.count(next_anchor) != 2:
+              raise SystemExit(f'expected exactly two normal-search picker loops, got {text.count(next_anchor)}')
+          text = text.replace(
+              next_anchor,
+              '        while let Some(mv) = picker.next_with_history(position, &self.history) {',
+              2,
+          )
+
+          cutoff_anchor = '''            if alpha >= beta {
+              break;
+          }'''
+          if text.count(cutoff_anchor) != 1:
+              raise SystemExit(f'expected one beta-cutoff anchor, got {text.count(cutoff_anchor)}')
+          text = text.replace(
+              cutoff_anchor,
+              '''            if alpha >= beta {
+              if is_quiet(mv) {
+                  self.record_quiet_cutoff(position.side_to_move(), mv, depth, ply);
+              }
+              break;
+          }''',
+              1,
+          )
+
+          method_anchor = '    fn fallback_result(&self, position: &mut Position, prior_history: &[u64]) -> SearchResult {'
+          if method_anchor not in text:
+              raise SystemExit('missing fallback_result anchor')
+          text = text.replace(
+              method_anchor,
+              '''    fn record_quiet_cutoff(
+        &mut self,
+        side: Color,
+        mv: ChessMove,
+        depth: u8,
+        ply: u16,
+    ) {
+        self.history.record_cutoff(side, mv, depth);
+        if let Some(killers) = self.killers.get_mut(usize::from(ply))
+            && killers[0] != Some(mv)
+        {
+            killers[1] = killers[0];
+            killers[0] = Some(mv);
+        }
+    }
+
+    fn fallback_result(&self, position: &mut Position, prior_history: &[u64]) -> SearchResult {''',
+              1,
+          )
+
+          path.write_text(text)
+      - name: Format
+        run: cargo fmt --all
+      - name: Commit integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates/chess-search/src/lib.rs crates/chess-search/src/move_picker.rs
+          git diff --cached --check
+          git commit -m 'search: integrate killer and history quiet ordering'
+          git push origin HEAD:m4/history-killers-v1
