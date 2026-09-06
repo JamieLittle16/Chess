@@ -1,0 +1,42 @@
+name: Apply TT capacity v1
+
+on:
+  push:
+    branches:
+      - m4/tt-capacity-v1
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: m4/tt-capacity-v1
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - name: Apply refactor
+        run: |
+          set -euo pipefail
+          python3 tools/apply_tt_capacity_v1.py
+          rm tools/apply_tt_capacity_v1.py .github/workflows/tt-capacity-v1-apply.yml
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --all-features
+          cargo run --release --quiet -p chess-bench
+      - name: Commit final branch state
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'm4: separate production and reference TT capacity'
+          git push origin HEAD:m4/tt-capacity-v1
