@@ -111,15 +111,14 @@ mod tests {
         // advantage instead.
         let root =
             Position::from_fen("3r3k/3p4/8/8/8/8/8/K2Q4 w - - 0 1").expect("valid FEN");
+        let d1 = Square::from_file_rank(3, 0).expect("d1");
+        let d7 = Square::from_file_rank(3, 6).expect("d7");
         let poisoned = root
             .legal_moves()
             .as_slice()
             .iter()
             .copied()
-            .find(|mv| {
-                mv.from() == Square::from_algebraic("d1").expect("square")
-                    && mv.to() == Square::from_algebraic("d7").expect("square")
-            })
+            .find(|mv| mv.from() == d1 && mv.to() == d7)
             .expect("Qxd7 is legal");
 
         let result = search(&root, 1);
@@ -154,6 +153,7 @@ mod tests {
             .quiescence(&mut position, &[], -INFINITY, INFINITY, 0, 0, &NeverStop)
             .expect("uncontrolled quiescence completes");
         assert!(score > -INFINITY);
+        assert!(searcher.nodes > 1, "at least one legal evasion was searched");
         assert_eq!(position, original);
     }
 }
