@@ -1,7 +1,7 @@
 use crate::{
-    bishop_attacks, is_square_attacked, king_attacks, knight_attacks, pawn_attacks, queen_attacks,
-    rook_attacks, Bitboard, CastlingRights, ChessMove, Color, MoveKind, MoveList, Piece, PieceKind,
-    Position, Square,
+    Bitboard, CastlingRights, ChessMove, Color, MoveKind, MoveList, Piece, PieceKind, Position,
+    Square, bishop_attacks, is_square_attacked, king_attacks, knight_attacks, pawn_attacks,
+    queen_attacks, rook_attacks,
 };
 
 const QUIET_PROMOTIONS: [MoveKind; 4] = [
@@ -198,11 +198,7 @@ fn append_castles(position: &Position, us: Color, moves: &mut MoveList) {
             && !position.occupied().contains(destination)
             && king_step_is_safe(position, king_from, transit, them)
         {
-            moves.push(ChessMove::new(
-                king_from,
-                destination,
-                MoveKind::KingCastle,
-            ));
+            moves.push(ChessMove::new(king_from, destination, MoveKind::KingCastle));
         }
     }
 
@@ -275,8 +271,8 @@ mod tests {
 
     #[test]
     fn castling_moves_are_generated_when_paths_are_safe() {
-        let position = Position::from_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1")
-            .expect("valid position");
+        let position =
+            Position::from_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1").expect("valid position");
         let castles = position
             .legal_moves()
             .iter()

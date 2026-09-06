@@ -1,6 +1,4 @@
-use crate::{
-    CastlingRights, ChessMove, Color, MoveKind, Piece, PieceKind, Position, Square,
-};
+use crate::{CastlingRights, ChessMove, Color, MoveKind, Piece, PieceKind, Position, Square};
 
 impl Position {
     /// Apply one move by cloning the position and performing a simple semantic transition.
@@ -249,15 +247,15 @@ fn castle_rook_squares(
     ))
 }
 
-fn rights_after_moving_piece(
-    rights: CastlingRights,
-    piece: Piece,
-    from: Square,
-) -> CastlingRights {
+fn rights_after_moving_piece(rights: CastlingRights, piece: Piece, from: Square) -> CastlingRights {
     match piece.kind() {
         PieceKind::King => match piece.color() {
-            Color::White => rights.without(CastlingRights::WHITE_KING.union(CastlingRights::WHITE_QUEEN)),
-            Color::Black => rights.without(CastlingRights::BLACK_KING.union(CastlingRights::BLACK_QUEEN)),
+            Color::White => {
+                rights.without(CastlingRights::WHITE_KING.union(CastlingRights::WHITE_QUEEN))
+            }
+            Color::Black => {
+                rights.without(CastlingRights::BLACK_KING.union(CastlingRights::BLACK_QUEEN))
+            }
         },
         PieceKind::Rook => rights_after_rook_square(rights, piece.color(), from),
         _ => rights,

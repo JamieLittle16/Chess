@@ -27,7 +27,7 @@ pub fn perft(position: &Position, depth: u32) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use crate::{perft, Position};
+    use crate::{Position, perft};
 
     #[test]
     fn initial_position_matches_reference_perft() {

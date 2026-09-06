@@ -147,7 +147,10 @@ mod tests {
 
     #[test]
     fn promotion_kind_maps_to_promoted_piece() {
-        assert_eq!(MoveKind::PromoteQueen.promotion_piece(), Some(PieceKind::Queen));
+        assert_eq!(
+            MoveKind::PromoteQueen.promotion_piece(),
+            Some(PieceKind::Queen)
+        );
         assert_eq!(
             MoveKind::PromoteCaptureKnight.promotion_piece(),
             Some(PieceKind::Knight)

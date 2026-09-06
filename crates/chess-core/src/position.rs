@@ -153,7 +153,8 @@ impl Position {
     pub(crate) fn take_piece(&mut self, square: Square) -> Option<Piece> {
         let piece = self.piece_at(square)?;
         self.pieces[piece.slot()] = self.pieces[piece.slot()].without(square);
-        self.occupancy[piece.color().index()] = self.occupancy[piece.color().index()].without(square);
+        self.occupancy[piece.color().index()] =
+            self.occupancy[piece.color().index()].without(square);
         self.occupied = self.occupied.without(square);
         Some(piece)
     }
