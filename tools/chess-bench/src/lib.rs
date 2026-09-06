@@ -6,12 +6,13 @@
 use chess_core::Position;
 use chess_search::Searcher;
 
-/// V4 adds lazy staged tactical move selection on top of the measured V3 qsearch baseline. All five
-/// benchmark scores and best moves remain unchanged. The reviewed search-shape delta is concentrated
-/// in Kiwipete depth 2, where counted work falls from 3,066 to 1,023 nodes. Equal-time paired-game
-/// qualification is still required before the ordering change is considered a strength improvement.
-pub const SUITE_NAME: &str = "reference-search-v4";
-pub const EXPECTED_SIGNATURE: u64 = 0xdd2d_f659_ee6c_7b3a;
+/// V5 adds principal variation search on top of the measured V4 staged-MovePicker baseline. All
+/// five reviewed scores and best moves remain unchanged. The shallow deterministic suite is nearly
+/// search-shape neutral: only mate-net rises by one counted node (68 -> 69). Equal-time paired-game
+/// qualification nevertheless measures a +41.89 +/- 30.29 Elo gain over V4, so V5 is accepted as a
+/// strength baseline even though the tiny CI suite does not expose the deeper-search efficiency.
+pub const SUITE_NAME: &str = "reference-search-v5";
+pub const EXPECTED_SIGNATURE: u64 = 0xcf75_635b_f2de_5791;
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
