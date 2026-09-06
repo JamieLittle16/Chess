@@ -7,7 +7,7 @@ The roadmap is ordered by dependency and evidence, not by visual excitement.
 - **M0 complete** — core representation, toolchain and CI are green.
 - **M1 complete** — legal chess and reference perft are green.
 - **M2 complete** — reversible state and deterministic position identity are green.
-- **M3 in progress** — the classical reference engine is legal, reversible, draw-aware, interruptible and clock-driven; reproducible match qualification is now the remaining exit boundary.
+- **M3 in progress** — the classical reference engine is legal, reversible, draw-aware, interruptible and clock-driven; reproducible match tooling now exists, with the frozen opening corpus and first retained measured baseline remaining.
 
 ## M0 — Core foundations — complete
 
@@ -61,18 +61,20 @@ Implemented:
 - separate conservative TT identity and rule-correct repetition identity, including legal/pinned en-passant semantics;
 - threefold repetition, 50-move and conservative dead-material draw adjudication before TT reuse;
 - fixed-capacity search-path repetition history with no recursive heap growth;
-- versioned deterministic `reference-search-v2` benchmark/signature in CI.
+- versioned deterministic `reference-search-v2` benchmark/signature in CI;
+- repository-owned paired-game qualification protocol;
+- Fastchess provenance wrapper with exact runner/engine/opening hashes, command/environment capture and retained PGN/raw/UCI evidence;
+- hermetic match-harness tests in CI and the local gate.
 
 Remaining before M3 exit:
 
-- automated reproducible match harness integration;
-- a versioned opening/match protocol with paired colour reversal;
-- first measured baseline against a named external reference under that protocol;
-- record the resulting relative Elo and uncertainty rather than claiming an absolute rating.
+- freeze/version the opening corpus used by `m3-baseline-v1`;
+- run the first retained completed baseline against a named external reference under that protocol;
+- record the resulting relative Elo and uncertainty with its manifest/PGN/raw evidence rather than claiming an absolute rating.
 
-`go infinite`, ponder, configurable UCI options and richer GUI-facing features are useful tournament compatibility work but are no longer correctness blockers for the first finite-time baseline match protocol. They can be added when the selected harness/opponents require them.
+`go infinite`, ponder, configurable UCI options and richer GUI-facing features are useful tournament compatibility work but are no longer correctness blockers for the first finite-time baseline match protocol. They can be added when selected harnesses/opponents require them.
 
-Exit condition: a correctly timed, draw-correct UCI engine with a reproducible measured baseline. 
+Exit condition: a correctly timed, draw-correct UCI engine with a reproducible measured baseline.
 
 ## M4 — Tactical engine
 
