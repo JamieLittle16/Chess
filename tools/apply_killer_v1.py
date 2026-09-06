@@ -116,3 +116,15 @@ search = replace_once(
     "killer recording",
 )
 search_path.write_text(search)
+
+# Quiescence keeps the same tactical ordering policy. It supplies no killers because quiet
+# killer moves are not even part of non-check qsearch, and check evasions should remain unchanged.
+qsearch_path = Path("crates/chess-search/src/quiescence.rs")
+qsearch = qsearch_path.read_text()
+qsearch = replace_once(
+    qsearch,
+    "MovePicker::new(&mut moves, None)",
+    "MovePicker::new(&mut moves, None, [None; 2])",
+    "qsearch picker",
+)
+qsearch_path.write_text(qsearch)
