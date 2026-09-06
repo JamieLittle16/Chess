@@ -1,0 +1,224 @@
+name: PVS integration helper
+
+on:
+  push:
+    branches:
+      - m4/pvs-v1
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: Apply principal variation search
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('crates/chess-search/src/lib.rs')
+          text = path.read_text()
+
+          root_old = '''        let mut moves = moves;
+          let mut picker = MovePicker::new(&mut moves, hint);
+          while let Some(mv) = picker.next(position) {
+              let undo = position.make_move(mv);
+              let child = self.negamax(
+                  position,
+                  prior_history,
+                  depth - 1,
+                  -INFINITY,
+                  -alpha,
+                  1,
+                  1,
+                  control,
+              );
+              position.unmake_move(mv, undo);
+              let score = -child?;
+
+              if score > best_score {
+                  best_score = score;
+                  best_move = Some(mv);
+              }
+              alpha = alpha.max(score);
+          }
+          '''
+          root_new = '''        let mut moves = moves;
+          let mut picker = MovePicker::new(&mut moves, hint);
+          let mut first_move = true;
+          while let Some(mv) = picker.next(position) {
+              let undo = position.make_move(mv);
+              let child = if first_move {
+                  self.negamax(
+                      position,
+                      prior_history,
+                      depth - 1,
+                      -INFINITY,
+                      -alpha,
+                      1,
+                      1,
+                      control,
+                  )
+              } else {
+                  // Later root moves first get a null-window probe. Good ordering should make most
+                  // of them fail low cheaply; only a move that raises alpha is searched widely.
+                  let probe = self.negamax(
+                      position,
+                      prior_history,
+                      depth - 1,
+                      -alpha - 1,
+                      -alpha,
+                      1,
+                      1,
+                      control,
+                  );
+                  match probe {
+                      Some(probe_child) if -probe_child > alpha => self.negamax(
+                          position,
+                          prior_history,
+                          depth - 1,
+                          -INFINITY,
+                          -alpha,
+                          1,
+                          1,
+                          control,
+                      ),
+                      probe => probe,
+                  }
+              };
+              position.unmake_move(mv, undo);
+              let score = -child?;
+              first_move = false;
+
+              if score > best_score {
+                  best_score = score;
+                  best_move = Some(mv);
+              }
+              alpha = alpha.max(score);
+          }
+          '''
+
+          node_old = '''        let mut moves = moves;
+          let mut picker = MovePicker::new(&mut moves, hint);
+          while let Some(mv) = picker.next(position) {
+              let undo = position.make_move(mv);
+              let child = self.negamax(
+                  position,
+                  prior_history,
+                  depth - 1,
+                  -beta,
+                  -alpha,
+                  ply + 1,
+                  path_len + 1,
+                  control,
+              );
+              position.unmake_move(mv, undo);
+              let score = -child?;
+
+              if score > best {
+                  best = score;
+                  best_move = Some(mv);
+              }
+              alpha = alpha.max(score);
+              if alpha >= beta {
+                  break;
+              }
+          }
+          '''
+          node_new = '''        let mut moves = moves;
+          let mut picker = MovePicker::new(&mut moves, hint);
+          let mut first_move = true;
+          while let Some(mv) = picker.next(position) {
+              let undo = position.make_move(mv);
+              let child = if first_move {
+                  self.negamax(
+                      position,
+                      prior_history,
+                      depth - 1,
+                      -beta,
+                      -alpha,
+                      ply + 1,
+                      path_len + 1,
+                      control,
+                  )
+              } else {
+                  // Principal variation search: probe later moves with a one-point window, then
+                  // verify only moves that improve alpha without already failing high.
+                  let probe = self.negamax(
+                      position,
+                      prior_history,
+                      depth - 1,
+                      -alpha - 1,
+                      -alpha,
+                      ply + 1,
+                      path_len + 1,
+                      control,
+                  );
+                  match probe {
+                      Some(probe_child)
+                          if -probe_child > alpha && -probe_child < beta =>
+                      {
+                          self.negamax(
+                              position,
+                              prior_history,
+                              depth - 1,
+                              -beta,
+                              -alpha,
+                              ply + 1,
+                              path_len + 1,
+                              control,
+                          )
+                      }
+                      probe => probe,
+                  }
+              };
+              position.unmake_move(mv, undo);
+              let score = -child?;
+              first_move = false;
+
+              if score > best {
+                  best = score;
+                  best_move = Some(mv);
+              }
+              alpha = alpha.max(score);
+              if alpha >= beta {
+                  break;
+              }
+          }
+          '''
+
+          if root_old not in text:
+              raise SystemExit('root search loop not found exactly')
+          text = text.replace(root_old, root_new, 1)
+          if node_old not in text:
+              raise SystemExit('negamax search loop not found exactly')
+          text = text.replace(node_old, node_new, 1)
+          path.write_text(text)
+          PY
+
+          cargo fmt --all
+          cargo clippy -p chess-search --all-targets --all-features -- -D warnings
+          cargo test -p chess-search --all-features
+
+      - name: Commit integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates/chess-search/src/lib.rs
+          git diff --cached --quiet && exit 0
+          git commit -m 'search: add principal variation search probes'
+          git push origin HEAD:m4/pvs-v1
