@@ -109,8 +109,7 @@ mod tests {
         // Qxd7 wins a pawn according to a static depth-one leaf, but ...Rxd7 loses the queen.
         // Quiescence must see the recapture and prefer a quiet move that keeps White's material
         // advantage instead.
-        let root =
-            Position::from_fen("3r3k/3p4/8/8/8/8/8/K2Q4 w - - 0 1").expect("valid FEN");
+        let root = Position::from_fen("3r3k/3p4/8/8/8/8/8/K2Q4 w - - 0 1").expect("valid FEN");
         let d1 = Square::from_file_rank(3, 0).expect("d1");
         let d7 = Square::from_file_rank(3, 6).expect("d7");
         let poisoned = root
@@ -123,7 +122,10 @@ mod tests {
 
         let result = search(&root, 1);
         assert_ne!(result.best_move, Some(poisoned));
-        assert!(result.score >= 250, "quiet queen moves retain the material edge");
+        assert!(
+            result.score >= 250,
+            "quiet queen moves retain the material edge"
+        );
     }
 
     #[test]
@@ -153,7 +155,10 @@ mod tests {
             .quiescence(&mut position, &[], -INFINITY, INFINITY, 0, 0, &NeverStop)
             .expect("uncontrolled quiescence completes");
         assert!(score > -INFINITY);
-        assert!(searcher.nodes > 1, "at least one legal evasion was searched");
+        assert!(
+            searcher.nodes > 1,
+            "at least one legal evasion was searched"
+        );
         assert_eq!(position, original);
     }
 }
