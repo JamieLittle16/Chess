@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   integrate:
-    if: "${{ github.event.head_commit.message == 'ci: retry history integration' }}"
+    if: "${{ github.event.head_commit.message == 'ci: run history integration' }}"
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -25,82 +25,75 @@ jobs:
         shell: python
         run: |
           from pathlib import Path
-
           path = Path('crates/chess-search/src/lib.rs')
           text = path.read_text()
 
-          replacements = [
-              (
-                  'use chess_core::{ChessMove, Position, generate_legal_moves_mut};\nuse chess_eval::evaluate;\nuse move_picker::MovePicker;',
-                  'use chess_core::{ChessMove, Color, Position, generate_legal_moves_mut};\nuse chess_eval::evaluate;\nuse move_picker::{HistoryTable, MovePicker, is_quiet};',
-              ),
-              (
-                  '    path_keys: [u64; MAX_SEARCH_PLY],\n}',
-                  '    path_keys: [u64; MAX_SEARCH_PLY],\n    killers: [[Option<ChessMove>; 2]; MAX_SEARCH_PLY],\n    history: HistoryTable,\n}',
-              ),
-              (
-                  '            path_keys: [0; MAX_SEARCH_PLY],\n        }',
-                  '            path_keys: [0; MAX_SEARCH_PLY],\n            killers: [[None; 2]; MAX_SEARCH_PLY],\n            history: HistoryTable::new(),\n        }',
-              ),
-          ]
-          for old, new in replacements:
+          def replace_once(old, new):
+              global text
               if old not in text:
-                  raise SystemExit(f'missing expected integration anchor: {old!r}')
+                  raise SystemExit(f'missing integration anchor: {old!r}')
               text = text.replace(old, new, 1)
 
-          picker_anchor = '        let mut picker = MovePicker::new(&mut moves, hint);'
-          if text.count(picker_anchor) != 2:
-              raise SystemExit(f'expected exactly two normal-search picker anchors, got {text.count(picker_anchor)}')
+          replace_once(
+              'use chess_core::{ChessMove, Position, generate_legal_moves_mut};\nuse chess_eval::evaluate;\nuse move_picker::MovePicker;',
+              'use chess_core::{ChessMove, Color, Position, generate_legal_moves_mut};\nuse chess_eval::evaluate;\nuse move_picker::{HistoryTable, MovePicker, is_quiet};',
+          )
+          replace_once(
+              '    path_keys: [u64; MAX_SEARCH_PLY],\n}',
+              '    path_keys: [u64; MAX_SEARCH_PLY],\n    killers: [[Option<ChessMove>; 2]; MAX_SEARCH_PLY],\n    history: HistoryTable,\n}',
+          )
+          replace_once(
+              '            path_keys: [0; MAX_SEARCH_PLY],\n        }',
+              '            path_keys: [0; MAX_SEARCH_PLY],\n            killers: [[None; 2]; MAX_SEARCH_PLY],\n            history: HistoryTable::new(),\n        }',
+          )
+
+          picker = '        let mut picker = MovePicker::new(&mut moves, hint);'
+          if text.count(picker) != 2:
+              raise SystemExit(f'expected 2 picker anchors, got {text.count(picker)}')
           text = text.replace(
-              picker_anchor,
+              picker,
               '        let killers = self.killers[0];\n        let mut picker = MovePicker::with_killers(&mut moves, hint, killers);',
               1,
           )
           text = text.replace(
-              picker_anchor,
-              '        let killers = self\n            .killers\n            .get(usize::from(ply))\n            .copied()\n            .unwrap_or([None, None]);\n        let mut picker = MovePicker::with_killers(&mut moves, hint, killers);',
+              picker,
+              '        let killers = self.killers.get(usize::from(ply)).copied().unwrap_or([None, None]);\n        let mut picker = MovePicker::with_killers(&mut moves, hint, killers);',
               1,
           )
 
-          next_anchor = '        while let Some(mv) = picker.next(position) {'
-          if text.count(next_anchor) != 2:
-              raise SystemExit(f'expected exactly two normal-search picker loops, got {text.count(next_anchor)}')
+          loop = '        while let Some(mv) = picker.next(position) {'
+          if text.count(loop) != 2:
+              raise SystemExit(f'expected 2 picker loops, got {text.count(loop)}')
           text = text.replace(
-              next_anchor,
+              loop,
               '        while let Some(mv) = picker.next_with_history(position, &self.history) {',
               2,
           )
 
-          cutoff_anchor = "            if alpha >= beta {\n                break;\n            }"
-          if text.count(cutoff_anchor) != 1:
-              raise SystemExit(f'expected one beta-cutoff anchor, got {text.count(cutoff_anchor)}')
-          text = text.replace(
-              cutoff_anchor,
-              "            if alpha >= beta {\n                if is_quiet(mv) {\n                    self.record_quiet_cutoff(position.side_to_move(), mv, depth, ply);\n                }\n                break;\n            }",
-              1,
+          replace_once(
+              '            if alpha >= beta {\n                break;\n            }',
+              '            if alpha >= beta {\n                if is_quiet(mv) {\n                    self.record_quiet_cutoff(position.side_to_move(), mv, depth, ply);\n                }\n                break;\n            }',
           )
 
           method_anchor = '    fn fallback_result(&self, position: &mut Position, prior_history: &[u64]) -> SearchResult {'
-          if method_anchor not in text:
-              raise SystemExit('missing fallback_result anchor')
-          method = '''    fn record_quiet_cutoff(
-        &mut self,
-        side: Color,
-        mv: ChessMove,
-        depth: u8,
-        ply: u16,
-    ) {
-        self.history.record_cutoff(side, mv, depth);
-        if let Some(killers) = self.killers.get_mut(usize::from(ply))
-            && killers[0] != Some(mv)
-        {
-            killers[1] = killers[0];
-            killers[0] = Some(mv);
-        }
-    }
-
-'''
-          text = text.replace(method_anchor, method + method_anchor, 1)
+          method = (
+              '    fn record_quiet_cutoff(\n'
+              '        &mut self,\n'
+              '        side: Color,\n'
+              '        mv: ChessMove,\n'
+              '        depth: u8,\n'
+              '        ply: u16,\n'
+              '    ) {\n'
+              '        self.history.record_cutoff(side, mv, depth);\n'
+              '        if let Some(killers) = self.killers.get_mut(usize::from(ply))\n'
+              '            && killers[0] != Some(mv)\n'
+              '        {\n'
+              '            killers[1] = killers[0];\n'
+              '            killers[0] = Some(mv);\n'
+              '        }\n'
+              '    }\n\n'
+          )
+          replace_once(method_anchor, method + method_anchor)
           path.write_text(text)
       - name: Format
         run: cargo fmt --all
