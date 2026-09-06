@@ -96,16 +96,17 @@ impl Searcher {
     fn search_root(&mut self, position: &mut Position, depth: u8) -> SearchResult {
         let key = position.zobrist_key().raw();
         let table_entry = self.probe(key);
-        if let Some(entry) = table_entry {
-            if entry.depth >= depth && entry.bound == Bound::Exact {
-                return SearchResult {
-                    best_move: entry.best_move,
-                    score: score_from_tt(entry.score, 0),
-                    depth,
-                    nodes: self.nodes,
-                    tt_hits: self.tt_hits,
-                };
-            }
+        if let Some(entry) = table_entry
+            && entry.depth >= depth
+            && entry.bound == Bound::Exact
+        {
+            return SearchResult {
+                best_move: entry.best_move,
+                score: score_from_tt(entry.score, 0),
+                depth,
+                nodes: self.nodes,
+                tt_hits: self.tt_hits,
+            };
         }
 
         let moves = generate_legal_moves_mut(position);
@@ -163,15 +164,15 @@ impl Searcher {
         let alpha_original = alpha;
         let table_entry = self.probe(key);
 
-        if let Some(entry) = table_entry {
-            if entry.depth >= depth {
-                let score = score_from_tt(entry.score, ply);
-                match entry.bound {
-                    Bound::Exact => return score,
-                    Bound::Lower if score >= beta => return score,
-                    Bound::Upper if score <= alpha => return score,
-                    Bound::Lower | Bound::Upper => {}
-                }
+        if let Some(entry) = table_entry
+            && entry.depth >= depth
+        {
+            let score = score_from_tt(entry.score, ply);
+            match entry.bound {
+                Bound::Exact => return score,
+                Bound::Lower if score >= beta => return score,
+                Bound::Upper if score <= alpha => return score,
+                Bound::Lower | Bound::Upper => {}
             }
         }
 
@@ -396,10 +397,10 @@ impl Iterator for OrderedMoves<'_> {
             match self.phase {
                 0 => {
                     self.phase = 1;
-                    if let Some(hint) = self.hint {
-                        if self.moves.contains(&hint) {
-                            return Some(hint);
-                        }
+                    if let Some(hint) = self.hint
+                        && self.moves.contains(&hint)
+                    {
+                        return Some(hint);
                     }
                 }
                 1 | 2 => {
