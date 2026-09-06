@@ -254,8 +254,8 @@ mod tests {
 
     #[test]
     fn bishop_mobility_excludes_own_blockers() {
-        let position = Position::from_fen("7k/8/8/2P1P3/3B4/2P1P3/8/7K w - - 0 1")
-            .expect("valid FEN");
+        let position =
+            Position::from_fen("7k/8/8/2P1P3/3B4/2P1P3/8/7K w - - 0 1").expect("valid FEN");
         let d4 = Square::from_file_rank(3, 3).expect("d4");
         assert_eq!(
             mobility_count(
