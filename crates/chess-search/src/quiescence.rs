@@ -2,9 +2,9 @@ use super::*;
 
 // Qsearch v1 is intentionally transparent and does not yet have SEE/delta pruning. A bounded path
 // prevents pathological alternating check-evasion trees from consuming an unbounded share of a
-// search. This is a safety/performance guardrail, not a claim that 16 is an optimal chess value;
-// later M4 work should re-qualify it once tactical ordering and SEE are available.
-const MAX_QSEARCH_PATH_PLY: usize = 16;
+// search. This is a safety/performance guardrail, not a claim that 8 is an optimal chess value;
+// later M4 work should re-qualify or remove it once tactical ordering and SEE are available.
+const MAX_QSEARCH_PATH_PLY: usize = 8;
 
 impl Searcher {
     /// Stabilise a nominal leaf by resolving forcing tactical continuations.
