@@ -6,6 +6,7 @@ mod attacks;
 mod bitboard;
 mod chess_move;
 mod color;
+mod draw;
 mod fen;
 mod move_list;
 mod movegen;
