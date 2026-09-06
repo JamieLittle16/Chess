@@ -36,7 +36,7 @@ jobs:
         with:
           toolchain: 1.98.1
       - name: Run isolated search test
-        run: cargo test -p chess-search "${{ matrix.test }}" -- --exact --nocapture
+        run: cargo test -p chess-search "${{ matrix.test }}" -- --nocapture
 
   search-suite:
     runs-on: ubuntu-24.04
