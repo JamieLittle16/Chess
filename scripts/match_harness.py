@@ -14,6 +14,7 @@ import json
 import os
 import platform
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -75,6 +76,8 @@ class Protocol:
     def validate(self) -> None:
         if self.schema_version != 1:
             raise HarnessError(f"unsupported protocol schema {self.schema_version}")
+        if not self.protocol_id.strip():
+            raise HarnessError("protocol_id must be non-empty")
         if self.runner != "fastchess":
             raise HarnessError("M3 harness currently supports runner='fastchess' only")
         if self.games <= 0 or self.games % 2 != 0:
@@ -158,6 +161,21 @@ def parse_engine_option(text: str) -> str:
     return f"option.{name}={value}"
 
 
+def resolve_openings(path: Path | None, protocol: Protocol) -> Path | None:
+    if path is None:
+        if protocol.openings_required:
+            raise HarnessError("qualification protocol requires an opening file")
+        return None
+
+    try:
+        resolved = path.expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise HarnessError(f"cannot resolve openings file {path}: {exc}") from exc
+    if not resolved.is_file():
+        raise HarnessError(f"openings is not a regular file: {resolved}")
+    return resolved
+
+
 def build_fastchess_command(
     *,
     fastchess: Path,
@@ -232,6 +250,8 @@ def _run_capture(command: Sequence[str], *, timeout: float = 5.0) -> str | None:
             timeout=timeout,
         )
     except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
         return None
     output = completed.stdout.strip()
     return output or None
@@ -310,6 +330,20 @@ def write_manifest(path: Path, manifest: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+def optional_file_identity(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    return asdict(identify_file(path))
+
+
+def output_artifacts(paths: MatchPaths) -> dict[str, Any]:
+    return {
+        "raw_runner_output": optional_file_identity(paths.raw_output),
+        "pgn": optional_file_identity(paths.pgn),
+        "engine_log": optional_file_identity(paths.engine_log),
+    }
+
+
 def initial_manifest(
     *,
     protocol_path: Path,
@@ -359,6 +393,22 @@ def initial_manifest(
     }
 
 
+def stop_process(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    process.send_signal(signal.SIGINT)
+    try:
+        process.wait(timeout=5.0)
+        return
+    except subprocess.TimeoutExpired:
+        process.terminate()
+    try:
+        process.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
 def run_and_tee(command: Sequence[str], raw_output: Path) -> tuple[int, float]:
     started = time.monotonic()
     with raw_output.open("w", encoding="utf-8") as log:
@@ -383,8 +433,7 @@ def run_and_tee(command: Sequence[str], raw_output: Path) -> tuple[int, float]:
                 log.flush()
             returncode = process.wait()
         except KeyboardInterrupt:
-            process.send_signal(subprocess.signal.SIGINT)
-            returncode = process.wait()
+            stop_process(process)
             raise
         finally:
             process.stdout.close()
@@ -474,12 +523,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if candidate.name == reference.name:
             raise HarnessError("candidate and reference names must differ")
 
-        openings = None
-        if args.openings is not None:
-            openings = args.openings.expanduser().resolve(strict=True)
-            if not openings.is_file():
-                raise HarnessError(f"openings is not a regular file: {openings}")
-
+        openings = resolve_openings(args.openings, protocol)
         paths = make_paths(args.output_dir)
         command = build_fastchess_command(
             fastchess=fastchess,
@@ -509,11 +553,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         manifest["status"] = "running"
         manifest["started_utc"] = datetime.now(timezone.utc).isoformat()
         write_manifest(paths.manifest, manifest)
-        returncode, elapsed = run_and_tee(command, paths.raw_output)
+        started = time.monotonic()
+        try:
+            returncode, elapsed = run_and_tee(command, paths.raw_output)
+        except KeyboardInterrupt:
+            manifest["finished_utc"] = datetime.now(timezone.utc).isoformat()
+            manifest["elapsed_seconds"] = time.monotonic() - started
+            manifest["status"] = "interrupted"
+            manifest["artifacts"] = output_artifacts(paths)
+            write_manifest(paths.manifest, manifest)
+            raise
+
         manifest["finished_utc"] = datetime.now(timezone.utc).isoformat()
         manifest["elapsed_seconds"] = elapsed
         manifest["runner_exit_code"] = returncode
         manifest["status"] = "completed" if returncode == 0 else "failed"
+        manifest["artifacts"] = output_artifacts(paths)
         write_manifest(paths.manifest, manifest)
         if returncode != 0:
             print(f"Fastchess failed with exit code {returncode}", file=sys.stderr)
