@@ -1,0 +1,16 @@
+[package]
+name = "chess-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+chess-core = { path = "../../crates/chess-core" }
+chess-search = { path = "../../crates/chess-search" }
+
+[lints]
+workspace = true
