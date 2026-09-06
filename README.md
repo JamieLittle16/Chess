@@ -17,9 +17,9 @@ The repository is at **M3: Classical Reference Engine**.
 
 The chess layer is already functional: `chess-core` parses FEN, generates legal moves, handles castling/en-passant/promotions, makes and unmakes moves reversibly, passes published perft gates, and maintains independently reconstructable Zobrist identity.
 
-Above it, `chess-eval` provides the deliberately simple material reference evaluator and `chess-search` provides deterministic negamax/alpha-beta, iterative deepening, bounded transposition storage, mate/stalemate handling and reversible root search. `chess-engine` owns persistent game/search state and `chess-uci` exposes the first standard command-line engine interface.
+Above it, `chess-eval` provides the deliberately simple material reference evaluator and `chess-search` provides deterministic negamax/alpha-beta, iterative deepening, bounded transposition storage, mate/stalemate handling, reversible root search and cooperative cancellation. `chess-engine` owns persistent game/search state plus depth/node/movetime orchestration, and `chess-uci` exposes the standard command-line engine interface.
 
-This is now a real but intentionally weak playable engine baseline. Strength work comes after the correctness and measurement interfaces are stable.
+This is now a real but intentionally weak playable engine baseline. Strength work comes after the correctness, timing and measurement interfaces are stable.
 
 ## Workspace
 
@@ -64,4 +64,4 @@ Once the UCI target is built, it can be launched with:
 cargo run --release -p chess-uci
 ```
 
-The current UCI search limit is fixed depth (`go depth N`); time management and interruptible search are the next orchestration boundary.
+The synchronous UCI surface currently supports `go depth N`, `go nodes N`, `go movetime MS`, and compatible combinations. The next orchestration boundary is an asynchronous worker so `stop` and full clock allocation can operate while search is live.
