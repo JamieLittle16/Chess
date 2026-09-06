@@ -20,5 +20,6 @@ Acceptance evidence to retain:
 - PGN, raw runner output and UCI log;
 - any crash or time-forfeit evidence.
 
-Status: screening triggered after the candidate implementation and V4 deterministic signature were
-frozen. The outcome will be appended only after the retained artifact and runner output are inspected.
+Status: screening re-triggered after correcting the one-shot Actions condition; engine code and the V4
+deterministic signature remain frozen. The outcome will be appended only after retained evidence is
+inspected.
