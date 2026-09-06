@@ -139,8 +139,7 @@ mod tests {
 
     #[test]
     fn higher_value_capture_is_selected_before_lower_value_capture() {
-        let position =
-            Position::from_fen("7k/8/8/8/3q1r2/8/3Q4/K7 w - - 0 1").expect("valid FEN");
+        let position = Position::from_fen("7k/8/8/8/3q1r2/8/3Q4/K7 w - - 0 1").expect("valid FEN");
         let d2 = Square::from_file_rank(3, 1).expect("d2");
         let d4 = Square::from_file_rank(3, 3).expect("d4");
         let mut moves = position.legal_moves();
