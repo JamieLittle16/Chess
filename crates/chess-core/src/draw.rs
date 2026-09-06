@@ -99,21 +99,24 @@ mod tests {
 
     #[test]
     fn irrelevant_en_passant_target_is_ignored_for_repetition() {
-        let with_target =
-            Position::from_fen("8/8/8/8/8/8/8/K6k w - e6 0 1").expect("valid FEN");
-        let without_target =
-            Position::from_fen("8/8/8/8/8/8/8/K6k w - - 0 1").expect("valid FEN");
+        let with_target = Position::from_fen("8/8/8/8/8/8/8/K6k w - e6 0 1").expect("valid FEN");
+        let without_target = Position::from_fen("8/8/8/8/8/8/8/K6k w - - 0 1").expect("valid FEN");
         assert_ne!(with_target.zobrist_key(), without_target.zobrist_key());
-        assert_eq!(with_target.repetition_key(), without_target.repetition_key());
+        assert_eq!(
+            with_target.repetition_key(),
+            without_target.repetition_key()
+        );
     }
 
     #[test]
     fn legal_en_passant_target_changes_repetition_identity() {
-        let with_target =
-            Position::from_fen("8/8/8/3pP3/8/8/8/K6k w - d6 0 1").expect("valid FEN");
+        let with_target = Position::from_fen("8/8/8/3pP3/8/8/8/K6k w - d6 0 1").expect("valid FEN");
         let without_target =
             Position::from_fen("8/8/8/3pP3/8/8/8/K6k w - - 0 1").expect("valid FEN");
-        assert_ne!(with_target.repetition_key(), without_target.repetition_key());
+        assert_ne!(
+            with_target.repetition_key(),
+            without_target.repetition_key()
+        );
     }
 
     #[test]
@@ -122,7 +125,10 @@ mod tests {
             Position::from_fen("4r2k/8/8/3pP3/8/8/8/4K3 w - d6 0 1").expect("valid FEN");
         let without_target =
             Position::from_fen("4r2k/8/8/3pP3/8/8/8/4K3 w - - 0 1").expect("valid FEN");
-        assert_eq!(with_target.repetition_key(), without_target.repetition_key());
+        assert_eq!(
+            with_target.repetition_key(),
+            without_target.repetition_key()
+        );
     }
 
     #[test]
@@ -133,7 +139,11 @@ mod tests {
             "7k/8/8/8/8/8/6N1/K7 w - - 0 1",
             "5b1k/8/8/8/8/8/6B1/K7 w - - 0 1",
         ] {
-            assert!(Position::from_fen(fen).expect("valid FEN").is_insufficient_material());
+            assert!(
+                Position::from_fen(fen)
+                    .expect("valid FEN")
+                    .is_insufficient_material()
+            );
         }
 
         for fen in [
@@ -141,7 +151,11 @@ mod tests {
             "7k/8/8/8/8/8/5NN1/K7 w - - 0 1",
             "7k/8/8/8/8/8/6P1/K7 w - - 0 1",
         ] {
-            assert!(!Position::from_fen(fen).expect("valid FEN").is_insufficient_material());
+            assert!(
+                !Position::from_fen(fen)
+                    .expect("valid FEN")
+                    .is_insufficient_material()
+            );
         }
     }
 }
