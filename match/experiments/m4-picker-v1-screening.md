@@ -36,8 +36,9 @@ artifact-zip digest `bf7a75a146f383e6e3931f651e0f9e2252a9d0edf8b95e2e91e185dabb4
 
 ## Decision
 
-Accept the staged allocation-free picker as the next M4 baseline. The result is a short-control
-relative-development screen, not an absolute engine rating. It does, however, agree with the
-independent deterministic evidence: tactical ordering cuts the known Kiwipete qsearch hotspot by
-66.6% while preserving the reviewed scores and best moves, and the reduced search tree translates
-into a clear equal-wall-clock strength gain under the frozen protocol.
+Accept the staged allocation-free picker as the next M4 baseline. This is a short-control
+relative-development screen, not an absolute engine rating and not evidence about the remaining gap
+to Stockfish-class engines. It does, however, agree with the independent deterministic evidence:
+tactical ordering cuts the known Kiwipete qsearch hotspot by 66.6% while preserving the reviewed
+scores and best moves, and the reduced search tree translates into a clear equal-wall-clock strength
+gain under the frozen protocol.
