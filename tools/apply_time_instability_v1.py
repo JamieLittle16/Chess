@@ -152,7 +152,7 @@ engine = replace_once(
         // A changed best move or a >20 cp score swing keeps searching up to the existing hard limit.
         match (previous_best_move, previous_score) {
             (Some(previous_best_move), Some(previous_score)) => {
-                previous_best_move != completed.best_move
+                Some(previous_best_move) != completed.best_move
                     || previous_score.abs_diff(completed.score) > 20
             }
             _ => true,
