@@ -89,10 +89,7 @@ impl UciSession {
             Ok(limits) => limits,
             Err(message) => {
                 return response(
-                    vec![
-                        format!("info string {message}"),
-                        "bestmove 0000".to_owned(),
-                    ],
+                    vec![format!("info string {message}"), "bestmove 0000".to_owned()],
                     false,
                 );
             }
