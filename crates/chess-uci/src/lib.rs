@@ -171,17 +171,17 @@ impl GoRequest {
         let clock_budget = if has_clock_fields {
             let (remaining, increment) = match side_to_move {
                 Color::White => (
-                    self.wtime.ok_or("go clock is missing wtime for White to move")?,
+                    self.wtime
+                        .ok_or("go clock is missing wtime for White to move")?,
                     self.winc.unwrap_or(Duration::ZERO),
                 ),
                 Color::Black => (
-                    self.btime.ok_or("go clock is missing btime for Black to move")?,
+                    self.btime
+                        .ok_or("go clock is missing btime for Black to move")?,
                     self.binc.unwrap_or(Duration::ZERO),
                 ),
             };
-            Some(
-                ClockState::new(remaining, increment, self.moves_to_go).allocated_movetime(),
-            )
+            Some(ClockState::new(remaining, increment, self.moves_to_go).allocated_movetime())
         } else {
             None
         };
@@ -523,16 +523,8 @@ mod tests {
 
     #[test]
     fn go_limits_compose_without_protocol_specific_search_logic() {
-        let request = parse_go_request(&[
-            "go",
-            "depth",
-            "7",
-            "nodes",
-            "1234",
-            "movetime",
-            "50",
-        ])
-        .expect("valid combined limits");
+        let request = parse_go_request(&["go", "depth", "7", "nodes", "1234", "movetime", "50"])
+            .expect("valid combined limits");
         let limits = request.into_limits(Color::White).expect("concrete limits");
         assert_eq!(limits.max_depth, 7);
         assert_eq!(limits.max_nodes, Some(1234));
@@ -561,24 +553,15 @@ mod tests {
 
     #[test]
     fn movestogo_and_explicit_movetime_compose_conservatively() {
-        let clock = parse_go_request(&[
-            "go", "wtime", "60000", "btime", "60000", "movestogo", "10",
-        ])
-        .expect("clock request")
-        .into_limits(Color::White)
-        .expect("clock limits");
+        let clock =
+            parse_go_request(&["go", "wtime", "60000", "btime", "60000", "movestogo", "10"])
+                .expect("clock request")
+                .into_limits(Color::White)
+                .expect("clock limits");
         assert_eq!(clock.movetime, Some(Duration::from_millis(5_700)));
 
         let capped = parse_go_request(&[
-            "go",
-            "movetime",
-            "1000",
-            "wtime",
-            "60000",
-            "btime",
-            "60000",
-            "winc",
-            "1000",
+            "go", "movetime", "1000", "wtime", "60000", "btime", "60000", "winc", "1000",
         ])
         .expect("combined time request")
         .into_limits(Color::White)
@@ -620,12 +603,10 @@ mod tests {
 
     #[test]
     fn node_and_clock_limits_are_preserved_together() {
-        let limits = parse_go_request(&[
-            "go", "nodes", "5000", "wtime", "60000", "btime", "60000",
-        ])
-        .expect("node plus clock")
-        .into_limits(Color::White)
-        .expect("combined limits");
+        let limits = parse_go_request(&["go", "nodes", "5000", "wtime", "60000", "btime", "60000"])
+            .expect("node plus clock")
+            .into_limits(Color::White)
+            .expect("combined limits");
         assert_eq!(limits.max_nodes, Some(5_000));
         assert_eq!(limits.movetime, Some(Duration::from_millis(1_900)));
     }
