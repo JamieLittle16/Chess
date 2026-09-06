@@ -139,14 +139,18 @@ impl SearchLimits {
 /// Persistent engine state shared by protocol/deployment frontends.
 pub struct Engine {
     position: Position,
+    repetition_history: Vec<u64>,
     searcher: Searcher,
 }
 
 impl Engine {
     #[must_use]
     pub fn new() -> Self {
+        let position = Position::startpos();
+        let repetition_history = vec![position.repetition_key().raw()];
         Self {
-            position: Position::startpos(),
+            position,
+            repetition_history,
             searcher: Searcher::default(),
         }
     }
@@ -156,15 +160,40 @@ impl Engine {
         &self.position
     }
 
+    /// Repetition identities for every actual game position up to and including the current root.
+    #[must_use]
+    pub fn repetition_history(&self) -> &[u64] {
+        &self.repetition_history
+    }
+
     /// Replace the game position without changing search configuration.
+    ///
+    /// With no supplied move sequence, only the new root is known and earlier repetition history
+    /// must be discarded.
     pub fn set_position(&mut self, position: Position) {
+        self.repetition_history.clear();
+        self.repetition_history.push(position.repetition_key().raw());
         self.position = position;
+    }
+
+    /// Replace the current root while preserving known positions that precede it.
+    ///
+    /// `prior_history` must contain rule-correct repetition keys for positions before `position`;
+    /// this method always appends the supplied root itself, maintaining the engine invariant that
+    /// history is non-empty and ends at the current position.
+    pub fn set_position_with_prior_history(
+        &mut self,
+        position: Position,
+        mut prior_history: Vec<u64>,
+    ) {
+        prior_history.push(position.repetition_key().raw());
+        self.position = position;
+        self.repetition_history = prior_history;
     }
 
     /// Start a fresh game and discard search memory from the previous game.
     pub fn new_game(&mut self) {
-        self.position = Position::startpos();
-        self.searcher = Searcher::default();
+        *self = Self::new();
     }
 
     /// Apply one move only when it is legal in the current position.
@@ -177,14 +206,20 @@ impl Engine {
             return false;
         }
         let _undo = self.position.make_move(mv);
+        self.repetition_history
+            .push(self.position.repetition_key().raw());
         true
     }
 
-    /// Iteratively search to `max_depth` while leaving the game position unchanged.
+    /// Iteratively search to `max_depth` while leaving game position/history unchanged.
     #[must_use]
     pub fn search_depth(&mut self, max_depth: u8) -> SearchResult {
-        self.searcher
-            .iterative_deepening(&mut self.position, max_depth)
+        let prior_len = self.repetition_history.len().saturating_sub(1);
+        self.searcher.iterative_deepening_with_history(
+            &mut self.position,
+            &self.repetition_history[..prior_len],
+            max_depth,
+        )
     }
 
     /// Search under cooperative depth/node/time limits.
@@ -201,8 +236,14 @@ impl Engine {
             max_nodes: limits.max_nodes,
             deadline,
         };
+        let prior_len = self.repetition_history.len().saturating_sub(1);
         self.searcher
-            .iterative_deepening_controlled(&mut self.position, limits.max_depth, &control)
+            .iterative_deepening_controlled_with_history(
+                &mut self.position,
+                &self.repetition_history[..prior_len],
+                limits.max_depth,
+                &control,
+            )
     }
 }
 
@@ -232,7 +273,7 @@ impl SearchControl for EngineControl<'_> {
 mod tests {
     use std::time::Duration;
 
-    use chess_core::{ChessMove, MoveKind, Square};
+    use chess_core::{ChessMove, MoveKind, Position, Square};
 
     use super::{ClockState, Engine, SearchLimits, StopToken};
 
@@ -240,15 +281,17 @@ mod tests {
     fn illegal_external_move_is_rejected_without_mutation() {
         let mut engine = Engine::new();
         let root = engine.position().clone();
+        let history = engine.repetition_history().to_vec();
         let e2 = Square::from_file_rank(4, 1).expect("e2");
         let e5 = Square::from_file_rank(4, 4).expect("e5");
         let illegal = ChessMove::new(e2, e5, MoveKind::Quiet);
         assert!(!engine.apply_move(illegal));
         assert_eq!(engine.position(), &root);
+        assert_eq!(engine.repetition_history(), history);
     }
 
     #[test]
-    fn legal_external_move_advances_the_game() {
+    fn legal_external_move_advances_game_and_history() {
         let mut engine = Engine::new();
         let e2 = Square::from_file_rank(4, 1).expect("e2");
         let e4 = Square::from_file_rank(4, 3).expect("e4");
@@ -260,13 +303,49 @@ mod tests {
             .find(|mv| mv.from() == e2 && mv.to() == e4)
             .expect("e2e4 is legal");
         assert!(engine.apply_move(mv));
-        assert_ne!(engine.position(), &chess_core::Position::startpos());
+        assert_ne!(engine.position(), &Position::startpos());
+        assert_eq!(engine.repetition_history().len(), 2);
+        assert_eq!(
+            engine.repetition_history().last().copied(),
+            Some(engine.position().repetition_key().raw())
+        );
     }
 
     #[test]
-    fn search_does_not_advance_game_position() {
+    fn replacing_position_resets_or_rebuilds_history_explicitly() {
+        let mut engine = Engine::new();
+        let position =
+            Position::from_fen("7k/8/8/8/8/8/6Q1/K7 w - - 0 1").expect("valid FEN");
+        let key = position.repetition_key().raw();
+
+        engine.set_position(position.clone());
+        assert_eq!(engine.repetition_history(), [key]);
+
+        engine.set_position_with_prior_history(position, vec![3, 5]);
+        assert_eq!(engine.repetition_history(), [3, 5, key]);
+    }
+
+    #[test]
+    fn engine_search_consumes_repetition_history_without_mutating_it() {
+        let mut engine = Engine::new();
+        let position =
+            Position::from_fen("7k/8/8/8/8/8/6Q1/K7 w - - 0 1").expect("valid FEN");
+        let key = position.repetition_key().raw();
+        engine.set_position_with_prior_history(position, vec![key, key]);
+        let history = engine.repetition_history().to_vec();
+        let root = engine.position().clone();
+
+        let result = engine.search_depth(2);
+        assert_eq!(result.score, 0);
+        assert_eq!(engine.position(), &root);
+        assert_eq!(engine.repetition_history(), history);
+    }
+
+    #[test]
+    fn search_does_not_advance_game_position_or_history() {
         let mut engine = Engine::new();
         let root = engine.position().clone();
+        let history = engine.repetition_history().to_vec();
         let legal = root.legal_moves();
         let result = engine.search_depth(2);
         assert!(
@@ -275,6 +354,7 @@ mod tests {
                 .is_some_and(|mv| legal.as_slice().contains(&mv))
         );
         assert_eq!(engine.position(), &root);
+        assert_eq!(engine.repetition_history(), history);
     }
 
     #[test]
