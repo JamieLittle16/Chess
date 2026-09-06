@@ -243,11 +243,7 @@ mod tests {
         let uci = session.handle_line("uci");
         assert_eq!(
             uci.lines(),
-            [
-                "id name Chess 0.1.0",
-                "id author Jamie Little",
-                "uciok"
-            ]
+            ["id name Chess 0.1.0", "id author Jamie Little", "uciok"]
         );
         assert_eq!(session.handle_line("isready").lines(), ["readyok"]);
     }
