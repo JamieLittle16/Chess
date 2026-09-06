@@ -129,7 +129,10 @@ mod tests {
     #[test]
     fn suite_matches_the_reviewed_reference_signature() {
         let report = run_reference_suite();
-        assert_eq!(report.signature, EXPECTED_SIGNATURE);
+        assert_eq!(
+            report.signature, EXPECTED_SIGNATURE,
+            "reference benchmark drifted:\n{report:#?}"
+        );
         assert!(report.cases.iter().all(|case| case.nodes > 0));
         assert!(report.cases.iter().all(|case| case.best_move_raw.is_some()));
     }
