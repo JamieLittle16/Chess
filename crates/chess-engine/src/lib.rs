@@ -4,8 +4,8 @@
 //! depend on this crate rather than reaching into search internals directly.
 
 use chess_core::{ChessMove, Position};
-pub use chess_search::{MATE_SCORE, SearchResult};
 use chess_search::Searcher;
+pub use chess_search::{MATE_SCORE, SearchResult};
 
 /// Persistent engine state shared by protocol/deployment frontends.
 pub struct Engine {
