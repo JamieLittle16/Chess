@@ -1,4 +1,4 @@
-use chess_core::Position;
+use chess_core::{Position, Square};
 use chess_search::Searcher;
 
 fn child_repetition_key(position: &Position, mv: chess_core::ChessMove) -> u64 {
@@ -70,4 +70,38 @@ fn stalemate_is_an_exact_draw_not_a_static_evaluation() {
 
     assert_eq!(result.best_move, None);
     assert_eq!(result.score, 0);
+}
+
+#[test]
+fn winning_side_avoids_immediate_stalemate_when_positive_play_exists() {
+    let mut root = Position::from_fen("k7/8/2K5/2Q5/8/8/8/8 w - - 0 1").expect("valid FEN");
+    let original = root.clone();
+    let c5 = Square::from_file_rank(2, 4).expect("c5");
+    let b6 = Square::from_file_rank(1, 5).expect("b6");
+    let stalemating_move = root
+        .legal_moves()
+        .as_slice()
+        .iter()
+        .copied()
+        .find(|mv| mv.from() == c5 && mv.to() == b6)
+        .expect("Qc5-b6 is legal");
+
+    let mut stalemate = root.clone();
+    let _undo = stalemate.make_move(stalemating_move);
+    assert!(!stalemate.is_in_check(stalemate.side_to_move()));
+    assert!(stalemate.legal_moves().is_empty(), "Qc5-b6 must stalemate");
+
+    let mut searcher = Searcher::default();
+    let result = searcher.search_depth(&mut root, 1);
+
+    assert!(
+        result.score > 0,
+        "winning K+Q vs K should prefer continuing the win to stalemate"
+    );
+    assert_ne!(
+        result.best_move,
+        Some(stalemating_move),
+        "a winning side must reject an immediate stalemate"
+    );
+    assert_eq!(root, original, "search must restore the root exactly");
 }
