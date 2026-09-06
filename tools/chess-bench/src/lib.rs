@@ -6,23 +6,22 @@
 use chess_core::Position;
 use chess_search::Searcher;
 
-/// V6 replaces the material-only static evaluator beneath accepted PVS with the measured tapered
-/// geometric PSQT evaluator. This is an intentional semantic baseline change rather than a pure
-/// search-shape refactor: positional scores and some best moves legitimately differ from V5.
-/// The reviewed five-case report is:
+/// V7 adds the accepted two-slot quiet killer ordering on top of V6's tapered geometric PSQT
+/// evaluator. Scores and best moves remain unchanged across the reviewed five-case suite; the
+/// intended semantic drift is search shape from improved quiet ordering. The reviewed report is:
 ///
-/// - startpos d3: score +24, 670 nodes, 22 TT hits, best raw move 82 (`Nb1-c3`);
+/// - startpos d3: score +24, 649 nodes, 22 TT hits, best raw move 82 (`Nb1-c3`);
 /// - Kiwipete d2: score -13, 2,360 nodes, 2 TT hits, best raw move 17,192;
 /// - mate-net d2: mate score 29,999, 72 nodes, 1 TT hit, best raw move 3,446;
 /// - en-passant d3: score +167, 63 nodes, 7 TT hits, best raw move 22,827;
-/// - promotion d2: score +886, 67 nodes, 2 TT hits, best raw move 9 (`Ka1-b2`).
+/// - promotion d2: score +886, 63 nodes, 2 TT hits, best raw move 9 (`Ka1-b2`).
 ///
-/// The promotion choice was manually decoded and reviewed: qsearch still sees the available
-/// promotion, so the king move is a legitimate positional preference rather than lost promotion
-/// semantics. Equal-time qualification measured 62W/26D/12L and +190.85 +/- 64.16 Elo versus the
-/// accepted V5 material/PVS engine, so the semantic drift is accepted as the new strength baseline.
-pub const SUITE_NAME: &str = "reference-search-v6";
-pub const EXPECTED_SIGNATURE: u64 = 0xed4d_9e0a_ddb7_8419;
+/// Clean equal-time acceptance versus exact V6 production main measured 63W/94D/43L over 200
+/// paired games: 55.0%, +34.86 +/- 34.16 Elo, LOS 97.83%. The implementation stores at most two
+/// quiet beta-cutoff killers per ply; tactical moves remain ahead of killers and root/qsearch do not
+/// use killer ordering. This evidence accepts the search-shape drift as the new production baseline.
+pub const SUITE_NAME: &str = "reference-search-v7";
+pub const EXPECTED_SIGNATURE: u64 = 0x1c00_e005_a261_25b4;
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;

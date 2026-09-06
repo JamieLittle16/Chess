@@ -6,6 +6,7 @@ const ORDER_VALUES: [i32; 6] = [100, 320, 330, 500, 900, 20_000];
 enum Stage {
     Tt,
     Tactical,
+    Killer,
     Quiet,
     Done,
 }
@@ -22,15 +23,23 @@ enum Stage {
 pub(super) struct MovePicker<'a> {
     moves: &'a mut [ChessMove],
     tt_move: Option<ChessMove>,
+    killers: [Option<ChessMove>; 2],
+    killer_index: usize,
     stage: Stage,
     cursor: usize,
 }
 
 impl<'a> MovePicker<'a> {
-    pub(super) fn new(moves: &'a mut MoveList, tt_move: Option<ChessMove>) -> Self {
+    pub(super) fn new(
+        moves: &'a mut MoveList,
+        tt_move: Option<ChessMove>,
+        killers: [Option<ChessMove>; 2],
+    ) -> Self {
         Self {
             moves: moves.as_mut_slice(),
             tt_move,
+            killers,
+            killer_index: 0,
             stage: Stage::Tt,
             cursor: 0,
         }
@@ -74,6 +83,25 @@ impl<'a> MovePicker<'a> {
                         let mv = self.moves[self.cursor];
                         self.cursor += 1;
                         return Some(mv);
+                    }
+                    self.stage = Stage::Killer;
+                }
+                Stage::Killer => {
+                    while self.killer_index < self.killers.len() {
+                        let killer = self.killers[self.killer_index];
+                        self.killer_index += 1;
+                        if let Some(killer) = killer
+                            && !is_tactical(killer)
+                            && let Some(index) = self.moves[self.cursor..]
+                                .iter()
+                                .position(|&mv| mv == killer)
+                                .map(|offset| self.cursor + offset)
+                        {
+                            self.moves.swap(self.cursor, index);
+                            let mv = self.moves[self.cursor];
+                            self.cursor += 1;
+                            return Some(mv);
+                        }
                     }
                     self.stage = Stage::Quiet;
                 }
@@ -132,7 +160,7 @@ mod tests {
         let position = Position::startpos();
         let mut moves = position.legal_moves();
         let tt_move = moves.as_slice()[moves.len() - 1];
-        let mut picker = MovePicker::new(&mut moves, Some(tt_move));
+        let mut picker = MovePicker::new(&mut moves, Some(tt_move), [None; 2]);
 
         assert_eq!(picker.next(&position), Some(tt_move));
     }
@@ -149,9 +177,20 @@ mod tests {
             .copied()
             .find(|mv| mv.from() == d2 && mv.to() == d4)
             .expect("Qxd4 is legal");
-        let mut picker = MovePicker::new(&mut moves, None);
+        let mut picker = MovePicker::new(&mut moves, None, [None; 2]);
 
         assert_eq!(picker.next(&position), Some(queen_capture));
+    }
+
+    #[test]
+    fn quiet_killer_is_emitted_before_generator_order_quiets() {
+        let position = Position::startpos();
+        let original = position.legal_moves();
+        let killer = original.as_slice()[original.len() - 1];
+        let mut moves = original.clone();
+        let mut picker = MovePicker::new(&mut moves, None, [Some(killer), None]);
+
+        assert_eq!(picker.next(&position), Some(killer));
     }
 
     #[test]
@@ -162,7 +201,7 @@ mod tests {
         .expect("valid FEN");
         let original = position.legal_moves();
         let mut scratch = original.clone();
-        let mut picker = MovePicker::new(&mut scratch, Some(original.as_slice()[3]));
+        let mut picker = MovePicker::new(&mut scratch, Some(original.as_slice()[3]), [None; 2]);
         let mut picked = Vec::with_capacity(original.len());
         while let Some(mv) = picker.next(&position) {
             assert!(!picked.contains(&mv));
