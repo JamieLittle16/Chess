@@ -44,6 +44,8 @@ class Protocol:
     max_moves: int
     opening_format: str
     openings_required: bool
+    opening_suite_id: str
+    opening_sha256: str
     paired_colour_reversal: bool
     ponder: bool
     tablebases: bool
@@ -90,6 +92,12 @@ class Protocol:
             raise HarnessError("protocol time_control must be non-empty")
         if self.opening_format not in {"epd", "pgn"}:
             raise HarnessError("opening_format must be 'epd' or 'pgn'")
+        if self.openings_required and not self.opening_suite_id.strip():
+            raise HarnessError("opening_suite_id must be non-empty when openings are required")
+        if self.openings_required:
+            digest = self.opening_sha256.lower()
+            if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+                raise HarnessError("opening_sha256 must be a 64-character hexadecimal SHA-256")
         if not self.paired_colour_reversal:
             raise HarnessError("M3 qualification requires paired colour reversal")
         if self.ponder:
@@ -164,7 +172,9 @@ def parse_engine_option(text: str) -> str:
 def resolve_openings(path: Path | None, protocol: Protocol) -> Path | None:
     if path is None:
         if protocol.openings_required:
-            raise HarnessError("qualification protocol requires an opening file")
+            raise HarnessError(
+                f"qualification protocol requires opening suite {protocol.opening_suite_id!r}"
+            )
         return None
 
     try:
@@ -173,6 +183,15 @@ def resolve_openings(path: Path | None, protocol: Protocol) -> Path | None:
         raise HarnessError(f"cannot resolve openings file {path}: {exc}") from exc
     if not resolved.is_file():
         raise HarnessError(f"openings is not a regular file: {resolved}")
+
+    if protocol.openings_required:
+        actual_sha256 = sha256_file(resolved)
+        if actual_sha256 != protocol.opening_sha256.lower():
+            raise HarnessError(
+                "opening suite hash mismatch for "
+                f"{protocol.opening_suite_id!r}: expected {protocol.opening_sha256.lower()}, "
+                f"got {actual_sha256}"
+            )
     return resolved
 
 
