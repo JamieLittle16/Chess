@@ -6,8 +6,10 @@
 use chess_core::Position;
 use chess_search::Searcher;
 
-pub const SUITE_NAME: &str = "reference-search-v1";
-pub const EXPECTED_SIGNATURE: u64 = 0xad74_d211_1aea_484e;
+/// V2 adds rule-correct draw termination. The only V1 suite delta is the promotion case, where
+/// dead-material continuations now terminate two nodes earlier without changing score or best move.
+pub const SUITE_NAME: &str = "reference-search-v2";
+pub const EXPECTED_SIGNATURE: u64 = 0x1a14_9495_c23a_7d8e;
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
