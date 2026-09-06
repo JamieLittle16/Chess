@@ -42,3 +42,5 @@ The history table uses 2 × 64 × 64 signed scores (32 KiB with `i32` entries), 
 4. accept only on positive strength evidence.
 
 Counter-moves remain a later isolated experiment so their marginal value is measurable.
+
+Implementation is being integrated mechanically from the frozen PVS baseline; this note is not acceptance evidence.
