@@ -15,6 +15,13 @@ use chess_core::{ChessMove, Position};
 pub use chess_search::{MATE_SCORE, SearchOutcome, SearchResult};
 use chess_search::{SearchControl, Searcher};
 
+/// Default transposition-table memory for actual engine frontends.
+pub const DEFAULT_HASH_MB: usize = 32;
+/// Smallest accepted production TT setting.
+pub const MIN_HASH_MB: usize = 1;
+/// Defensive upper bound for protocol/front-end supplied TT memory.
+pub const MAX_HASH_MB: usize = 1024;
+
 /// Cloneable cooperative cancellation signal for one running search.
 #[derive(Clone, Debug, Default)]
 pub struct StopToken {
@@ -141,18 +148,39 @@ pub struct Engine {
     position: Position,
     repetition_history: Vec<u64>,
     searcher: Searcher,
+    hash_mb: usize,
 }
 
 impl Engine {
     #[must_use]
     pub fn new() -> Self {
+        Self::with_hash_mb(DEFAULT_HASH_MB)
+    }
+
+    #[must_use]
+    pub fn with_hash_mb(hash_mb: usize) -> Self {
+        let hash_mb = hash_mb.clamp(MIN_HASH_MB, MAX_HASH_MB);
         let position = Position::startpos();
         let repetition_history = vec![position.repetition_key().raw()];
         Self {
             position,
             repetition_history,
-            searcher: Searcher::default(),
+            searcher: Searcher::with_tt_megabytes(hash_mb),
+            hash_mb,
         }
+    }
+
+    #[must_use]
+    pub const fn hash_mb(&self) -> usize {
+        self.hash_mb
+    }
+
+    /// Resize and clear search memory without touching the current game state.
+    pub fn set_hash_mb(&mut self, hash_mb: usize) -> usize {
+        let hash_mb = hash_mb.clamp(MIN_HASH_MB, MAX_HASH_MB);
+        self.searcher = Searcher::with_tt_megabytes(hash_mb);
+        self.hash_mb = hash_mb;
+        hash_mb
     }
 
     #[must_use]
@@ -193,8 +221,11 @@ impl Engine {
     }
 
     /// Start a fresh game and discard search memory from the previous game.
+    ///
+    /// Frontend configuration, including the selected hash size, survives `ucinewgame`.
     pub fn new_game(&mut self) {
-        *self = Self::new();
+        let hash_mb = self.hash_mb;
+        *self = Self::with_hash_mb(hash_mb);
     }
 
     /// Apply one move only when it is legal in the current position.
@@ -275,7 +306,28 @@ mod tests {
 
     use chess_core::{ChessMove, MoveKind, Position, Square};
 
-    use super::{ClockState, Engine, SearchLimits, StopToken};
+    use super::{
+        ClockState, DEFAULT_HASH_MB, Engine, MAX_HASH_MB, MIN_HASH_MB, SearchLimits, StopToken,
+    };
+
+    #[test]
+    fn hash_configuration_is_bounded_and_survives_new_game() {
+        let mut engine = Engine::new();
+        assert_eq!(engine.hash_mb(), DEFAULT_HASH_MB);
+        assert_eq!(engine.set_hash_mb(64), 64);
+        assert_eq!(engine.hash_mb(), 64);
+
+        let root = engine.position().clone();
+        assert_eq!(engine.set_hash_mb(0), MIN_HASH_MB);
+        assert_eq!(engine.position(), &root);
+        assert_eq!(engine.set_hash_mb(usize::MAX), MAX_HASH_MB);
+
+        engine.set_hash_mb(64);
+        engine.new_game();
+        assert_eq!(engine.hash_mb(), 64);
+        assert_eq!(engine.position(), &Position::startpos());
+        assert_eq!(engine.repetition_history().len(), 1);
+    }
 
     #[test]
     fn illegal_external_move_is_rejected_without_mutation() {
