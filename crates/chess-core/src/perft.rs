@@ -1,33 +1,44 @@
-use crate::Position;
+use crate::{Position, generate_legal_moves_mut};
 
-/// Count legal leaf nodes at `depth` using the correctness-first reference transition.
+/// Count legal leaf nodes at `depth` while leaving `position` unchanged.
 ///
-/// This is a validation oracle, not a search-performance primitive. M2 will add an optimized
-/// make/unmake perft path and require it to match this function exactly.
+/// This convenience entry point clones the root once. Recursive work uses the reversible position
+/// transition rather than allocating or cloning a position per child.
 #[must_use]
 pub fn perft(position: &Position, depth: u32) -> u64 {
     if depth == 0 {
         return 1;
     }
+    let mut scratch = position.clone();
+    perft_mut(&mut scratch, depth)
+}
 
-    let moves = position.legal_moves();
+/// In-place perft for validation and performance measurement.
+///
+/// The supplied position is restored exactly before return.
+#[must_use]
+pub fn perft_mut(position: &mut Position, depth: u32) -> u64 {
+    if depth == 0 {
+        return 1;
+    }
+
+    let moves = generate_legal_moves_mut(position);
     if depth == 1 {
         return moves.len() as u64;
     }
 
     let mut nodes = 0_u64;
     for &mv in &moves {
-        let next = position
-            .reference_after(mv)
-            .expect("legal moves must have a valid reference transition");
-        nodes = nodes.saturating_add(perft(&next, depth - 1));
+        let undo = position.make_move(mv);
+        nodes = nodes.saturating_add(perft_mut(position, depth - 1));
+        position.unmake_move(mv, undo);
     }
     nodes
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{Position, perft};
+    use crate::{Position, perft, perft_mut};
 
     #[test]
     fn initial_position_matches_reference_perft() {
@@ -58,5 +69,16 @@ mod tests {
         assert_eq!(perft(&position, 2), 191);
         assert_eq!(perft(&position, 3), 2_812);
         assert_eq!(perft(&position, 4), 43_238);
+    }
+
+    #[test]
+    fn in_place_perft_restores_root_exactly() {
+        let mut position = Position::from_fen(
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+        )
+        .expect("valid Kiwipete position");
+        let before = position.clone();
+        assert_eq!(perft_mut(&mut position, 3), 97_862);
+        assert_eq!(position, before);
     }
 }

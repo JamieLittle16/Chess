@@ -2,7 +2,9 @@
 
 Perft counts the number of legal leaf positions reachable after an exact number of plies. It is a correctness test for move generation and state transitions, **not** an Elo or search-speed benchmark.
 
-The M1 implementation deliberately uses `Position::reference_after`, so these counts validate attack geometry, special-move semantics, king safety, and the immutable reference transition together. M2 will add a fast make/unmake perft path and require identical counts.
+The first M1 implementation used `Position::reference_after` recursively. M2 keeps that immutable transition as the correctness oracle but runs production perft through `generate_legal_moves_mut`, `Position::make_move`, and `Position::unmake_move`. The root is cloned at most once; recursive children reuse one working position.
+
+This means the same canonical counts now gate both chess correctness and the reversible state machine.
 
 ## Canonical gates
 
@@ -54,10 +56,20 @@ This position exercises castling, checks, pins, sliding pieces, and a broad tact
 
 This compact endgame is useful for en-passant and king-safety edge cases.
 
+## Validation layers
+
+1. `reference_after` remains a simple immutable semantic oracle.
+2. Every reversible transition is differential-tested against that oracle.
+3. `generate_legal_moves_mut` must restore its working position exactly.
+4. `perft_mut` must restore the root exactly after the complete recursive traversal.
+5. The resulting node counts must match independently published perft values.
+
+A bug therefore has multiple chances to be detected rather than one optimized implementation validating itself.
+
 ## Policy
 
 - Pull requests touching move generation or state transitions must keep the CI perft subset green.
-- Deeper counts belong in release/nightly validation as the fast transition becomes available.
+- Deeper counts belong in release/nightly validation as the engine grows.
 - A wrong count is a correctness failure; performance work stops until it is explained.
 - Perft NPS is tracked separately from engine playing strength.
 

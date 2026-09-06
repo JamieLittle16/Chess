@@ -31,12 +31,22 @@ impl Position {
     }
 }
 
-/// Generate every legal move for the side to move.
+/// Generate every legal move while leaving `position` unchanged.
 ///
-/// M1 deliberately validates pseudo-legal candidates through the immutable reference transition.
-/// M2 will add a reversible hot-path transition and differential-test it against this behaviour.
+/// This convenience entry point clones the position once and delegates to the reversible hot-path
+/// implementation. Search code that already owns a mutable working position should call
+/// [`generate_legal_moves_mut`] directly and avoid even that single clone.
 #[must_use]
 pub fn generate_legal_moves(position: &Position) -> MoveList {
+    let mut scratch = position.clone();
+    generate_legal_moves_mut(&mut scratch)
+}
+
+/// Generate every legal move using reversible make/unmake on the supplied working position.
+///
+/// The position is exactly restored before this function returns.
+#[must_use]
+pub fn generate_legal_moves_mut(position: &mut Position) -> MoveList {
     let us = position.side_to_move();
     if position.king_square(us).is_none() {
         return MoveList::new();
@@ -45,13 +55,12 @@ pub fn generate_legal_moves(position: &Position) -> MoveList {
     let pseudo = generate_pseudo_legal_moves(position);
     let mut legal = MoveList::new();
     for &mv in &pseudo {
-        let Some(next) = position.reference_after(mv) else {
-            continue;
-        };
-        let Some(king) = next.king_square(us) else {
-            continue;
-        };
-        if !is_square_attacked(&next, king, us.opposite()) {
+        let undo = position.make_move(mv);
+        let is_legal = position
+            .king_square(us)
+            .is_some_and(|king| !is_square_attacked(position, king, us.opposite()));
+        position.unmake_move(mv, undo);
+        if is_legal {
             legal.push(mv);
         }
     }
@@ -262,11 +271,23 @@ fn square(file: u8, rank: u8) -> Square {
 
 #[cfg(test)]
 mod tests {
-    use crate::{MoveKind, Position};
+    use crate::{MoveKind, Position, generate_legal_moves_mut};
 
     #[test]
     fn start_position_has_twenty_legal_moves() {
         assert_eq!(Position::startpos().legal_moves().len(), 20);
+    }
+
+    #[test]
+    fn mutable_generator_restores_position_exactly() {
+        let mut position = Position::from_fen(
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+        )
+        .expect("valid position");
+        let before = position.clone();
+        let moves = generate_legal_moves_mut(&mut position);
+        assert_eq!(moves.len(), 48);
+        assert_eq!(position, before);
     }
 
     #[test]
