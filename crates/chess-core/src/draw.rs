@@ -1,4 +1,4 @@
-use crate::{Color, MoveKind, PieceKind, Position, ZobristKey};
+use crate::{ChessMove, Color, MoveKind, Piece, PieceKind, Position, Square, ZobristKey};
 
 impl Position {
     /// Position identity used for repetition adjudication.
@@ -11,10 +11,7 @@ impl Position {
     pub fn repetition_key(&self) -> ZobristKey {
         let mut key = self.zobrist_key();
         if let Some(target) = self.en_passant()
-            && !self
-                .legal_moves()
-                .iter()
-                .any(|mv| mv.kind() == MoveKind::EnPassant)
+            && !has_legal_en_passant(self, target)
         {
             key.toggle(crate::zobrist::en_passant_component(Some(target)));
         }
@@ -63,6 +60,37 @@ impl Position {
         }
         true
     }
+}
+
+fn has_legal_en_passant(position: &Position, target: Square) -> bool {
+    let us = position.side_to_move();
+    let origin_rank = match us {
+        Color::White => target.rank().checked_sub(1),
+        Color::Black => target.rank().checked_add(1),
+    };
+    let Some(origin_rank) = origin_rank else {
+        return false;
+    };
+
+    for file in [target.file().checked_sub(1), target.file().checked_add(1)] {
+        let Some(file) = file.filter(|file| *file < 8) else {
+            continue;
+        };
+        let Some(from) = Square::from_file_rank(file, origin_rank) else {
+            continue;
+        };
+        if position.piece_at(from) != Some(Piece::new(us, PieceKind::Pawn)) {
+            continue;
+        }
+
+        let mv = ChessMove::new(from, target, MoveKind::EnPassant);
+        if let Some(next) = position.reference_after(mv)
+            && !next.is_in_check(us)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
