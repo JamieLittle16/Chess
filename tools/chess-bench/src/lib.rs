@@ -6,22 +6,24 @@
 use chess_core::Position;
 use chess_search::Searcher;
 
-/// V7 adds the accepted two-slot quiet killer ordering on top of V6's tapered geometric PSQT
-/// evaluator. Scores and best moves remain unchanged across the reviewed five-case suite; the
-/// intended semantic drift is search shape from improved quiet ordering. The reviewed report is:
+/// V8 adds the accepted E4 bishop-pair and rook open/semi-open-file terms on top of V7's tapered
+/// geometric PSQT and two-slot quiet killer ordering. The reviewed five-case report is:
 ///
 /// - startpos d3: score +24, 649 nodes, 22 TT hits, best raw move 82 (`Nb1-c3`);
-/// - Kiwipete d2: score -13, 2,360 nodes, 2 TT hits, best raw move 17,192;
+/// - Kiwipete d2: score +17, 1,137 nodes, 2 TT hits, best raw move 3,427;
 /// - mate-net d2: mate score 29,999, 72 nodes, 1 TT hit, best raw move 3,446;
 /// - en-passant d3: score +167, 63 nodes, 7 TT hits, best raw move 22,827;
-/// - promotion d2: score +886, 63 nodes, 2 TT hits, best raw move 9 (`Ka1-b2`).
+/// - promotion d2: score +886, 62 nodes, 2 TT hits, best raw move 9 (`Ka1-b2`).
 ///
-/// Clean equal-time acceptance versus exact V6 production main measured 63W/94D/43L over 200
-/// paired games: 55.0%, +34.86 +/- 34.16 Elo, LOS 97.83%. The implementation stores at most two
-/// quiet beta-cutoff killers per ply; tactical moves remain ahead of killers and root/qsearch do not
-/// use killer ordering. This evidence accepts the search-shape drift as the new production baseline.
-pub const SUITE_NAME: &str = "reference-search-v7";
-pub const EXPECTED_SIGNATURE: u64 = 0x1c00_e005_a261_25b4;
+/// E4 was first screened against exact V7 production and then qualified twice from materialized
+/// source. The original 200-game suite scored 60W/95D/45L (+26.11 +/- 32.35 Elo, LOS 94.43%).
+/// Because that was narrowly below the preferred confidence line, a fresh 100-position UHO holdout
+/// was selected deterministically from the pinned 2,632,036-position Stockfish source while
+/// explicitly excluding every source line used by the original suite. On that disjoint 200-game
+/// holdout E4 scored 70W/80D/50L (+34.86 +/- 35.54 Elo, LOS 97.40%). This independent validation
+/// accepts the evaluator drift as the new production baseline.
+pub const SUITE_NAME: &str = "reference-search-v8";
+pub const EXPECTED_SIGNATURE: u64 = 0x4c3b_be87_01fb_bb68;
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
