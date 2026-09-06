@@ -5,10 +5,10 @@
 
 use std::time::Duration;
 
-use chess_core::{ChessMove, PieceKind, Position, Square};
-use chess_engine::{Engine, MATE_SCORE, SearchLimits, SearchResult, StopToken};
+use chess_core::{ChessMove, Color, PieceKind, Position, Square};
+use chess_engine::{ClockState, Engine, MATE_SCORE, SearchLimits, SearchResult, StopToken};
 
-/// Safety cap used when a node or movetime search has no explicit depth constraint.
+/// Safety cap used when a dynamically limited search has no explicit depth constraint.
 const DEFAULT_LIMIT_DEPTH: u8 = 64;
 
 /// Output produced by one input command.
@@ -112,7 +112,9 @@ impl UciSession {
     }
 
     fn handle_go(&mut self, tokens: &[&str]) -> UciResponse {
-        let limits = match parse_go_limits(tokens) {
+        let limits = match parse_go_request(tokens)
+            .and_then(|request| request.into_limits(self.engine.position().side_to_move()))
+        {
             Ok(limits) => limits,
             Err(message) => {
                 return response(
@@ -146,10 +148,65 @@ fn response(lines: Vec<String>, quit: bool) -> UciResponse {
     UciResponse { lines, quit }
 }
 
-fn parse_go_limits(tokens: &[&str]) -> Result<SearchLimits, &'static str> {
-    let mut depth = None;
-    let mut nodes = None;
-    let mut movetime = None;
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct GoRequest {
+    depth: Option<u8>,
+    nodes: Option<u64>,
+    movetime: Option<Duration>,
+    wtime: Option<Duration>,
+    btime: Option<Duration>,
+    winc: Option<Duration>,
+    binc: Option<Duration>,
+    moves_to_go: Option<u32>,
+}
+
+impl GoRequest {
+    fn into_limits(self, side_to_move: Color) -> Result<SearchLimits, &'static str> {
+        let has_clock_fields = self.wtime.is_some()
+            || self.btime.is_some()
+            || self.winc.is_some()
+            || self.binc.is_some()
+            || self.moves_to_go.is_some();
+
+        let clock_budget = if has_clock_fields {
+            let (remaining, increment) = match side_to_move {
+                Color::White => (
+                    self.wtime.ok_or("go clock is missing wtime for White to move")?,
+                    self.winc.unwrap_or(Duration::ZERO),
+                ),
+                Color::Black => (
+                    self.btime.ok_or("go clock is missing btime for Black to move")?,
+                    self.binc.unwrap_or(Duration::ZERO),
+                ),
+            };
+            Some(
+                ClockState::new(remaining, increment, self.moves_to_go).allocated_movetime(),
+            )
+        } else {
+            None
+        };
+
+        let movetime = match (self.movetime, clock_budget) {
+            (Some(fixed), Some(clock)) => Some(fixed.min(clock)),
+            (Some(fixed), None) => Some(fixed),
+            (None, Some(clock)) => Some(clock),
+            (None, None) => None,
+        };
+
+        if self.depth.is_none() && self.nodes.is_none() && movetime.is_none() {
+            return Err("go requires depth, nodes, movetime, or a game clock");
+        }
+
+        Ok(SearchLimits {
+            max_depth: self.depth.unwrap_or(DEFAULT_LIMIT_DEPTH),
+            max_nodes: self.nodes,
+            movetime,
+        })
+    }
+}
+
+fn parse_go_request(tokens: &[&str]) -> Result<GoRequest, &'static str> {
+    let mut request = GoRequest::default();
     let mut index = 1;
 
     while index < tokens.len() {
@@ -160,41 +217,79 @@ fn parse_go_limits(tokens: &[&str]) -> Result<SearchLimits, &'static str> {
 
         match key {
             "depth" => {
-                let parsed = value
-                    .parse::<u8>()
-                    .ok()
-                    .filter(|value| *value > 0)
-                    .ok_or("go depth requires a positive integer")?;
-                depth = Some(parsed);
+                request.depth = Some(
+                    value
+                        .parse::<u8>()
+                        .ok()
+                        .filter(|value| *value > 0)
+                        .ok_or("go depth requires a positive integer")?,
+                );
             }
             "nodes" => {
-                let parsed = value
-                    .parse::<u64>()
-                    .ok()
-                    .filter(|value| *value > 0)
-                    .ok_or("go nodes requires a positive integer")?;
-                nodes = Some(parsed);
+                request.nodes = Some(
+                    value
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|value| *value > 0)
+                        .ok_or("go nodes requires a positive integer")?,
+                );
             }
             "movetime" => {
-                let parsed = value
-                    .parse::<u64>()
-                    .map_err(|_| "go movetime requires integer milliseconds")?;
-                movetime = Some(Duration::from_millis(parsed));
+                request.movetime = Some(parse_millis(
+                    value,
+                    "go movetime requires integer milliseconds",
+                )?);
             }
-            _ => return Err("unsupported go limit; use depth, nodes, or movetime"),
+            "wtime" => {
+                request.wtime = Some(parse_millis(
+                    value,
+                    "go wtime requires integer milliseconds",
+                )?);
+            }
+            "btime" => {
+                request.btime = Some(parse_millis(
+                    value,
+                    "go btime requires integer milliseconds",
+                )?);
+            }
+            "winc" => {
+                request.winc = Some(parse_millis(
+                    value,
+                    "go winc requires integer milliseconds",
+                )?);
+            }
+            "binc" => {
+                request.binc = Some(parse_millis(
+                    value,
+                    "go binc requires integer milliseconds",
+                )?);
+            }
+            "movestogo" => {
+                request.moves_to_go = Some(
+                    value
+                        .parse::<u32>()
+                        .ok()
+                        .filter(|value| *value > 0)
+                        .ok_or("go movestogo requires a positive integer")?,
+                );
+            }
+            _ => {
+                return Err(
+                    "unsupported go limit; use depth, nodes, movetime, wtime/btime, increments, or movestogo",
+                );
+            }
         }
         index += 2;
     }
 
-    if depth.is_none() && nodes.is_none() && movetime.is_none() {
-        return Err("go requires depth, nodes, or movetime");
-    }
+    Ok(request)
+}
 
-    Ok(SearchLimits {
-        max_depth: depth.unwrap_or(DEFAULT_LIMIT_DEPTH),
-        max_nodes: nodes,
-        movetime,
-    })
+fn parse_millis(value: &str, error: &'static str) -> Result<Duration, &'static str> {
+    value
+        .parse::<u64>()
+        .map(Duration::from_millis)
+        .map_err(|_| error)
 }
 
 fn parse_position(tokens: &[&str]) -> Result<Position, &'static str> {
@@ -324,7 +419,7 @@ mod tests {
     use chess_core::{Color, PieceKind, Position};
 
     use super::{
-        DEFAULT_LIMIT_DEPTH, UciSession, format_uci_move, parse_go_limits, resolve_uci_move,
+        DEFAULT_LIMIT_DEPTH, UciSession, format_uci_move, parse_go_request, resolve_uci_move,
     };
 
     #[test]
@@ -428,20 +523,117 @@ mod tests {
 
     #[test]
     fn go_limits_compose_without_protocol_specific_search_logic() {
-        let limits = parse_go_limits(&["go", "depth", "7", "nodes", "1234", "movetime", "50"])
-            .expect("valid combined limits");
+        let request = parse_go_request(&[
+            "go",
+            "depth",
+            "7",
+            "nodes",
+            "1234",
+            "movetime",
+            "50",
+        ])
+        .expect("valid combined limits");
+        let limits = request.into_limits(Color::White).expect("concrete limits");
         assert_eq!(limits.max_depth, 7);
         assert_eq!(limits.max_nodes, Some(1234));
         assert_eq!(limits.movetime, Some(Duration::from_millis(50)));
 
-        let node_only = parse_go_limits(&["go", "nodes", "8"]).expect("node limit");
+        let node_only = parse_go_request(&["go", "nodes", "8"])
+            .expect("node request")
+            .into_limits(Color::White)
+            .expect("node limit");
         assert_eq!(node_only.max_depth, DEFAULT_LIMIT_DEPTH);
+    }
+
+    #[test]
+    fn game_clock_budget_uses_side_to_move_and_increment() {
+        let request = parse_go_request(&[
+            "go", "wtime", "60000", "btime", "30000", "winc", "1000", "binc", "2000",
+        ])
+        .expect("clock request");
+
+        let white = request.into_limits(Color::White).expect("white clock");
+        assert_eq!(white.movetime, Some(Duration::from_millis(2_650)));
+
+        let black = request.into_limits(Color::Black).expect("black clock");
+        assert_eq!(black.movetime, Some(Duration::from_millis(2_450)));
+    }
+
+    #[test]
+    fn movestogo_and_explicit_movetime_compose_conservatively() {
+        let clock = parse_go_request(&[
+            "go", "wtime", "60000", "btime", "60000", "movestogo", "10",
+        ])
+        .expect("clock request")
+        .into_limits(Color::White)
+        .expect("clock limits");
+        assert_eq!(clock.movetime, Some(Duration::from_millis(5_700)));
+
+        let capped = parse_go_request(&[
+            "go",
+            "movetime",
+            "1000",
+            "wtime",
+            "60000",
+            "btime",
+            "60000",
+            "winc",
+            "1000",
+        ])
+        .expect("combined time request")
+        .into_limits(Color::White)
+        .expect("combined time limits");
+        assert_eq!(capped.movetime, Some(Duration::from_millis(1_000)));
+    }
+
+    #[test]
+    fn clock_go_uses_the_live_side_to_move() {
+        let mut session = UciSession::new();
+        assert!(
+            session
+                .handle_line("position startpos moves e2e4")
+                .lines()
+                .is_empty()
+        );
+        assert_eq!(session.engine().position().side_to_move(), Color::Black);
+
+        let root = session.engine().position().clone();
+        let response = session.handle_line("go depth 1 wtime 1 btime 60000 winc 0 binc 1000");
+        assert_eq!(response.lines().len(), 2);
+        assert!(response.lines()[0].starts_with("info depth 1 score "));
+        let best = response.lines()[1]
+            .strip_prefix("bestmove ")
+            .expect("bestmove line");
+        assert!(resolve_uci_move(&root, best).is_some());
+        assert_eq!(session.engine().position(), &root);
+    }
+
+    #[test]
+    fn incomplete_clock_for_side_to_move_is_rejected() {
+        let request = parse_go_request(&["go", "wtime", "60000", "winc", "1000"])
+            .expect("syntactically valid clock request");
+        assert_eq!(
+            request.into_limits(Color::Black),
+            Err("go clock is missing btime for Black to move")
+        );
+    }
+
+    #[test]
+    fn node_and_clock_limits_are_preserved_together() {
+        let limits = parse_go_request(&[
+            "go", "nodes", "5000", "wtime", "60000", "btime", "60000",
+        ])
+        .expect("node plus clock")
+        .into_limits(Color::White)
+        .expect("combined limits");
+        assert_eq!(limits.max_nodes, Some(5_000));
+        assert_eq!(limits.movetime, Some(Duration::from_millis(1_900)));
     }
 
     #[test]
     fn unsupported_or_malformed_go_is_explicitly_rejected() {
         let mut session = UciSession::new();
-        let unsupported = session.handle_line("go wtime 1000");
+        let unsupported = session.handle_line("go ponder 1000");
         assert!(unsupported.lines()[0].starts_with("info string unsupported go limit"));
         assert_eq!(unsupported.lines()[1], "bestmove 0000");
 
