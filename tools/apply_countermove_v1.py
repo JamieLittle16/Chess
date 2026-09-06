@@ -10,6 +10,13 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
     return text.replace(old, new, 1)
 
 
+def replace_first(text: str, old: str, new: str, label: str) -> str:
+    count = text.count(old)
+    if count < 1:
+        raise SystemExit(f"{label}: expected at least one match, found {count}")
+    return text.replace(old, new, 1)
+
+
 picker_path = Path("crates/chess-search/src/move_picker.rs")
 picker = picker_path.read_text()
 picker = replace_once(
@@ -42,7 +49,6 @@ picker = replace_once(
     "                    self.stage = Stage::Counter;\n                }\n                Stage::Counter => {\n                    self.stage = Stage::Quiet;\n                    if let Some(countermove) = self.countermove\n                        && !is_tactical(countermove)\n                        && let Some(index) = self.moves[self.cursor..]\n                            .iter()\n                            .position(|&mv| mv == countermove)\n                            .map(|offset| self.cursor + offset)\n                    {\n                        self.moves.swap(self.cursor, index);\n                        let mv = self.moves[self.cursor];\n                        self.cursor += 1;\n                        return Some(mv);\n                    }\n                }\n                Stage::Quiet => {",
     "counter stage behavior",
 )
-# Focused tests and any local constructor call sites in this file use no countermove unless stated.
 picker = picker.replace("[None; 2]);", "[None; 2], None);")
 picker = picker.replace("[Some(killer), None]);", "[Some(killer), None], None);")
 picker = replace_once(
@@ -92,39 +98,33 @@ search = replace_once(
     "            killers: [[None; 2]; MAX_SEARCH_PLY],\n            path_moves: [None; MAX_SEARCH_PLY],\n            countermoves: [None; COUNTERMOVE_SLOTS],\n        }",
     "searcher constructor",
 )
-# Reset learned ordering per externally requested search, while preserving it across ID iterations.
 search = search.replace(
     "        self.killers = [[None; 2]; MAX_SEARCH_PLY];\n",
     "        self.killers = [[None; 2]; MAX_SEARCH_PLY];\n        self.path_moves = [None; MAX_SEARCH_PLY];\n        self.countermoves = [None; COUNTERMOVE_SLOTS];\n",
 )
-# Root has no previous move and therefore no countermove.
 search = search.replace(
     "MovePicker::new(&mut moves, hint, [None; 2])",
     "MovePicker::new(&mut moves, hint, [None; 2], None)",
 )
-# Root child establishes the previous move for ply one.
-search = replace_once(
+loop_anchor = "        while let Some(mv) = picker.next(position) {\n            let undo = position.make_move(mv);"
+search = replace_first(
     search,
-    "        while let Some(mv) = picker.next(position) {\n            let undo = position.make_move(mv);",
+    loop_anchor,
     "        while let Some(mv) = picker.next(position) {\n            self.path_moves[0] = Some(mv);\n            let undo = position.make_move(mv);",
     "root path move",
 )
-# Recursive picker receives a reply learned for the immediately preceding move.
 search = replace_once(
     search,
     "        let mut moves = moves;\n        let killers = self.killers[usize::from(ply)];\n        let mut picker = MovePicker::new(&mut moves, hint, killers);",
     "        let mut moves = moves;\n        let killers = self.killers[usize::from(ply)];\n        let previous_move = (ply > 0).then(|| self.path_moves[usize::from(ply) - 1]).flatten();\n        let countermove = previous_move\n            .and_then(|previous| self.countermoves[countermove_index(previous)]);\n        let mut picker = MovePicker::new(&mut moves, hint, killers, countermove);",
     "recursive picker countermove",
 )
-# Every recursive child exposes its move as the next node's previous move.
-# This anchor occurs once in recursive negamax after the root loop was changed above.
 search = replace_once(
     search,
-    "        while let Some(mv) = picker.next(position) {\n            let undo = position.make_move(mv);",
+    loop_anchor,
     "        while let Some(mv) = picker.next(position) {\n            self.path_moves[usize::from(ply)] = Some(mv);\n            let undo = position.make_move(mv);",
     "recursive path move",
 )
-# Record a quiet beta-cutoff reply against the previous move alongside killer learning.
 old_cutoff = '''                if !mv.kind().is_capture() && !mv.kind().is_promotion() {
                     let killers = &mut self.killers[usize::from(ply)];
                     if killers[0] != Some(mv) {
@@ -158,5 +158,8 @@ search_path.write_text(search)
 
 q_path = Path("crates/chess-search/src/quiescence.rs")
 q = q_path.read_text()
-q = q.replace("MovePicker::new(&mut moves, None, [None; 2])", "MovePicker::new(&mut moves, None, [None; 2], None)")
+q = q.replace(
+    "MovePicker::new(&mut moves, None, [None; 2])",
+    "MovePicker::new(&mut moves, None, [None; 2], None)",
+)
 q_path.write_text(q)
