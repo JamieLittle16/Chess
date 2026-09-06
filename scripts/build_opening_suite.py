@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Derive the frozen M3 opening suite from a pinned Stockfish CC0 book.
 
-The source archive is intentionally external and pinned by commit/blob/SRI. This script verifies the
-uncompressed book exactly as the upstream repository does, then selects the 100 smallest stable
-SHA-256 ranks. Selection therefore spans the full source corpus without relying on its first lines or
-on a runtime RNG.
+The source archive is intentionally external and pinned by commit/blob/archive hash/SRI. This script
+verifies the uncompressed book exactly as the upstream repository does, then selects the 100 smallest
+stable SHA-256 ranks. Selection therefore spans the full source corpus without relying on its first
+lines or on a runtime RNG.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import heapq
 import json
 import sys
 import zipfile
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 SOURCE_REPOSITORY = "official-stockfish/books"
@@ -25,12 +25,14 @@ SOURCE_ARCHIVE = "UHO_Lichess_4852_v1.epd.zip"
 SOURCE_MEMBER = "UHO_Lichess_4852_v1.epd"
 SOURCE_GIT_BLOB_SHA = "e439636101786177ece850d3607356891c1cc2cd"
 SOURCE_ARCHIVE_SIZE = 42_877_788
+SOURCE_ARCHIVE_SHA256 = "4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07"
 SOURCE_TOTAL_POSITIONS = 2_632_036
 SOURCE_SRI_SHA384_BASE64 = "QHAU1P3LurcJr7UTRI7HZCVFsoYBWC3OTsBqZY/FfQA6VQo3MmECWtByB4gVACW5"
 SOURCE_LICENSE = "CC0-1.0"
 SUITE_ID = "m3-uho-lichess-100-v1"
 SELECTION_SEED = "Chess/m3-uho-lichess-100-v1"
 SELECTION_COUNT = 100
+SUITE_SHA256 = "599a45efb446e91952d13e79bc7fec8de319e332036a54552a3e8e4af91f9cf1"
 
 
 class DerivationError(ValueError):
@@ -89,6 +91,11 @@ def derive(archive: Path, output_dir: Path) -> tuple[Path, Path]:
         )
 
     archive_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+    if archive_sha256 != SOURCE_ARCHIVE_SHA256:
+        raise DerivationError(
+            f"source archive SHA-256 mismatch: expected {SOURCE_ARCHIVE_SHA256}, got {archive_sha256}"
+        )
+
     try:
         with zipfile.ZipFile(archive) as zipped:
             names = zipped.namelist()
@@ -116,6 +123,11 @@ def derive(archive: Path, output_dir: Path) -> tuple[Path, Path]:
     epd_path = output_dir / f"{SUITE_ID}.epd"
     metadata_path = output_dir / f"{SUITE_ID}.json"
     epd_bytes = ("\n".join(item.epd for item in selected) + "\n").encode("utf-8")
+    suite_sha256 = hashlib.sha256(epd_bytes).hexdigest()
+    if suite_sha256 != SUITE_SHA256:
+        raise DerivationError(
+            f"derived suite SHA-256 mismatch: expected {SUITE_SHA256}, got {suite_sha256}"
+        )
     epd_path.write_bytes(epd_bytes)
 
     metadata = {
@@ -123,12 +135,14 @@ def derive(archive: Path, output_dir: Path) -> tuple[Path, Path]:
         "suite_id": SUITE_ID,
         "format": "epd",
         "positions": SELECTION_COUNT,
-        "sha256": hashlib.sha256(epd_bytes).hexdigest(),
+        "sha256": SUITE_SHA256,
         "selection": {
             "algorithm": "lowest-sha256-rank-v1",
             "seed": SELECTION_SEED,
             "rank_input": "utf8(seed) + NUL + normalized EPD line bytes",
             "ordering": "ascending rank_sha256",
+            "selected_source_lines": [item.source_line for item in selected],
+            "highest_selected_rank_sha256": selected[-1].rank_sha256,
         },
         "source": {
             "repository": SOURCE_REPOSITORY,
@@ -137,12 +151,11 @@ def derive(archive: Path, output_dir: Path) -> tuple[Path, Path]:
             "member": SOURCE_MEMBER,
             "git_blob_sha": SOURCE_GIT_BLOB_SHA,
             "archive_size_bytes": SOURCE_ARCHIVE_SIZE,
-            "archive_sha256": archive_sha256,
+            "archive_sha256": SOURCE_ARCHIVE_SHA256,
             "positions": SOURCE_TOTAL_POSITIONS,
             "sri_sha384_base64": SOURCE_SRI_SHA384_BASE64,
             "license": SOURCE_LICENSE,
         },
-        "selected": [asdict(item) for item in selected],
     }
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return epd_path, metadata_path
