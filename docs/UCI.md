@@ -1,6 +1,6 @@
 # UCI Interface
 
-Status: **M3 interruptible worker + concrete search limits**
+Status: **M3 interruptible worker + standard game clocks**
 
 The UCI target makes the reference engine usable by standard chess tooling while keeping protocol concerns outside chess correctness and search. Protocol text is translated into `chess-engine` operations; `chess-uci` does not own chess rules or search algorithms.
 
@@ -12,7 +12,7 @@ chess-core → chess-eval → chess-search → chess-engine → chess-uci
 
 `chess-uci` is allowed to allocate strings and parse text because it is not a search hot path. It must not infer castling, en-passant or promotion legality independently. Incoming coordinate moves are matched against `Position::legal_moves()` and only the matching semantic `ChessMove` is applied.
 
-Search policy follows the same ownership rule. UCI parses requested limits into `chess-engine::SearchLimits`; wall-clock/node stopping is implemented by engine orchestration and cooperative checks in `chess-search` rather than by protocol-specific search code.
+Search policy follows the same ownership rule. UCI parses requested limits and clocks, selects the clock belonging to the actual side to move, and maps that data into `chess-engine::ClockState` / `SearchLimits`. Wall-clock budgeting itself is engine policy, not protocol policy.
 
 ## Runtime ownership
 
@@ -50,7 +50,8 @@ The executable currently supports:
 - `go depth N`
 - `go nodes N`
 - `go movetime MS`
-- compatible combinations such as `go depth 12 nodes 500000 movetime 1000`
+- `go wtime MS btime MS [winc MS] [binc MS] [movestogo N]`
+- compatible combinations of depth, node, fixed-time and game-clock limits;
 - asynchronous `stop`
 - `quit`
 
@@ -58,7 +59,30 @@ Move text uses standard UCI long algebraic coordinate form such as `e2e4`, `e7e8
 
 A search emits a standard `info depth ... score ... nodes ...` line followed by `bestmove ...`. Mate-range internal scores are translated to `score mate N`; ordinary scores are emitted as centipawns.
 
-When multiple supported `go` constraints are supplied, search stops when the first active constraint fires. Node- or movetime-only searches use a conservative depth safety cap of 64; an explicit `depth N` replaces that cap.
+## Game-clock mapping
+
+UCI owns only the syntactic clock packet. For a White-to-move position, `wtime`/`winc` are selected; for a Black-to-move position, `btime`/`binc` are selected. If clock fields are supplied without the relevant side's remaining time, the command is rejected explicitly rather than silently borrowing the opponent's clock.
+
+The selected values become:
+
+```text
+ClockState {
+    remaining,
+    increment,
+    moves_to_go,
+}
+```
+
+`ClockState::allocated_movetime()` then applies the current M3 engine policy:
+
+1. reserve 5% of the remaining clock;
+2. divide the spendable remainder across `movestogo`, or 30 moves when it is absent;
+3. add 75% of one increment;
+4. cap the result at the spendable clock after the reserve.
+
+This is intentionally a simple, pinned baseline rather than mature time management. Later policies can be compared by paired games without changing UCI parsing.
+
+If both explicit `movetime` and a game clock are supplied, the smaller hard deadline wins. Node and depth constraints remain independent; search therefore stops when the first active constraint fires. Dynamically limited searches without an explicit depth use a conservative depth safety cap of 64.
 
 ## Interrupted-iteration semantics
 
@@ -74,16 +98,16 @@ A `position` command is assembled in a temporary `Position`. The engine's live g
 
 This is not yet the final tournament UCI surface. In particular:
 
-- full clock allocation (`wtime`, `btime`, `winc`, `binc`, `movestogo`) is not implemented yet;
 - `go infinite` and ponder are not implemented;
 - there are no configurable UCI options yet;
 - MultiPV is not implemented;
 - commands other than `stop` are serialized through the engine worker, so `isready` received during a long active search currently waits for that search to return;
-- callers should not issue a second `go` while a search is active without stopping the first one.
+- callers should not issue a second `go` while a search is active without stopping the first one;
+- the M3 game-clock allocator is deliberately conservative and has not yet been tuned by Elo testing.
 
 Unsupported `go` limits are rejected explicitly rather than approximated incorrectly.
 
-The next timing milestone moves clock-budget calculation into `chess-engine`, then extends UCI parsing with the standard clock fields. The worker/stop ownership above remains unchanged.
+The next qualification work audits draw/history semantics and then establishes reproducible match testing. Time-allocation sophistication belongs after that baseline is measurable.
 
 ## Evidence gates
 
@@ -97,7 +121,9 @@ CI tests require:
 6. node-limited search returning a legal fallback/result without corrupting the root;
 7. zero-movetime interruption returning a legal fallback without corrupting the root;
 8. an interruptible depth search honoring an externally shared stop token;
-9. combined `depth`/`nodes`/`movetime` parsing preserving all limits;
-10. unsupported or malformed `go` requests being rejected explicitly;
-11. the threaded executable compiling under strict Clippy with the engine remaining single-owner;
-12. workspace formatting, debug tests, release tests and the pinned reference-search signature remaining green.
+9. combined fixed limits preserving all constraints;
+10. White and Black clock packets selecting the actual side-to-move time/increment;
+11. `movestogo`, explicit `movetime`, game clocks and node limits composing conservatively;
+12. incomplete side-to-move clocks and unsupported/malformed requests being rejected explicitly;
+13. the threaded executable compiling under strict Clippy with the engine remaining single-owner;
+14. workspace formatting, debug tests, release tests and the pinned reference-search signature remaining green.
