@@ -7,9 +7,9 @@
 mod move_picker;
 mod quiescence;
 
-use chess_core::{ChessMove, Position, generate_legal_moves_mut};
+use chess_core::{ChessMove, Color, Position, generate_legal_moves_mut};
 use chess_eval::evaluate;
-use move_picker::MovePicker;
+use move_picker::{HistoryTable, MovePicker, is_quiet};
 
 /// Scores at or above this range encode forced mate rather than static evaluation.
 pub const MATE_SCORE: i32 = 30_000;
@@ -67,6 +67,8 @@ pub struct Searcher {
     nodes: u64,
     tt_hits: u64,
     path_keys: [u64; MAX_SEARCH_PLY],
+    killers: [[Option<ChessMove>; 2]; MAX_SEARCH_PLY],
+    history: HistoryTable,
 }
 
 impl Searcher {
@@ -77,6 +79,8 @@ impl Searcher {
             nodes: 0,
             tt_hits: 0,
             path_keys: [0; MAX_SEARCH_PLY],
+            killers: [[None; 2]; MAX_SEARCH_PLY],
+            history: HistoryTable::new(),
         }
     }
 
@@ -266,9 +270,10 @@ impl Searcher {
         self.path_keys[0] = repetition_key;
 
         let mut moves = moves;
-        let mut picker = MovePicker::new(&mut moves, hint);
+        let killers = self.killers[0];
+        let mut picker = MovePicker::with_killers(&mut moves, hint, killers);
         let mut first_move = true;
-        while let Some(mv) = picker.next(position) {
+        while let Some(mv) = picker.next_with_history(position, &self.history) {
             let undo = position.make_move(mv);
             let child = if first_move {
                 self.negamax(
@@ -401,9 +406,14 @@ impl Searcher {
         let mut best_move = None;
 
         let mut moves = moves;
-        let mut picker = MovePicker::new(&mut moves, hint);
+        let killers = self
+            .killers
+            .get(usize::from(ply))
+            .copied()
+            .unwrap_or([None, None]);
+        let mut picker = MovePicker::with_killers(&mut moves, hint, killers);
         let mut first_move = true;
-        while let Some(mv) = picker.next(position) {
+        while let Some(mv) = picker.next_with_history(position, &self.history) {
             let undo = position.make_move(mv);
             let child = if first_move {
                 self.negamax(
@@ -454,6 +464,9 @@ impl Searcher {
             }
             alpha = alpha.max(score);
             if alpha >= beta {
+                if is_quiet(mv) {
+                    self.record_quiet_cutoff(position.side_to_move(), mv, depth, ply);
+                }
                 break;
             }
         }
@@ -468,6 +481,16 @@ impl Searcher {
         self.table
             .store(key, depth, score_to_tt(best, ply), bound, best_move);
         Some(best)
+    }
+
+    fn record_quiet_cutoff(&mut self, side: Color, mv: ChessMove, depth: u8, ply: u16) {
+        self.history.record_cutoff(side, mv, depth);
+        if let Some(killers) = self.killers.get_mut(usize::from(ply))
+            && killers[0] != Some(mv)
+        {
+            killers[1] = killers[0];
+            killers[0] = Some(mv);
+        }
     }
 
     fn fallback_result(&self, position: &mut Position, prior_history: &[u64]) -> SearchResult {
