@@ -6,9 +6,10 @@ The detailed source, executable hashes, opening provenance and raw match evidenc
 
 ## Production baseline
 
-As of `main@54a1075912358d206cd924878d1cbdc876a30629`:
+As of `main@2e4dcf1e10f482783af721ad09df113a63c5ba8b`:
 
 - tapered geometric PSQT evaluator (E1);
+- accepted E4 bishop-pair and rook open/semi-open-file structure;
 - bounded quiescence with tactical-only legal generation;
 - staged allocation-free move picker;
 - PVS/null-window probing;
@@ -17,7 +18,7 @@ As of `main@54a1075912358d206cd924878d1cbdc876a30629`:
 - rule-correct repetition/50-move/dead-material handling;
 - strategic regressions proving a winning side avoids available repetition/stalemate while a losing side takes an available draw.
 
-Deterministic benchmark: `reference-search-v7`, signature `0x1c00_e005_a261_25b4`.
+Deterministic benchmark: `reference-search-v8`, signature `0x4c3b_be87_01fb_bb68`.
 
 ## Accepted strength changes
 
@@ -28,8 +29,11 @@ Deterministic benchmark: `reference-search-v7`, signature `0x1c00_e005_a261_25b4
 | PVS v1 vs staged picker | +41.89 +/-30.29 Elo | accepted |
 | E1 tapered geometric PSQT vs material/PVS | 62W / 26D / 12L, +190.85 +/-64.16, LOS 100% | accepted |
 | two-slot killer ordering vs E1 production | 63W / 94D / 43L, +34.86 +/-34.16, LOS 97.83% | accepted |
+| E4 bishop-pair + rook-file structure, fresh disjoint holdout | 70W / 80D / 50L, +34.86 +/-35.54, LOS 97.40% | accepted |
 
 These are sequential development comparisons against different historical baselines. Do not sum them to estimate an absolute rating.
+
+E4 also had an exact-source 200-game test on the original frozen UHO development suite: 60W / 95D / 45L, +26.11 +/-32.35, LOS 94.43%. Because that landed narrowly below the preferred confidence line, the threshold was not relaxed. A second 100-position holdout was selected deterministically from the pinned 2,632,036-position Stockfish UHO Lichess source while explicitly excluding every source line used by the original suite. The independent holdout cleared the line and justified acceptance. Full provenance lives in `match/experiments/m4-e4-piece-structure-v1.md`.
 
 ## Rejected or superseded hypotheses
 
@@ -44,50 +48,32 @@ These are sequential development comparisons against different historical baseli
 | four-way clustered TT v1 | 25W / 49D / 26L, -3.47 +/-24.58, LOS 39.07% | collision reduction did not repay probing/replacement overhead at 32 MiB |
 | raw E2 mobility over killers | 28W / 46D / 26L, +6.95 +/-49.42, LOS 60.93% | original pre-killer signal did not survive stronger search; attack-map cost unjustified |
 | pawn-safe mobility v1 | earlier +38.37 +/-50.34, LOS 93.54% | weaker/more expensive than raw mobility and never earned acceptance |
+| compact king-safety E5 v1 | 28W / 40D / 32L, -13.90 +/-49.36, LOS 28.90% | simple weighted king-zone attack counts plus shield were too crude/expensive |
 
 A rejected implementation may still contain useful substrate. In particular, the null-transition/draw-isolation work from null-move v1 is a valid basis for a differently tuned future NMP experiment; rejection means **do not merge the tested policy**, not “never investigate this family again.”
 
-## Live experiments
+The king-safety rejection should likewise not be read as “king safety does not matter.” A later experiment must use a materially stronger model—such as attacker-count thresholds, weak-square/contact-check features, shelter/storm structure or shared/cached attack features—rather than simply retuning E5 v1 coefficients.
 
-### E4: bishop pair and rook-file structure
+## Live experiment
 
-Exact terms under validation:
+### Conservative LMR v2 over E4
 
-- bishop pair: +30 MG / +45 EG;
-- rook open file: +16 MG / +12 EG;
-- rook semi-open file: +8 MG / +6 EG.
+The unchanged conservative v2 policy first screened against killer-only production at:
 
-Evidence so far:
+- 31W / 49D / 20L;
+- +38.37 +/-49.36 Elo;
+- LOS 93.90%.
 
-- initial 100-game killer-main screen: 31W / 47D / 22L, +31.35 +/-49.55 Elo, LOS 89.54%;
-- exact-source 200-game acceptance on the original UHO sample: 60W / 95D / 45L, +26.11 +/-32.35 Elo, LOS 94.43%.
-
-Because the second result landed just below the preferred confidence line, E4 is undergoing one fresh 200-game holdout selected deterministically from the pinned 2,632,036-position Stockfish UHO Lichess source. The holdout explicitly excludes every source line used by the original 100-position suite. Do not promote E4 until that holdout resolves.
-
-If accepted, its reviewed deterministic search signature is expected to advance to `reference-search-v8` / `0x4c3b_be87_01fb_bb68` after final source cleanup.
-
-### E5: compact king safety
-
-Screening independently against killer-main:
-
-- enemy P/N/B/R/Q attack hits into a local king zone;
-- middle-game-only weighted pressure;
-- short first/second-rank pawn shield;
-- no search or draw changes.
-
-If independently positive and E4 lands first, E5 must still prove marginal value on top of E4 before production.
-
-### LMR v2 on killer-main
-
-Retesting the unchanged conservative v2 policy:
+That result became stale immediately when E4 was accepted, so it did **not** authorize a merge. PR #44 is measuring the exact same frozen policy marginally over `main@2e4dcf1e10f482783af721ad09df113a63c5ba8b`:
 
 - recursive negamax only;
 - fourth and later quiet moves at depth >=3;
 - never reduce captures, promotions, nodes in check or checking moves;
 - one-ply reduction only;
-- any reduced alpha improvement is immediately verified at full depth.
+- any reduced alpha improvement is immediately verified at full depth;
+- ordinary PVS verification remains unchanged.
 
-The previous stale-baseline screen was 34W / 40D / 26L (+27.85 +/-53.84, LOS 84.77%). The current test must stand on its own against killer-main.
+If positive over E4, LMR v2 still requires clean materialization and a 200-game acceptance before production.
 
 ## Decision rules
 
