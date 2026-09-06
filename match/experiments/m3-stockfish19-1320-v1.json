@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "experiment_id": "m3-stockfish19-1320-v1",
+  "protocol_id": "m3-baseline-v1",
+  "candidate": {
+    "repository": "JamieLittle16/Chess",
+    "commit": "5185f2c8de64b78ff84df12067d88d9f43ed3cb0",
+    "binary": "chess-uci",
+    "options": []
+  },
+  "reference": {
+    "name": "Stockfish19-UCI1320",
+    "repository": "official-stockfish/Stockfish",
+    "release_tag": "sf_19",
+    "release_asset": "stockfish-linux-x86-64-universal.tar.gz",
+    "release_asset_sha256": "9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f",
+    "options": [
+      "UCI_LimitStrength=true",
+      "UCI_Elo=1320",
+      "Threads=1",
+      "Hash=1"
+    ]
+  },
+  "runner": {
+    "name": "Fastchess",
+    "repository": "Disservin/fastchess",
+    "release_tag": "v1.8.2-alpha",
+    "release_asset": "fastchess-linux-x86-64.tar",
+    "release_asset_sha256": "1003f920bebe841acdab5e6d7871e93171a4586857b3ec91c21ef5777f26ff96"
+  },
+  "notes": "First external M3 calibration. Stockfish 19 is deliberately limited to its minimum UCI_Elo setting (1320) so the material-only reference engine has a measurable opponent. UCI_Elo is an engine strength-control parameter, not a claim about the candidate's human/FIDE rating. Stockfish is single-threaded with a 1 MiB hash; ponder and tablebases remain disabled by the M3 protocol/default configuration."
+}
