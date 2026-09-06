@@ -4,9 +4,9 @@ use super::*;
 
 // Qsearch v1 is intentionally transparent and does not yet have SEE/delta pruning. A bounded local
 // qsearch path prevents pathological alternating check-evasion trees from consuming an unbounded
-// share of a search. This is a safety/performance guardrail, not a claim that 8 is an optimal chess
+// share of a search. This is a safety/performance guardrail, not a claim that 4 is an optimal chess
 // value; later M4 work should re-qualify or remove it once tactical ordering and SEE are available.
-const MAX_QSEARCH_PLY: usize = 8;
+const MAX_QSEARCH_PLY: usize = 4;
 
 impl Searcher {
     /// Stabilise a nominal leaf by resolving forcing tactical continuations.
