@@ -117,7 +117,7 @@ impl Searcher {
         self.path_keys[path_len] = repetition_key;
 
         let mut moves = moves;
-        let mut picker = MovePicker::new(&mut moves, None);
+        let mut picker = MovePicker::new(&mut moves, None, [None; 2]);
         while let Some(mv) = picker.next(position) {
             let undo = position.make_move(mv);
             self.nodes = self.nodes.saturating_add(1);
