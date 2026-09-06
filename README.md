@@ -17,9 +17,9 @@ The repository is at **M3: Classical Reference Engine**.
 
 The chess layer is already functional: `chess-core` parses FEN, generates legal moves, handles castling/en-passant/promotions, makes and unmakes moves reversibly, passes published perft gates, and maintains independently reconstructable Zobrist identity.
 
-Above it, `chess-eval` provides the deliberately simple material reference evaluator and `chess-search` provides deterministic negamax/alpha-beta, iterative deepening, bounded transposition storage, mate/stalemate handling, reversible root search and cooperative cancellation. `chess-engine` owns persistent game/search state plus depth/node/movetime orchestration, and `chess-uci` exposes the standard command-line engine interface.
+Above it, `chess-eval` provides the deliberately simple material reference evaluator and `chess-search` provides deterministic negamax/alpha-beta, iterative deepening, bounded transposition storage, mate/stalemate handling, reversible root search and cooperative cancellation. `chess-engine` owns persistent game/search state, node/deadline control, and protocol-neutral game-clock budgeting. `chess-uci` runs the engine on a single-owner worker thread and exposes asynchronous `stop`, fixed limits, and standard UCI clocks.
 
-This is now a real but intentionally weak playable engine baseline. Strength work comes after the correctness, timing and measurement interfaces are stable.
+This is now a real but intentionally weak playable engine baseline. Before treating it as tournament-qualified, M3 is auditing draw/history semantics and adding reproducible match measurement. Strength work follows that correctness boundary.
 
 ## Workspace
 
@@ -64,4 +64,4 @@ Once the UCI target is built, it can be launched with:
 cargo run --release -p chess-uci
 ```
 
-The synchronous UCI surface currently supports `go depth N`, `go nodes N`, `go movetime MS`, and compatible combinations. The next orchestration boundary is an asynchronous worker so `stop` and full clock allocation can operate while search is live.
+The UCI executable supports `go depth N`, `go nodes N`, `go movetime MS`, standard `wtime`/`btime`/increment/`movestogo` clocks, compatible limit combinations, and asynchronous `stop`. Search state remains single-owner on the engine worker rather than shared behind a mutex.
