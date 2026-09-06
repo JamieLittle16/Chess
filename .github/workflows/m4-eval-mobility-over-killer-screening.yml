@@ -31,7 +31,8 @@ jobs:
           cargo test -p chess-search --all-features
           cargo test -p chess-core --all-features
           cargo test -p chess-engine --all-features
-          test -z "$(git status --porcelain)"
+          git diff --exit-code
+          git diff --cached --exit-code
       - name: Build candidate
         run: |
           set -euo pipefail
