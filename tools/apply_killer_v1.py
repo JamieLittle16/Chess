@@ -2,7 +2,7 @@
 """Apply the M4 killer-move v1 experiment deterministically.
 
 The experiment keeps the accepted search architecture intact and only adds two
-quiet beta-cutoff moves per ply to the staged MovePicker.  It is a screening
+quiet beta-cutoff moves per ply to the staged MovePicker. It is a screening
 patcher so the branch can carry experiment infrastructure without pretending a
 candidate is accepted production code before match evidence exists.
 """
@@ -13,6 +13,13 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
     count = text.count(old)
     if count != 1:
         raise SystemExit(f"{label}: expected one match, found {count}")
+    return text.replace(old, new, 1)
+
+
+def replace_first(text: str, old: str, new: str, label: str) -> str:
+    count = text.count(old)
+    if count < 1:
+        raise SystemExit(f"{label}: expected at least one match, found {count}")
     return text.replace(old, new, 1)
 
 
@@ -88,7 +95,9 @@ search = replace_once(
     "        self.nodes = 0;\n        self.tt_hits = 0;\n        self.killers = [[None; 2]; MAX_SEARCH_PLY];\n        let mut last_completed = None;",
     "iterative reset",
 )
-search = replace_once(
+# The first generic picker construction is the root. The second lives in negamax and is
+# deliberately handled by the more-specific transform immediately below.
+search = replace_first(
     search,
     "        let mut picker = MovePicker::new(&mut moves, hint);\n        let mut first_move = true;",
     "        let mut picker = MovePicker::new(&mut moves, hint, [None; 2]);\n        let mut first_move = true;",
