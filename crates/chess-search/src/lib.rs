@@ -65,11 +65,7 @@ impl Searcher {
     /// Reported nodes and table hits are cumulative across all completed iterations because those
     /// counters describe the actual work performed by iterative deepening.
     #[must_use]
-    pub fn iterative_deepening(
-        &mut self,
-        position: &mut Position,
-        max_depth: u8,
-    ) -> SearchResult {
+    pub fn iterative_deepening(&mut self, position: &mut Position, max_depth: u8) -> SearchResult {
         if max_depth == 0 {
             return self.search_depth(position, 0);
         }
@@ -182,24 +178,14 @@ impl Searcher {
         let moves = generate_legal_moves_mut(position);
         if moves.is_empty() {
             let score = terminal_score(position, ply);
-            self.table.store(
-                key,
-                depth,
-                score_to_tt(score, ply),
-                Bound::Exact,
-                None,
-            );
+            self.table
+                .store(key, depth, score_to_tt(score, ply), Bound::Exact, None);
             return score;
         }
         if depth == 0 {
             let score = evaluate(position);
-            self.table.store(
-                key,
-                depth,
-                score_to_tt(score, ply),
-                Bound::Exact,
-                None,
-            );
+            self.table
+                .store(key, depth, score_to_tt(score, ply), Bound::Exact, None);
             return score;
         }
 
