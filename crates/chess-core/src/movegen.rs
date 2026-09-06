@@ -361,9 +361,7 @@ fn square(file: u8, rank: u8) -> Square {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        MoveKind, Position, generate_legal_moves_mut, generate_legal_tactical_moves_mut,
-    };
+    use crate::{MoveKind, Position, generate_legal_moves_mut, generate_legal_tactical_moves_mut};
 
     #[test]
     fn start_position_has_twenty_legal_moves() {
