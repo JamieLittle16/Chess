@@ -1,6 +1,6 @@
 # UCI Interface
 
-Status: **M3 interruptible worker + standard clocks + draw history**
+Status: **M4 interruptible worker + clocks + draw history + configurable hash**
 
 The UCI target makes the reference engine usable by standard chess tooling while keeping protocol concerns outside chess correctness and search. Protocol text is translated into `chess-engine` operations; `chess-uci` does not own chess rules, draw policy or search algorithms.
 
@@ -44,6 +44,7 @@ The executable currently supports:
 
 - `uci`
 - `isready`
+- `setoption name Hash value <MiB>`
 - `ucinewgame`
 - `position startpos [moves ...]`
 - `position fen <six FEN fields> [moves ...]`
@@ -56,6 +57,8 @@ The executable currently supports:
 - `quit`
 
 Move text uses standard UCI long algebraic coordinate form such as `e2e4`, `e7e8q` and `e1g1`.
+
+`Hash` is the first configurable UCI engine option. The deterministic `Searcher::default()` remains the small 32,768-entry reference configuration used by behavioral CI, while `Engine::new()` uses a 32 MiB production TT. UCI accepts 1–1024 MiB. Resizing clears only search memory and never mutates board/history state; `ucinewgame` clears the table while preserving the selected hash size.
 
 A search emits a standard `info depth ... score ... nodes ...` line followed by `bestmove ...`. Mate-range internal scores are translated to `score mate N`; ordinary scores are emitted as centipawns.
 
@@ -115,7 +118,7 @@ An external stop check occurs before a root TT exact hit, so previously cached a
 This is not yet the final tournament UCI surface. In particular:
 
 - `go infinite` and ponder are not implemented;
-- there are no configurable UCI options yet;
+- `Hash` is currently the only configurable engine option;
 - MultiPV is not implemented;
 - commands other than `stop` are serialized through the engine worker, so `isready` received during a long active search currently waits for that search to return;
 - callers should not issue a second `go` while a search is active without stopping the first one;
@@ -142,5 +145,6 @@ CI tests require:
 11. White and Black clock packets selecting the actual side-to-move time/increment;
 12. `movestogo`, explicit `movetime`, game clocks and node limits composing conservatively;
 13. incomplete side-to-move clocks and unsupported/malformed requests being rejected explicitly;
-14. the threaded executable compiling under strict Clippy with the engine remaining single-owner;
-15. workspace formatting, debug tests, release tests and the pinned `reference-search-v2` signature remaining green.
+14. `Hash` advertising, bounded resizing, state preservation and persistence across `ucinewgame`;
+15. the threaded executable compiling under strict Clippy with the engine remaining single-owner;
+16. workspace formatting, debug tests, release tests and the pinned current reference-search signature remaining green.

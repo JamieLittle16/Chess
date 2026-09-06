@@ -15,6 +15,7 @@ use move_picker::MovePicker;
 pub const MATE_SCORE: i32 = 30_000;
 /// Default number of entries in the bounded reference transposition table.
 pub const DEFAULT_TT_ENTRIES: usize = 1 << 15;
+const BYTES_PER_MEGABYTE: usize = 1024 * 1024;
 
 const INFINITY: i32 = 32_000;
 const MATE_TT_THRESHOLD: i32 = MATE_SCORE - 1_000;
@@ -78,6 +79,20 @@ impl Searcher {
             tt_hits: 0,
             path_keys: [0; MAX_SEARCH_PLY],
         }
+    }
+
+    /// Construct search state with a transposition table bounded by whole mebibytes.
+    ///
+    /// This is the production-facing sizing API. The deterministic reference default remains
+    /// entry-count based so benchmark identity does not depend on platform allocator details.
+    #[must_use]
+    pub fn with_tt_megabytes(megabytes: usize) -> Self {
+        Self::with_tt_entries(tt_entries_for_megabytes(megabytes))
+    }
+
+    #[must_use]
+    pub fn tt_capacity_entries(&self) -> usize {
+        self.table.len()
     }
 
     /// Search one exact nominal depth while restoring `position` exactly.
@@ -508,6 +523,13 @@ impl Searcher {
     }
 }
 
+/// Convert a whole-mebibyte TT budget into the maximum number of complete entries that fit.
+#[must_use]
+pub fn tt_entries_for_megabytes(megabytes: usize) -> usize {
+    let bytes = megabytes.saturating_mul(BYTES_PER_MEGABYTE);
+    (bytes / core::mem::size_of::<TtEntry>()).max(1)
+}
+
 impl Default for Searcher {
     fn default() -> Self {
         Self::with_tt_entries(DEFAULT_TT_ENTRIES)
@@ -628,6 +650,10 @@ impl TranspositionTable {
         }
     }
 
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
     fn probe(&self, key: u64) -> Option<TtEntry> {
         let slot = self.slot(key)?;
         let entry = self.entries[slot];
@@ -669,8 +695,19 @@ mod tests {
 
     use super::{
         MATE_SCORE, SearchControl, Searcher, has_two_prior_occurrences, iterative_deepening,
-        score_from_tt, score_to_tt, search, search_mut,
+        score_from_tt, score_to_tt, search, search_mut, tt_entries_for_megabytes,
     };
+
+    #[test]
+    fn megabyte_tt_sizing_matches_entry_layout_and_never_returns_zero() {
+        let expected = (1024 * 1024) / core::mem::size_of::<super::TtEntry>();
+        assert_eq!(tt_entries_for_megabytes(1), expected);
+        assert_eq!(
+            Searcher::with_tt_megabytes(1).tt_capacity_entries(),
+            expected
+        );
+        assert_eq!(tt_entries_for_megabytes(0), 1);
+    }
 
     struct NodeStop(u64);
 

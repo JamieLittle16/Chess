@@ -6,7 +6,10 @@
 use std::time::Duration;
 
 use chess_core::{ChessMove, Color, PieceKind, Position, Square};
-use chess_engine::{ClockState, Engine, MATE_SCORE, SearchLimits, SearchResult, StopToken};
+use chess_engine::{
+    ClockState, DEFAULT_HASH_MB, Engine, MATE_SCORE, MAX_HASH_MB, MIN_HASH_MB, SearchLimits,
+    SearchResult, StopToken,
+};
 
 /// Safety cap used when a dynamically limited search has no explicit depth constraint.
 const DEFAULT_LIMIT_DEPTH: u8 = 64;
@@ -88,11 +91,15 @@ impl UciSession {
                 vec![
                     "id name Chess 0.1.0".to_owned(),
                     "id author Jamie Little".to_owned(),
+                    format!(
+                        "option name Hash type spin default {DEFAULT_HASH_MB} min {MIN_HASH_MB} max {MAX_HASH_MB}"
+                    ),
                     "uciok".to_owned(),
                 ],
                 false,
             ),
             "isready" => response(vec!["readyok".to_owned()], false),
+            "setoption" => self.handle_setoption(&tokens),
             "ucinewgame" => {
                 self.engine.new_game();
                 response(Vec::new(), false)
@@ -109,6 +116,16 @@ impl UciSession {
             "stop" => response(Vec::new(), false),
             "quit" => response(Vec::new(), true),
             _ => response(Vec::new(), false),
+        }
+    }
+
+    fn handle_setoption(&mut self, tokens: &[&str]) -> UciResponse {
+        match parse_hash_option(tokens) {
+            Ok(hash_mb) => {
+                self.engine.set_hash_mb(hash_mb);
+                response(Vec::new(), false)
+            }
+            Err(message) => response(vec![format!("info string {message}")], false),
         }
     }
 
@@ -147,6 +164,24 @@ impl Default for UciSession {
 
 fn response(lines: Vec<String>, quit: bool) -> UciResponse {
     UciResponse { lines, quit }
+}
+
+fn parse_hash_option(tokens: &[&str]) -> Result<usize, &'static str> {
+    if tokens.get(1) != Some(&"name")
+        || tokens.get(2) != Some(&"Hash")
+        || tokens.get(3) != Some(&"value")
+        || tokens.len() != 5
+    {
+        return Err("supported setoption syntax is: setoption name Hash value <MiB>");
+    }
+
+    let value = tokens[4]
+        .parse::<usize>()
+        .map_err(|_| "Hash requires an integer MiB value")?;
+    if !(MIN_HASH_MB..=MAX_HASH_MB).contains(&value) {
+        return Err("Hash value is outside the advertised range");
+    }
+    Ok(value)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -431,6 +466,7 @@ mod tests {
     use std::time::Duration;
 
     use chess_core::{Color, PieceKind, Position};
+    use chess_engine::{DEFAULT_HASH_MB, MAX_HASH_MB};
 
     use super::{
         DEFAULT_LIMIT_DEPTH, UciSession, format_uci_move, parse_go_request, resolve_uci_move,
@@ -442,9 +478,38 @@ mod tests {
         let uci = session.handle_line("uci");
         assert_eq!(
             uci.lines(),
-            ["id name Chess 0.1.0", "id author Jamie Little", "uciok"]
+            [
+                "id name Chess 0.1.0",
+                "id author Jamie Little",
+                "option name Hash type spin default 32 min 1 max 1024",
+                "uciok",
+            ]
         );
         assert_eq!(session.handle_line("isready").lines(), ["readyok"]);
+    }
+
+    #[test]
+    fn hash_option_resizes_search_memory_without_losing_configuration_on_new_game() {
+        let mut session = UciSession::new();
+        assert_eq!(session.engine().hash_mb(), DEFAULT_HASH_MB);
+        assert!(
+            session
+                .handle_line("setoption name Hash value 64")
+                .lines()
+                .is_empty()
+        );
+        assert_eq!(session.engine().hash_mb(), 64);
+
+        let invalid = session.handle_line("setoption name Hash value 0");
+        assert_eq!(invalid.lines().len(), 1);
+        assert_eq!(session.engine().hash_mb(), 64);
+
+        let too_large = format!("setoption name Hash value {}", MAX_HASH_MB + 1);
+        assert_eq!(session.handle_line(&too_large).lines().len(), 1);
+        assert_eq!(session.engine().hash_mb(), 64);
+
+        let _ = session.handle_line("ucinewgame");
+        assert_eq!(session.engine().hash_mb(), 64);
     }
 
     #[test]
