@@ -54,11 +54,7 @@ pub struct ClockState {
 
 impl ClockState {
     #[must_use]
-    pub const fn new(
-        remaining: Duration,
-        increment: Duration,
-        moves_to_go: Option<u32>,
-    ) -> Self {
+    pub const fn new(remaining: Duration, increment: Duration, moves_to_go: Option<u32>) -> Self {
         Self {
             remaining,
             increment,
@@ -332,13 +328,12 @@ mod tests {
     #[test]
     fn clock_budget_policy_is_conservative_and_pinned() {
         let no_increment = ClockState::new(Duration::from_secs(60), Duration::ZERO, None);
-        assert_eq!(no_increment.allocated_movetime(), Duration::from_millis(1_900));
-
-        let increment = ClockState::new(
-            Duration::from_secs(60),
-            Duration::from_secs(1),
-            None,
+        assert_eq!(
+            no_increment.allocated_movetime(),
+            Duration::from_millis(1_900)
         );
+
+        let increment = ClockState::new(Duration::from_secs(60), Duration::from_secs(1), None);
         assert_eq!(increment.allocated_movetime(), Duration::from_millis(2_650));
 
         let ten_moves = ClockState::new(Duration::from_secs(60), Duration::ZERO, Some(10));
@@ -347,11 +342,7 @@ mod tests {
 
     #[test]
     fn clock_budget_never_spends_the_reserved_tail() {
-        let clock = ClockState::new(
-            Duration::from_millis(100),
-            Duration::from_secs(60),
-            Some(1),
-        );
+        let clock = ClockState::new(Duration::from_millis(100), Duration::from_secs(60), Some(1));
         assert_eq!(clock.allocated_movetime(), Duration::from_millis(95));
         assert!(clock.allocated_movetime() < clock.remaining);
         assert_eq!(
