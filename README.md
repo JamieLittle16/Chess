@@ -13,7 +13,7 @@ A from-scratch, high-performance chess engine built around a deliberately modula
 
 ## Current state
 
-The repository is at **M3: Classical Reference Engine**.
+**M3 is complete; M4 tactical-strength work is now in progress.**
 
 The chess layer is functional: `chess-core` parses FEN, generates legal moves, handles castling/en-passant/promotions, makes and unmakes moves reversibly, passes published perft gates, and maintains independently reconstructable Zobrist identity. It also exposes a separate rule-correct repetition identity so unusable or king-pinned en-passant metadata does not create false distinctions between repeated positions.
 
@@ -21,13 +21,26 @@ Above it, `chess-eval` provides the deliberately simple material reference evalu
 
 `chess-engine` owns persistent game/search state, actual game repetition history, node/deadline control and protocol-neutral game-clock budgeting. `chess-uci` runs the engine on a single-owner worker thread, exposes asynchronous `stop`, fixed limits and standard UCI clocks, and preserves repetition history transactionally through `position ... moves ...` commands.
 
-The deterministic draw-aware reference benchmark is `reference-search-v2`, currently pinned at `0x1a149495c23a7d8e` in CI.
+The deterministic draw-aware M3 benchmark is `reference-search-v2`, pinned at `0x1a149495c23a7d8e` in CI.
 
 M3 also has repository-owned paired-game qualification tooling. `match/protocols/m3-baseline-v1.json` freezes the first finite-time experiment settings, including the exact `m3-uho-lichess-100-v1` opening-suite SHA-256. `scripts/match_harness.py` wraps Fastchess while recording exact engine/runner/opening hashes, git/environment provenance, command line, PGN, raw output and UCI logs, and refuses a mismatched opening file before creating result state.
 
 The 100-position opening corpus is vendored under `match/openings/` and is deterministically derived from a pinned CC0 official Stockfish UHO Lichess book containing 2.63 million source positions. Python tests pin its provenance/hash/rank ordering and `chess-core` independently validates every FEN as legal and nonterminal.
 
-This is now a real but intentionally weak, rule-correct playable engine baseline. The only remaining M3 exit item is the first retained measured baseline against a named reference; strength work follows that measurement boundary.
+### First measured external calibration
+
+The intentionally weak material-only M3 control has now completed a retained 100-game short-control calibration against Stockfish 19 configured with `UCI_LimitStrength=true` and `UCI_Elo=1320`:
+
+```text
+M3 vs Stockfish-19-Elo1320, 1+0.01
+Wins / Draws / Losses: 31 / 9 / 60
+Score: 35.5 / 100
+Fastchess relative Elo: -103.73 +/- 71.87
+```
+
+This is a protocol-specific engine comparison, **not** a claim that the bot has a FIDE rating of roughly 1216. Exact engine hashes, opening/protocol identity, pentanomial result and retained artifact are recorded in [`docs/STRENGTH_BASELINES.md`](docs/STRENGTH_BASELINES.md).
+
+M4 now strengthens the frozen control experimentally. The first active candidate is transparent quiescence search; subsequent move-ordering, evaluation and pruning changes must each justify themselves against historical baselines under paired games.
 
 ## Workspace
 
@@ -55,6 +68,7 @@ Future WASM and other frontends branch from the orchestration/search layers rath
 - [`docs/UCI.md`](docs/UCI.md) — supported UCI surface, worker ownership, clocks and transactional history.
 - [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md) — correctness, performance and Elo methodology.
 - [`docs/MATCH_QUALIFICATION.md`](docs/MATCH_QUALIFICATION.md) — frozen openings, reproducible paired-game protocol, provenance manifest and evidence rules.
+- [`docs/STRENGTH_BASELINES.md`](docs/STRENGTH_BASELINES.md) — retained external and historical strength measurements.
 - [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) — engineering rules for changes.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — staged route from core chess rules to the neural search engine and browser target.
 - [`docs/adr/0001-architecture-v0.1.md`](docs/adr/0001-architecture-v0.1.md) — first architectural decision record.
