@@ -313,15 +313,7 @@ impl Searcher {
         }
 
         if depth == 0 {
-            return self.quiescence(
-                position,
-                prior_history,
-                alpha,
-                beta,
-                ply,
-                path_len,
-                control,
-            );
+            return self.quiescence(position, prior_history, alpha, beta, ply, path_len, control);
         }
 
         let repetition_key = position.repetition_key().raw();
