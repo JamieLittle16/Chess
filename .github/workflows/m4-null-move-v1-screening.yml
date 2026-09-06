@@ -26,6 +26,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 tools/apply_null_move_v1.py
+          python3 tools/fix_null_move_v1_qsearch_test_wrapper.py
           cargo fmt --all
           git diff --check
           test -n "$(git diff -- crates/chess-core/src/reversible.rs crates/chess-core/src/lib.rs crates/chess-search/src/lib.rs crates/chess-search/src/quiescence.rs)"
