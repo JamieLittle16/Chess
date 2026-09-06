@@ -6,7 +6,7 @@ on:
       - m4/quiescence-v1
 
 jobs:
-  qsearch-unit:
+  hotspot:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     strategy:
@@ -14,22 +14,8 @@ jobs:
       matrix:
         test:
           - poisoned_capture_is_rejected_at_the_horizon
-          - quiescence_restores_position_exactly
-          - in_check_does_not_use_stand_pat
-          - qsearch_path_ceiling_is_bounded_and_restores_position
-          - search_returns_a_legal_starting_move_without_mutating_root
           - mutable_search_restores_the_position_exactly
-          - finds_a_mate_in_one
-          - stalemate_is_zero
           - iterative_deepening_reuses_table_and_matches_exact_score
-          - controlled_search_stops_and_restores_position
-          - cached_root_result_cannot_bypass_stop_control
-          - threefold_history_is_draw_even_with_non_draw_tt_entry
-          - fifty_move_rule_is_draw_but_checkmate_takes_precedence
-          - insufficient_material_is_drawn_before_static_evaluation
-          - repetition_counter_combines_game_and_search_history
-          - zero_sized_table_remains_correct
-          - mate_scores_are_normalized_across_transposition_ply
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
