@@ -7,7 +7,7 @@ The roadmap is ordered by dependency and evidence, not by visual excitement.
 - **M0 complete** — core representation, toolchain and CI are green.
 - **M1 complete** — legal chess and reference perft are green.
 - **M2 complete** — reversible state and deterministic position identity are green.
-- **M3 in progress** — establishing the permanent classical reference engine.
+- **M3 in progress** — the classical reference search is operational; UCI/time/benchmark qualification is being completed.
 
 ## M0 — Core foundations — complete
 
@@ -44,22 +44,33 @@ Exit condition: long legal sequences unmake bit-exactly and hashes reproduce. **
 
 ## M3 — Classical reference engine — in progress
 
+Implemented:
+
 - transparent material baseline evaluator;
 - negamax + alpha-beta;
+- deterministic move ordering;
 - iterative deepening;
-- basic transposition table;
-- UCI target;
-- deterministic engine benchmark.
+- bounded transposition table;
+- persistent engine orchestration;
+- initial synchronous UCI target with FEN/startpos and fixed-depth search.
+
+Remaining before M3 exit:
+
+- interruptible search-limit/time-management boundary;
+- fuller UCI `go` limits;
+- deterministic engine benchmark/signature;
+- automated match harness integration;
+- first reproducible baseline Elo under a documented protocol.
 
 Exit condition: a correctly timed UCI engine with a reproducible baseline Elo.
 
 ## M4 — Tactical engine
 
 - quiescence/forcing search;
-- move ordering;
-- bounded tactical TT;
+- stronger move ordering;
+- bounded tactical TT refinements;
 - carefully measured pruning/reduction mechanisms;
-- time management.
+- production time management.
 
 Exit condition: strong, stable reference search and automated paired-game testing.
 
