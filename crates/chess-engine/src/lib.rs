@@ -41,6 +41,62 @@ impl StopToken {
     }
 }
 
+/// Clock information for the side whose move is being searched.
+///
+/// This type is protocol-neutral. A UCI adapter, website, or match harness may all map their own
+/// clock representation into the same engine-owned budgeting policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClockState {
+    pub remaining: Duration,
+    pub increment: Duration,
+    pub moves_to_go: Option<u32>,
+}
+
+impl ClockState {
+    #[must_use]
+    pub const fn new(
+        remaining: Duration,
+        increment: Duration,
+        moves_to_go: Option<u32>,
+    ) -> Self {
+        Self {
+            remaining,
+            increment,
+            moves_to_go,
+        }
+    }
+
+    /// Convert a game clock into the current conservative single-move hard budget.
+    ///
+    /// M3 intentionally uses one transparent budget rather than pretending to have mature time
+    /// management. Five percent of the remaining clock is reserved, the spendable time is divided
+    /// across `moves_to_go` (or 30 moves by default), and 75% of one increment is added. The final
+    /// budget can never exceed the spendable clock after reserve.
+    #[must_use]
+    pub fn allocated_movetime(self) -> Duration {
+        let remaining_ms = self.remaining.as_millis();
+        if remaining_ms == 0 {
+            return Duration::ZERO;
+        }
+
+        let reserve_ms = (remaining_ms / 20).max(1).min(remaining_ms / 2);
+        let spendable_ms = remaining_ms - reserve_ms;
+        if spendable_ms == 0 {
+            return Duration::ZERO;
+        }
+
+        let expected_moves = u128::from(self.moves_to_go.unwrap_or(30).clamp(1, 60));
+        let base_ms = spendable_ms / expected_moves;
+        let increment_share_ms = self.increment.as_millis().saturating_mul(3) / 4;
+        let budget_ms = base_ms
+            .saturating_add(increment_share_ms)
+            .max(1)
+            .min(spendable_ms);
+
+        Duration::from_millis(u64::try_from(budget_ms).unwrap_or(u64::MAX))
+    }
+}
+
 /// Search limits owned by orchestration rather than chess/search semantics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SearchLimits {
@@ -75,6 +131,12 @@ impl SearchLimits {
             max_nodes: None,
             movetime: Some(movetime),
         }
+    }
+
+    /// Build concrete search limits from a game clock using engine-owned budgeting policy.
+    #[must_use]
+    pub fn clock(max_depth: u8, clock: ClockState) -> Self {
+        Self::movetime(max_depth, clock.allocated_movetime())
     }
 }
 
@@ -176,7 +238,7 @@ mod tests {
 
     use chess_core::{ChessMove, MoveKind, Square};
 
-    use super::{Engine, SearchLimits, StopToken};
+    use super::{ClockState, Engine, SearchLimits, StopToken};
 
     #[test]
     fn illegal_external_move_is_rejected_without_mutation() {
@@ -265,5 +327,36 @@ mod tests {
         );
         assert!(outcome.stopped);
         assert_eq!(engine.position(), &root);
+    }
+
+    #[test]
+    fn clock_budget_policy_is_conservative_and_pinned() {
+        let no_increment = ClockState::new(Duration::from_secs(60), Duration::ZERO, None);
+        assert_eq!(no_increment.allocated_movetime(), Duration::from_millis(1_900));
+
+        let increment = ClockState::new(
+            Duration::from_secs(60),
+            Duration::from_secs(1),
+            None,
+        );
+        assert_eq!(increment.allocated_movetime(), Duration::from_millis(2_650));
+
+        let ten_moves = ClockState::new(Duration::from_secs(60), Duration::ZERO, Some(10));
+        assert_eq!(ten_moves.allocated_movetime(), Duration::from_millis(5_700));
+    }
+
+    #[test]
+    fn clock_budget_never_spends_the_reserved_tail() {
+        let clock = ClockState::new(
+            Duration::from_millis(100),
+            Duration::from_secs(60),
+            Some(1),
+        );
+        assert_eq!(clock.allocated_movetime(), Duration::from_millis(95));
+        assert!(clock.allocated_movetime() < clock.remaining);
+        assert_eq!(
+            ClockState::new(Duration::ZERO, Duration::ZERO, None).allocated_movetime(),
+            Duration::ZERO
+        );
     }
 }
