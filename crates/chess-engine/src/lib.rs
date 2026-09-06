@@ -12,8 +12,8 @@ use std::{
 };
 
 use chess_core::{ChessMove, Position};
-use chess_search::{SearchControl, Searcher};
 pub use chess_search::{MATE_SCORE, SearchOutcome, SearchResult};
+use chess_search::{SearchControl, Searcher};
 
 /// Cloneable cooperative cancellation signal for one running search.
 #[derive(Clone, Debug, Default)]
@@ -134,11 +134,7 @@ impl Engine {
     /// The result always contains a legal fallback when legal moves exist, even if the stop signal
     /// or deadline fires before depth one completes.
     #[must_use]
-    pub fn search_with_limits(
-        &mut self,
-        limits: SearchLimits,
-        stop: &StopToken,
-    ) -> SearchOutcome {
+    pub fn search_with_limits(&mut self, limits: SearchLimits, stop: &StopToken) -> SearchOutcome {
         let deadline = limits
             .movetime
             .and_then(|duration| Instant::now().checked_add(duration));
@@ -147,11 +143,8 @@ impl Engine {
             max_nodes: limits.max_nodes,
             deadline,
         };
-        self.searcher.iterative_deepening_controlled(
-            &mut self.position,
-            limits.max_depth,
-            &control,
-        )
+        self.searcher
+            .iterative_deepening_controlled(&mut self.position, limits.max_depth, &control)
     }
 }
 
@@ -171,7 +164,9 @@ impl SearchControl for EngineControl<'_> {
     fn should_stop(&self, nodes: u64) -> bool {
         self.stop.is_stopped()
             || self.max_nodes.is_some_and(|limit| nodes >= limit)
-            || self.deadline.is_some_and(|deadline| Instant::now() >= deadline)
+            || self
+                .deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
     }
 }
 
