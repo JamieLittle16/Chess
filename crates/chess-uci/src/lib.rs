@@ -1,4 +1,4 @@
-//! Minimal synchronous UCI protocol adapter for the reference engine.
+//! Minimal UCI protocol adapter for the reference engine.
 //!
 //! Protocol parsing is intentionally outside chess correctness. Coordinate moves are resolved
 //! against the current legal move list, so this crate never re-implements move semantics.
@@ -30,9 +30,15 @@ impl UciResponse {
     }
 }
 
-/// Stateful synchronous UCI session.
+/// Stateful UCI session.
+///
+/// The normal constructor keeps pure fixed-depth search on the zero-overhead reference path. The
+/// interruptible constructor is intended for the executable's long-lived search worker and routes
+/// every search through a shared `StopToken`, allowing another thread to request cancellation.
 pub struct UciSession {
     engine: Engine,
+    stop: StopToken,
+    interruptible: bool,
 }
 
 impl UciSession {
@@ -40,12 +46,33 @@ impl UciSession {
     pub fn new() -> Self {
         Self {
             engine: Engine::new(),
+            stop: StopToken::new(),
+            interruptible: false,
+        }
+    }
+
+    /// Construct a session whose searches can be stopped through `stop_token()`.
+    #[must_use]
+    pub fn new_interruptible() -> Self {
+        Self {
+            engine: Engine::new(),
+            stop: StopToken::new(),
+            interruptible: true,
         }
     }
 
     #[must_use]
     pub const fn engine(&self) -> &Engine {
         &self.engine
+    }
+
+    /// Clone the cooperative cancellation signal used by an interruptible session.
+    ///
+    /// Callers should reset the token immediately before admitting a new `go` command, then retain
+    /// a clone on the protocol/input thread so `stop` does not need access to mutable engine state.
+    #[must_use]
+    pub fn stop_token(&self) -> StopToken {
+        self.stop.clone()
     }
 
     /// Handle one complete UCI input line.
@@ -95,14 +122,14 @@ impl UciSession {
             }
         };
 
-        // Keep the ordinary fixed-depth path free of atomics/deadline checks. Cooperative control
-        // is paid for only when the caller actually requested a node or wall-clock limit.
-        let result = if limits.max_nodes.is_none() && limits.movetime.is_none() {
-            self.engine.search_depth(limits.max_depth)
+        // Synchronous fixed-depth callers keep the ordinary zero-overhead path. An interruptible
+        // worker must route every search through cooperative control so `stop` can cancel depth-only
+        // searches too. Node/time limits necessarily use the controlled path in both modes.
+        let controlled = self.interruptible || limits.max_nodes.is_some() || limits.movetime.is_some();
+        let result = if controlled {
+            self.engine.search_with_limits(limits, &self.stop).result
         } else {
-            self.engine
-                .search_with_limits(limits, &StopToken::new())
-                .result
+            self.engine.search_depth(limits.max_depth)
         };
         response(search_lines(result), false)
     }
@@ -372,6 +399,23 @@ mod tests {
         let mut session = UciSession::new();
         let root = session.engine().position().clone();
         let response = session.handle_line("go movetime 0");
+        assert_eq!(response.lines().len(), 2);
+        assert!(response.lines()[0].starts_with("info depth 0 score "));
+        let best = response.lines()[1]
+            .strip_prefix("bestmove ")
+            .expect("bestmove line");
+        assert!(resolve_uci_move(&root, best).is_some());
+        assert_eq!(session.engine().position(), &root);
+    }
+
+    #[test]
+    fn interruptible_depth_search_honors_external_stop_token() {
+        let mut session = UciSession::new_interruptible();
+        let root = session.engine().position().clone();
+        let stop = session.stop_token();
+        stop.stop();
+
+        let response = session.handle_line("go depth 8");
         assert_eq!(response.lines().len(), 2);
         assert!(response.lines()[0].starts_with("info depth 0 score "));
         let best = response.lines()[1]
