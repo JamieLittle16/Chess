@@ -139,9 +139,7 @@ fn validate_move_shape(
             }
         }
         MoveKind::Capture => {
-            if target.is_none() {
-                return None;
-            }
+            target?;
         }
         MoveKind::EnPassant => {
             if moving.kind() != PieceKind::Pawn
