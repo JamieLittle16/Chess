@@ -2,11 +2,11 @@ use chess_core::generate_legal_tactical_moves_mut;
 
 use super::*;
 
-// Qsearch v1 is intentionally transparent and does not yet have SEE/delta pruning. A bounded path
-// prevents pathological alternating check-evasion trees from consuming an unbounded share of a
-// search. This is a safety/performance guardrail, not a claim that 8 is an optimal chess value;
-// later M4 work should re-qualify or remove it once tactical ordering and SEE are available.
-const MAX_QSEARCH_PATH_PLY: usize = 8;
+// Qsearch v1 is intentionally transparent and does not yet have SEE/delta pruning. A bounded local
+// qsearch path prevents pathological alternating check-evasion trees from consuming an unbounded
+// share of a search. This is a safety/performance guardrail, not a claim that 8 is an optimal chess
+// value; later M4 work should re-qualify or remove it once tactical ordering and SEE are available.
+const MAX_QSEARCH_PLY: usize = 8;
 
 impl Searcher {
     /// Stabilise a nominal leaf by resolving forcing tactical continuations.
@@ -20,10 +20,34 @@ impl Searcher {
         &mut self,
         position: &mut Position,
         prior_history: &[u64],
+        alpha: i32,
+        beta: i32,
+        ply: u16,
+        path_len: usize,
+        control: &C,
+    ) -> Option<i32> {
+        self.quiescence_inner(
+            position,
+            prior_history,
+            alpha,
+            beta,
+            ply,
+            path_len,
+            0,
+            control,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn quiescence_inner<C: SearchControl>(
+        &mut self,
+        position: &mut Position,
+        prior_history: &[u64],
         mut alpha: i32,
         beta: i32,
         ply: u16,
         path_len: usize,
+        qply: usize,
         control: &C,
     ) -> Option<i32> {
         if control.should_stop(self.nodes) {
@@ -68,10 +92,9 @@ impl Searcher {
             return Some(evaluate(position));
         }
 
-        // Legal terminal detection happened above. Beyond the v1 tactical budget we return the
-        // cheap evaluator and let a future SEE/pruning-qualified qsearch replace this conservative
-        // guardrail.
-        if path_len >= MAX_QSEARCH_PATH_PLY {
+        // Legal terminal detection happened above. The qsearch budget is local to this nominal leaf,
+        // so a deep main search still receives the same tactical stabilization as a shallow search.
+        if qply >= MAX_QSEARCH_PLY {
             return Some(evaluate(position));
         }
 
@@ -88,8 +111,6 @@ impl Searcher {
             alpha = alpha.max(best);
         }
 
-        // The qsearch ceiling above is much tighter in normal use. This remains the hard memory
-        // safety invariant for the fixed search-history stack.
         if path_len >= MAX_SEARCH_PLY {
             return Some(evaluate(position));
         }
@@ -98,13 +119,14 @@ impl Searcher {
         for mv in OrderedMoves::new(&moves, None) {
             let undo = position.make_move(mv);
             self.nodes = self.nodes.saturating_add(1);
-            let child = self.quiescence(
+            let child = self.quiescence_inner(
                 position,
                 prior_history,
                 -beta,
                 -alpha,
                 ply + 1,
                 path_len + 1,
+                qply + 1,
                 control,
             );
             position.unmake_move(mv, undo);
@@ -190,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn qsearch_path_ceiling_is_bounded_and_restores_position() {
+    fn qsearch_local_ceiling_is_bounded_and_restores_position() {
         let mut position =
             Position::from_fen("4r2k/8/8/8/8/8/6Q1/4K3 w - - 0 1").expect("valid FEN");
         let original = position.clone();
@@ -199,13 +221,14 @@ mod tests {
             ..Searcher::default()
         };
         let score = searcher
-            .quiescence(
+            .quiescence_inner(
                 &mut position,
                 &[],
                 -INFINITY,
                 INFINITY,
-                MAX_QSEARCH_PATH_PLY as u16,
-                MAX_QSEARCH_PATH_PLY,
+                23,
+                23,
+                MAX_QSEARCH_PLY,
                 &NeverStop,
             )
             .expect("bounded quiescence completes");
