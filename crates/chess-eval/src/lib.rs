@@ -54,8 +54,7 @@ pub fn evaluate(position: &Position) -> i32 {
     }
 
     let phase = phase.min(MAX_PHASE);
-    let white_minus_black =
-        (middle_game * phase + end_game * (MAX_PHASE - phase)) / MAX_PHASE;
+    let white_minus_black = (middle_game * phase + end_game * (MAX_PHASE - phase)) / MAX_PHASE;
     match position.side_to_move() {
         Color::White => white_minus_black,
         Color::Black => -white_minus_black,
