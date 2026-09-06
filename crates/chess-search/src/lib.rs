@@ -25,6 +25,34 @@ pub struct SearchResult {
     pub tt_hits: u64,
 }
 
+/// Result of an interruptible iterative search.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchOutcome {
+    /// Last fully completed iteration, or a legal depth-zero fallback if interruption happened
+    /// before depth one completed. Node/hit counters include partial work from the aborted depth.
+    pub result: SearchResult,
+    /// True when the control requested termination before `max_depth` completed.
+    pub stopped: bool,
+}
+
+/// Cheap caller-provided cancellation/budget check.
+///
+/// The trait is generic through recursive search, so the ordinary `NeverStop` path can be
+/// monomorphised without a dynamic-dispatch call in the hot loop.
+pub trait SearchControl {
+    #[must_use]
+    fn should_stop(&self, nodes: u64) -> bool;
+}
+
+#[derive(Clone, Copy, Default)]
+struct NeverStop;
+
+impl SearchControl for NeverStop {
+    fn should_stop(&self, _nodes: u64) -> bool {
+        false
+    }
+}
+
 /// Reusable search state.
 ///
 /// Long-lived engine frontends should keep one `Searcher` so the table allocation is not repeated
@@ -53,7 +81,9 @@ impl Searcher {
 
         self.nodes = 1;
         self.tt_hits = 0;
-        let result = self.search_root(position, depth);
+        let result = self
+            .search_root(position, depth, &NeverStop)
+            .expect("NeverStop cannot interrupt search");
 
         #[cfg(debug_assertions)]
         debug_assert_eq!(*position, root);
@@ -61,52 +91,96 @@ impl Searcher {
     }
 
     /// Search depths `1..=max_depth`, retaining the transposition table between iterations.
-    ///
-    /// Reported nodes and table hits are cumulative across all completed iterations because those
-    /// counters describe the actual work performed by iterative deepening.
     #[must_use]
     pub fn iterative_deepening(&mut self, position: &mut Position, max_depth: u8) -> SearchResult {
+        self.iterative_deepening_controlled(position, max_depth, &NeverStop)
+            .result
+    }
+
+    /// Iteratively search while consulting `control` at recursive node boundaries.
+    ///
+    /// If stopped during an iteration, the returned principal result is from the last completed
+    /// depth. Partial work is still included in `nodes`/`tt_hits`, and all made moves are unmade
+    /// before this function returns.
+    #[must_use]
+    pub fn iterative_deepening_controlled<C: SearchControl>(
+        &mut self,
+        position: &mut Position,
+        max_depth: u8,
+        control: &C,
+    ) -> SearchOutcome {
         if max_depth == 0 {
-            return self.search_depth(position, 0);
+            return SearchOutcome {
+                result: self.search_depth(position, 0),
+                stopped: false,
+            };
         }
 
         #[cfg(debug_assertions)]
         let root = position.clone();
 
-        let mut total_nodes = 0_u64;
-        let mut total_hits = 0_u64;
-        let mut result = self.search_depth(position, 1);
-        total_nodes = total_nodes.saturating_add(result.nodes);
-        total_hits = total_hits.saturating_add(result.tt_hits);
+        self.nodes = 0;
+        self.tt_hits = 0;
+        let mut last_completed = None;
 
-        for depth in 2..=max_depth {
-            result = self.search_depth(position, depth);
-            total_nodes = total_nodes.saturating_add(result.nodes);
-            total_hits = total_hits.saturating_add(result.tt_hits);
+        for depth in 1..=max_depth {
+            self.nodes = self.nodes.saturating_add(1);
+            match self.search_root(position, depth, control) {
+                Some(mut result) => {
+                    result.nodes = self.nodes;
+                    result.tt_hits = self.tt_hits;
+                    last_completed = Some(result);
+                }
+                None => {
+                    let result = match last_completed {
+                        Some(mut result) => {
+                            result.nodes = self.nodes;
+                            result.tt_hits = self.tt_hits;
+                            result
+                        }
+                        None => self.fallback_result(position),
+                    };
+                    #[cfg(debug_assertions)]
+                    debug_assert_eq!(*position, root);
+                    return SearchOutcome {
+                        result,
+                        stopped: true,
+                    };
+                }
+            }
         }
 
-        result.nodes = total_nodes;
-        result.tt_hits = total_hits;
-
+        let result = last_completed.expect("positive max_depth completes at least depth one");
         #[cfg(debug_assertions)]
         debug_assert_eq!(*position, root);
-        result
+        SearchOutcome {
+            result,
+            stopped: false,
+        }
     }
 
-    fn search_root(&mut self, position: &mut Position, depth: u8) -> SearchResult {
+    fn search_root<C: SearchControl>(
+        &mut self,
+        position: &mut Position,
+        depth: u8,
+        control: &C,
+    ) -> Option<SearchResult> {
         let key = position.zobrist_key().raw();
         let table_entry = self.probe(key);
         if let Some(entry) = table_entry
             && entry.depth >= depth
             && entry.bound == Bound::Exact
         {
-            return SearchResult {
+            return Some(SearchResult {
                 best_move: entry.best_move,
                 score: score_from_tt(entry.score, 0),
                 depth,
                 nodes: self.nodes,
                 tt_hits: self.tt_hits,
-            };
+            });
+        }
+        if control.should_stop(self.nodes) {
+            return None;
         }
 
         let moves = generate_legal_moves_mut(position);
@@ -114,14 +188,14 @@ impl Searcher {
             let score = terminal_score(position, 0);
             self.table
                 .store(key, depth, score_to_tt(score, 0), Bound::Exact, None);
-            return self.result(None, score, depth);
+            return Some(self.result(None, score, depth));
         }
 
         if depth == 0 {
             let score = evaluate(position);
             self.table
                 .store(key, depth, score_to_tt(score, 0), Bound::Exact, None);
-            return self.result(None, score, depth);
+            return Some(self.result(None, score, depth));
         }
 
         let hint = table_entry.and_then(|entry| entry.best_move);
@@ -131,8 +205,9 @@ impl Searcher {
 
         for mv in OrderedMoves::new(&moves, hint) {
             let undo = position.make_move(mv);
-            let score = -self.negamax(position, depth - 1, -INFINITY, -alpha, 1);
+            let child = self.negamax(position, depth - 1, -INFINITY, -alpha, 1, control);
             position.unmake_move(mv, undo);
+            let score = -child?;
 
             if score > best_score {
                 best_score = score;
@@ -148,18 +223,23 @@ impl Searcher {
             Bound::Exact,
             best_move,
         );
-        self.result(best_move, best_score, depth)
+        Some(self.result(best_move, best_score, depth))
     }
 
-    fn negamax(
+    fn negamax<C: SearchControl>(
         &mut self,
         position: &mut Position,
         depth: u8,
         mut alpha: i32,
         beta: i32,
         ply: u16,
-    ) -> i32 {
+        control: &C,
+    ) -> Option<i32> {
         self.nodes = self.nodes.saturating_add(1);
+        if control.should_stop(self.nodes) {
+            return None;
+        }
+
         let key = position.zobrist_key().raw();
         let alpha_original = alpha;
         let table_entry = self.probe(key);
@@ -169,9 +249,9 @@ impl Searcher {
         {
             let score = score_from_tt(entry.score, ply);
             match entry.bound {
-                Bound::Exact => return score,
-                Bound::Lower if score >= beta => return score,
-                Bound::Upper if score <= alpha => return score,
+                Bound::Exact => return Some(score),
+                Bound::Lower if score >= beta => return Some(score),
+                Bound::Upper if score <= alpha => return Some(score),
                 Bound::Lower | Bound::Upper => {}
             }
         }
@@ -181,13 +261,13 @@ impl Searcher {
             let score = terminal_score(position, ply);
             self.table
                 .store(key, depth, score_to_tt(score, ply), Bound::Exact, None);
-            return score;
+            return Some(score);
         }
         if depth == 0 {
             let score = evaluate(position);
             self.table
                 .store(key, depth, score_to_tt(score, ply), Bound::Exact, None);
-            return score;
+            return Some(score);
         }
 
         let hint = table_entry.and_then(|entry| entry.best_move);
@@ -196,8 +276,9 @@ impl Searcher {
 
         for mv in OrderedMoves::new(&moves, hint) {
             let undo = position.make_move(mv);
-            let score = -self.negamax(position, depth - 1, -beta, -alpha, ply + 1);
+            let child = self.negamax(position, depth - 1, -beta, -alpha, ply + 1, control);
             position.unmake_move(mv, undo);
+            let score = -child?;
 
             if score > best {
                 best = score;
@@ -218,7 +299,23 @@ impl Searcher {
         };
         self.table
             .store(key, depth, score_to_tt(best, ply), bound, best_move);
-        best
+        Some(best)
+    }
+
+    fn fallback_result(&self, position: &mut Position) -> SearchResult {
+        let moves = generate_legal_moves_mut(position);
+        let (best_move, score) = if moves.is_empty() {
+            (None, terminal_score(position, 0))
+        } else {
+            (Some(moves[0]), evaluate(position))
+        };
+        SearchResult {
+            best_move,
+            score,
+            depth: 0,
+            nodes: self.nodes,
+            tt_hits: self.tt_hits,
+        }
     }
 
     fn probe(&mut self, key: u64) -> Option<TtEntry> {
@@ -429,8 +526,17 @@ mod tests {
     use chess_core::{Color, Position};
 
     use super::{
-        MATE_SCORE, Searcher, iterative_deepening, score_from_tt, score_to_tt, search, search_mut,
+        MATE_SCORE, SearchControl, Searcher, iterative_deepening, score_from_tt, score_to_tt,
+        search, search_mut,
     };
+
+    struct NodeStop(u64);
+
+    impl SearchControl for NodeStop {
+        fn should_stop(&self, nodes: u64) -> bool {
+            nodes >= self.0
+        }
+    }
 
     #[test]
     fn search_returns_a_legal_starting_move_without_mutating_root() {
@@ -487,6 +593,18 @@ mod tests {
         assert_eq!(iterative.score, direct.score);
         assert!(iterative.tt_hits > 0);
         assert_eq!(root, Position::startpos());
+    }
+
+    #[test]
+    fn controlled_search_stops_and_restores_position() {
+        let mut root = Position::startpos();
+        let original = root.clone();
+        let mut searcher = Searcher::default();
+        let outcome = searcher.iterative_deepening_controlled(&mut root, 8, &NodeStop(25));
+        assert!(outcome.stopped);
+        assert!(outcome.result.nodes >= 25);
+        assert!(outcome.result.best_move.is_some());
+        assert_eq!(root, original);
     }
 
     #[test]
