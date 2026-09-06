@@ -73,9 +73,8 @@ pub fn queen_attacks(square: Square, occupied: Bitboard) -> Bitboard {
 pub fn is_square_attacked(position: &Position, square: Square, attacker: Color) -> bool {
     let occupied = position.occupied();
 
-    if !(pawn_attacks(attacker.opposite(), square)
-        & position.pieces(attacker, PieceKind::Pawn))
-    .is_empty()
+    if !(pawn_attacks(attacker.opposite(), square) & position.pieces(attacker, PieceKind::Pawn))
+        .is_empty()
     {
         return true;
     }
@@ -86,8 +85,8 @@ pub fn is_square_attacked(position: &Position, square: Square, attacker: Color) 
         return true;
     }
 
-    let bishops_and_queens = position.pieces(attacker, PieceKind::Bishop)
-        | position.pieces(attacker, PieceKind::Queen);
+    let bishops_and_queens =
+        position.pieces(attacker, PieceKind::Bishop) | position.pieces(attacker, PieceKind::Queen);
     if !(bishop_attacks(square, occupied) & bishops_and_queens).is_empty() {
         return true;
     }

@@ -94,6 +94,9 @@ mod tests {
         assert_eq!(list.as_slice(), &[first, second]);
         assert_eq!(list.len(), 2);
         assert!(!list.is_empty());
-        assert_eq!(size_of::<MoveList>(), MAX_MOVES * size_of::<ChessMove>() + size_of::<usize>());
+        assert_eq!(
+            size_of::<MoveList>(),
+            MAX_MOVES * size_of::<ChessMove>() + size_of::<usize>()
+        );
     }
 }
