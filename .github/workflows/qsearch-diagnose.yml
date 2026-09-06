@@ -1,0 +1,37 @@
+name: Qsearch diagnostics
+
+on:
+  push:
+    branches:
+      - m4/quiescence-v1
+
+jobs:
+  qsearch-unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - poisoned_capture_is_rejected_at_the_horizon
+          - quiescence_restores_position_exactly
+          - in_check_does_not_use_stand_pat
+          - mutable_search_restores_the_position_exactly
+          - iterative_deepening_reuses_table_and_matches_exact_score
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Run isolated search test
+        run: cargo test -p chess-search "${{ matrix.test }}" -- --exact --nocapture
+
+  search-suite:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - run: cargo test -p chess-search
