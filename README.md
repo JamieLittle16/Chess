@@ -23,7 +23,9 @@ Above it, `chess-eval` provides the deliberately simple material reference evalu
 
 The deterministic draw-aware reference benchmark is `reference-search-v2`, currently pinned at `0x1a149495c23a7d8e` in CI.
 
-This is now a real but intentionally weak, rule-correct playable engine baseline. The remaining M3 boundary is reproducible match qualification and a measured external baseline; strength work follows that measurement boundary.
+M3 now also has repository-owned paired-game qualification tooling: `match/protocols/m3-baseline-v1.json` freezes the first finite-time experiment settings and `scripts/match_harness.py` wraps Fastchess while recording exact engine/runner/opening hashes, git/environment provenance, the command line, PGN, raw output and UCI logs. CI tests the harness without running time-sensitive tournaments.
+
+This is now a real but intentionally weak, rule-correct playable engine baseline. The remaining M3 boundary is to freeze the opening corpus and retain the first measured external baseline; strength work follows that measurement boundary.
 
 ## Workspace
 
@@ -49,7 +51,8 @@ Future WASM and other frontends branch from the orchestration/search layers rath
 - [`docs/PERFT.md`](docs/PERFT.md) — legal-chess reference positions and acceptance gates.
 - [`docs/REFERENCE_ENGINE.md`](docs/REFERENCE_ENGINE.md) — evaluator, draw-aware alpha-beta, iterative deepening and TT baseline.
 - [`docs/UCI.md`](docs/UCI.md) — supported UCI surface, worker ownership, clocks and transactional history.
-- [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md) — correctness, performance, and Elo methodology.
+- [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md) — correctness, performance and Elo methodology.
+- [`docs/MATCH_QUALIFICATION.md`](docs/MATCH_QUALIFICATION.md) — reproducible paired-game protocol, provenance manifest and evidence rules.
 - [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) — engineering rules for changes.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — staged route from core chess rules to the neural search engine and browser target.
 - [`docs/adr/0001-architecture-v0.1.md`](docs/adr/0001-architecture-v0.1.md) — first architectural decision record.
@@ -69,3 +72,17 @@ cargo run --release -p chess-uci
 ```
 
 The executable supports `go depth N`, `go nodes N`, `go movetime MS`, standard `wtime`/`btime`/increment/`movestogo` clocks, compatible limit combinations, and asynchronous `stop`. Search state remains single-owner on the engine worker rather than shared behind a mutex.
+
+Prepare a reproducible match with:
+
+```sh
+python3 scripts/match_harness.py \
+  --candidate /path/to/candidate \
+  --reference /path/to/reference \
+  --fastchess /path/to/fastchess \
+  --openings /path/to/openings.epd \
+  --output-dir /new/results/directory \
+  --dry-run
+```
+
+Remove `--dry-run` only after inspecting the generated manifest and exact Fastchess command. Match results are evidence only when the run completes and its protocol, opponent, opening-suite identity and uncertainty are retained with the raw outputs.

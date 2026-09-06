@@ -80,6 +80,8 @@ Record CPU, compiler/toolchain, build flags and benchmark corpus. Optimisations 
 
 The engine exposes UCI so an established match runner such as Fastchess can test it under controlled conditions. The match runner is measurement infrastructure: it must not become coupled to search internals.
 
+The repository-owned wrapper and lifecycle contract are specified in [`MATCH_QUALIFICATION.md`](MATCH_QUALIFICATION.md). The first finite-time protocol is `match/protocols/m3-baseline-v1.json`; it is deliberately conservative and records exact input/output hashes rather than treating a terminal score line as sufficient evidence.
+
 ### Paired-game protocol
 
 For candidate `C` against reference `R`:
@@ -107,7 +109,7 @@ elo:        +4.8
 
 Numbers without the protocol are not accepted as evidence.
 
-The immediate M3 qualification task is to encode this protocol in repository tooling and obtain the first measured external baseline. That result will be a **relative engine Elo under the named protocol**, not an absolute human rating.
+The immediate M3 qualification task is now narrower: freeze the opening suite and obtain the first retained external baseline through the checked-in harness. That result will be a **relative engine Elo under the named protocol**, not an absolute human rating.
 
 ## 5. SPRT development tests
 
