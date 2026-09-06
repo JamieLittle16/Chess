@@ -19,6 +19,7 @@ pub const DEFAULT_TT_ENTRIES: usize = 1 << 15;
 const INFINITY: i32 = 32_000;
 const MATE_TT_THRESHOLD: i32 = MATE_SCORE - 1_000;
 const MAX_SEARCH_PLY: usize = 256;
+const ASPIRATION_INITIAL_WINDOW: i32 = 50;
 
 /// Result of one deterministic reference search.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,7 +101,14 @@ impl Searcher {
         self.nodes = 1;
         self.tt_hits = 0;
         let result = self
-            .search_root(position, prior_history, depth, &NeverStop)
+            .search_root(
+                position,
+                prior_history,
+                depth,
+                -INFINITY,
+                INFINITY,
+                &NeverStop,
+            )
             .expect("NeverStop cannot interrupt search");
 
         #[cfg(debug_assertions)]
@@ -167,31 +175,62 @@ impl Searcher {
 
         self.nodes = 0;
         self.tt_hits = 0;
-        let mut last_completed = None;
+        let mut last_completed: Option<SearchResult> = None;
 
         for depth in 1..=max_depth {
-            self.nodes = self.nodes.saturating_add(1);
-            match self.search_root(position, prior_history, depth, control) {
-                Some(mut result) => {
-                    result.nodes = self.nodes;
-                    result.tt_hits = self.tt_hits;
-                    last_completed = Some(result);
-                }
-                None => {
-                    let result = match last_completed {
-                        Some(mut result) => {
-                            result.nodes = self.nodes;
-                            result.tt_hits = self.tt_hits;
-                            result
+            let previous_score = last_completed.map(|result| result.score);
+            let use_aspiration =
+                depth > 1 && previous_score.is_some_and(|score| score.abs() < MATE_TT_THRESHOLD);
+            let mut window = if use_aspiration {
+                ASPIRATION_INITIAL_WINDOW
+            } else {
+                INFINITY
+            };
+
+            loop {
+                let (alpha, beta) = if let Some(center) = previous_score
+                    && window < INFINITY
+                {
+                    (
+                        center.saturating_sub(window).max(-INFINITY),
+                        center.saturating_add(window).min(INFINITY),
+                    )
+                } else {
+                    (-INFINITY, INFINITY)
+                };
+
+                // Every aspiration retry is real root work and must count toward node limits.
+                self.nodes = self.nodes.saturating_add(1);
+                match self.search_root(position, prior_history, depth, alpha, beta, control) {
+                    Some(mut result) => {
+                        let failed_low = result.score <= alpha && alpha > -INFINITY;
+                        let failed_high = result.score >= beta && beta < INFINITY;
+                        if failed_low || failed_high {
+                            window = window.saturating_mul(2).min(INFINITY);
+                            continue;
                         }
-                        None => self.fallback_result(position, prior_history),
-                    };
-                    #[cfg(debug_assertions)]
-                    debug_assert_eq!(*position, root);
-                    return SearchOutcome {
-                        result,
-                        stopped: true,
-                    };
+
+                        result.nodes = self.nodes;
+                        result.tt_hits = self.tt_hits;
+                        last_completed = Some(result);
+                        break;
+                    }
+                    None => {
+                        let result = match last_completed {
+                            Some(mut result) => {
+                                result.nodes = self.nodes;
+                                result.tt_hits = self.tt_hits;
+                                result
+                            }
+                            None => self.fallback_result(position, prior_history),
+                        };
+                        #[cfg(debug_assertions)]
+                        debug_assert_eq!(*position, root);
+                        return SearchOutcome {
+                            result,
+                            stopped: true,
+                        };
+                    }
                 }
             }
         }
@@ -205,14 +244,18 @@ impl Searcher {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn search_root<C: SearchControl>(
         &mut self,
         position: &mut Position,
         prior_history: &[u64],
         depth: u8,
+        mut alpha: i32,
+        beta: i32,
         control: &C,
     ) -> Option<SearchResult> {
-        // Control must precede even an exact root TT hit; otherwise a cached result can make an
+        debug_assert!(alpha < beta);
+        // Control must precede even a root TT hit; otherwise a cached result can make an
         // interruptible depth-only search ignore an already-issued UCI `stop`.
         if control.should_stop(self.nodes) {
             return None;
@@ -230,18 +273,30 @@ impl Searcher {
         }
 
         let key = position.zobrist_key().raw();
+        let alpha_original = alpha;
         let table_entry = self.probe(key);
         if let Some(entry) = table_entry
             && entry.depth >= depth
-            && entry.bound == Bound::Exact
         {
-            return Some(SearchResult {
-                best_move: entry.best_move,
-                score: score_from_tt(entry.score, 0),
-                depth,
-                nodes: self.nodes,
-                tt_hits: self.tt_hits,
-            });
+            let score = score_from_tt(entry.score, 0);
+            match entry.bound {
+                Bound::Exact => {
+                    return Some(SearchResult {
+                        best_move: entry.best_move,
+                        score,
+                        depth,
+                        nodes: self.nodes,
+                        tt_hits: self.tt_hits,
+                    });
+                }
+                Bound::Lower if score >= beta => {
+                    return Some(self.result(entry.best_move, score, depth));
+                }
+                Bound::Upper if score <= alpha => {
+                    return Some(self.result(entry.best_move, score, depth));
+                }
+                Bound::Lower | Bound::Upper => {}
+            }
         }
 
         let moves = generate_legal_moves_mut(position);
@@ -262,7 +317,6 @@ impl Searcher {
         let hint = table_entry.and_then(|entry| entry.best_move);
         let mut best_move = None;
         let mut best_score = -INFINITY;
-        let mut alpha = -INFINITY;
         self.path_keys[0] = repetition_key;
 
         let mut moves = moves;
@@ -275,15 +329,15 @@ impl Searcher {
                     position,
                     prior_history,
                     depth - 1,
-                    -INFINITY,
+                    -beta,
                     -alpha,
                     1,
                     1,
                     control,
                 )
             } else {
-                // Later root moves first get a null-window probe. Good ordering
-                // should make most fail low; only alpha-raising moves are re-searched.
+                // Later root moves first get a null-window probe. Good ordering should make most
+                // fail low; only genuine alpha improvements inside beta need a full re-search.
                 let probe = self.negamax(
                     position,
                     prior_history,
@@ -295,16 +349,17 @@ impl Searcher {
                     control,
                 );
                 match probe {
-                    Some(probe_child) if -probe_child > alpha => self.negamax(
-                        position,
-                        prior_history,
-                        depth - 1,
-                        -INFINITY,
-                        -alpha,
-                        1,
-                        1,
-                        control,
-                    ),
+                    Some(probe_child) if -probe_child > alpha && -probe_child < beta => self
+                        .negamax(
+                            position,
+                            prior_history,
+                            depth - 1,
+                            -beta,
+                            -alpha,
+                            1,
+                            1,
+                            control,
+                        ),
                     probe => probe,
                 }
             };
@@ -317,15 +372,20 @@ impl Searcher {
                 best_move = Some(mv);
             }
             alpha = alpha.max(score);
+            if alpha >= beta {
+                break;
+            }
         }
 
-        self.table.store(
-            key,
-            depth,
-            score_to_tt(best_score, 0),
-            Bound::Exact,
-            best_move,
-        );
+        let bound = if best_score <= alpha_original {
+            Bound::Upper
+        } else if best_score >= beta {
+            Bound::Lower
+        } else {
+            Bound::Exact
+        };
+        self.table
+            .store(key, depth, score_to_tt(best_score, 0), bound, best_move);
         Some(self.result(best_move, best_score, depth))
     }
 
