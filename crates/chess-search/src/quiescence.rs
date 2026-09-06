@@ -1,3 +1,5 @@
+use chess_core::generate_legal_tactical_moves_mut;
+
 use super::*;
 
 // Qsearch v1 is intentionally transparent and does not yet have SEE/delta pruning. A bounded path
@@ -9,10 +11,10 @@ const MAX_QSEARCH_PATH_PLY: usize = 8;
 impl Searcher {
     /// Stabilise a nominal leaf by resolving forcing tactical continuations.
     ///
-    /// Outside check we use the ordinary static evaluation as stand-pat and search only captures
-    /// and promotions. In check there is no stand-pat: every legal evasion is searched. The first
-    /// quiescence implementation deliberately has no TT, SEE, delta pruning or speculative
-    /// reductions; it exists as a transparent tactical-correctness baseline.
+    /// Outside check we use the ordinary static evaluation as stand-pat and generate only captures,
+    /// en-passant and promotions. In check there is no stand-pat: every legal evasion is searched.
+    /// The first quiescence implementation deliberately has no TT, SEE, delta pruning or
+    /// speculative reductions; it exists as a transparent tactical-correctness baseline.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn quiescence<C: SearchControl>(
         &mut self,
@@ -46,16 +48,29 @@ impl Searcher {
             return Some(0);
         }
 
-        let moves = generate_legal_moves_mut(position);
-        if moves.is_empty() {
+        let in_check = position.is_in_check(position.side_to_move());
+        let moves = if in_check {
+            generate_legal_moves_mut(position)
+        } else {
+            generate_legal_tactical_moves_mut(position)
+        };
+
+        if in_check && moves.is_empty() {
             return Some(terminal_score(position, ply));
         }
 
-        let in_check = position.is_in_check(position.side_to_move());
+        if !in_check && moves.is_empty() {
+            // A tactical-only empty list normally means a stable quiet position, but stalemate must
+            // still score zero. Only this terminal-candidate path pays for full legal generation.
+            if generate_legal_moves_mut(position).is_empty() {
+                return Some(terminal_score(position, ply));
+            }
+            return Some(evaluate(position));
+        }
 
-        // Legal terminal detection still happens above the ceiling so a mate is never converted to
-        // a static score. Beyond the v1 tactical budget we return the cheap evaluator and let a
-        // future SEE/pruning-qualified qsearch replace this conservative guardrail.
+        // Legal terminal detection happened above. Beyond the v1 tactical budget we return the
+        // cheap evaluator and let a future SEE/pruning-qualified qsearch replace this conservative
+        // guardrail.
         if path_len >= MAX_QSEARCH_PATH_PLY {
             return Some(evaluate(position));
         }
@@ -81,11 +96,6 @@ impl Searcher {
         self.path_keys[path_len] = repetition_key;
 
         for mv in OrderedMoves::new(&moves, None) {
-            let tactical = mv.kind().is_capture() || mv.kind().is_promotion();
-            if !in_check && !tactical {
-                continue;
-            }
-
             let undo = position.make_move(mv);
             self.nodes = self.nodes.saturating_add(1);
             let child = self.quiescence(
@@ -199,6 +209,22 @@ mod tests {
                 &NeverStop,
             )
             .expect("bounded quiescence completes");
+        assert_eq!(score, evaluate(&position));
+        assert_eq!(searcher.nodes, 1);
+        assert_eq!(position, original);
+    }
+
+    #[test]
+    fn quiet_stable_leaf_does_not_need_tactical_moves() {
+        let mut position = Position::startpos();
+        let original = position.clone();
+        let mut searcher = Searcher {
+            nodes: 1,
+            ..Searcher::default()
+        };
+        let score = searcher
+            .quiescence(&mut position, &[], -INFINITY, INFINITY, 0, 0, &NeverStop)
+            .expect("quiet quiescence completes");
         assert_eq!(score, evaluate(&position));
         assert_eq!(searcher.nodes, 1);
         assert_eq!(position, original);
