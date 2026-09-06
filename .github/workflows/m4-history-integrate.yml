@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   integrate:
-    if: github.event.head_commit.message == 'ci: trigger history integration'
+    if: "${{ github.event.head_commit.message == 'ci: retry history integration' }}"
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -71,28 +71,19 @@ jobs:
               2,
           )
 
-          cutoff_anchor = '''            if alpha >= beta {
-              break;
-          }'''
+          cutoff_anchor = "            if alpha >= beta {\n                break;\n            }"
           if text.count(cutoff_anchor) != 1:
               raise SystemExit(f'expected one beta-cutoff anchor, got {text.count(cutoff_anchor)}')
           text = text.replace(
               cutoff_anchor,
-              '''            if alpha >= beta {
-              if is_quiet(mv) {
-                  self.record_quiet_cutoff(position.side_to_move(), mv, depth, ply);
-              }
-              break;
-          }''',
+              "            if alpha >= beta {\n                if is_quiet(mv) {\n                    self.record_quiet_cutoff(position.side_to_move(), mv, depth, ply);\n                }\n                break;\n            }",
               1,
           )
 
           method_anchor = '    fn fallback_result(&self, position: &mut Position, prior_history: &[u64]) -> SearchResult {'
           if method_anchor not in text:
               raise SystemExit('missing fallback_result anchor')
-          text = text.replace(
-              method_anchor,
-              '''    fn record_quiet_cutoff(
+          method = '''    fn record_quiet_cutoff(
         &mut self,
         side: Color,
         mv: ChessMove,
@@ -108,10 +99,8 @@ jobs:
         }
     }
 
-    fn fallback_result(&self, position: &mut Position, prior_history: &[u64]) -> SearchResult {''',
-              1,
-          )
-
+'''
+          text = text.replace(method_anchor, method + method_anchor, 1)
           path.write_text(text)
       - name: Format
         run: cargo fmt --all
