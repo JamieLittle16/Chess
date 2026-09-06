@@ -25,6 +25,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 tools/apply_tt_capacity_v1.py
+          sed -i 's/session.handle_line("ucinewgame");/let _ = session.handle_line("ucinewgame");/' crates/chess-uci/src/lib.rs
           rm tools/apply_tt_capacity_v1.py .github/workflows/tt-capacity-v1-apply.yml
           cargo fmt --all
           cargo fmt --all -- --check
