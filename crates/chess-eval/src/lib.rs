@@ -1,11 +1,15 @@
 //! Transparent classical evaluation used as the permanent reference baseline.
 //!
-//! M4 E1 extends the original material-only control with a deliberately small tapered piece-square
-//! model. The tables are generated at compile time from transparent geometric rules rather than
-//! copied from another engine. Runtime evaluation remains allocation-free: iterate the existing
-//! piece bitboards, perform table lookups, and interpolate one middle-game/end-game score pair.
+//! M4 E5 tests a compact king-safety term on top of the accepted tapered geometric PSQT. Runtime
+//! evaluation remains allocation-free. The safety model deliberately stays small: a local king
+//! zone measures direct enemy piece pressure while a short pawn-shield term rewards intact cover
+//! only while the king remains near its home rank. Both signals are middle-game only and therefore
+//! disappear naturally as tapered phase reaches the endgame.
 
-use chess_core::{Color, PieceKind, Position};
+use chess_core::{
+    Bitboard, Color, PieceKind, Position, bishop_attacks, king_attacks, knight_attacks, pawn_attacks,
+    queen_attacks, rook_attacks,
+};
 
 /// Conventional centipawn-like material values retained from the material-only reference.
 pub const PIECE_VALUES: [i32; 6] = [100, 320, 330, 500, 900, 0];
@@ -14,6 +18,18 @@ const PHASE_WEIGHTS: [i32; 6] = [0, 1, 1, 2, 4, 0];
 const MAX_PHASE: i32 = 24;
 const MG_PSQT: [[i16; 64]; 6] = generate_psqt(false);
 const EG_PSQT: [[i16; 64]; 6] = generate_psqt(true);
+
+// King-zone pressure uses attack-square hits rather than legal moves. Heavier pieces are weighted
+// more strongly because a rook/queen entering the king zone is more forcing than one minor-piece
+// attack. The final multiplier converts compact attack units into centipawn-like MG pressure.
+const PAWN_KING_ATTACK_UNIT: i32 = 3;
+const KNIGHT_KING_ATTACK_UNIT: i32 = 5;
+const BISHOP_KING_ATTACK_UNIT: i32 = 4;
+const ROOK_KING_ATTACK_UNIT: i32 = 6;
+const QUEEN_KING_ATTACK_UNIT: i32 = 8;
+const KING_PRESSURE_CP_PER_UNIT: i32 = 2;
+const FIRST_SHIELD_PAWN_BONUS: i32 = 10;
+const SECOND_SHIELD_PAWN_BONUS: i32 = 4;
 
 /// Return the material owned by one side in centipawn-like units.
 #[must_use]
@@ -27,16 +43,19 @@ pub fn material(position: &Position, color: Color) -> i32 {
 /// Evaluate a position from the side-to-move perspective.
 ///
 /// Positive values favour the player to move; negative values favour their opponent. The tapered
-/// score interpolates between middle-game and end-game piece-square preferences using remaining
-/// non-pawn material. Black reuses the same tables by vertically mirroring each square.
+/// score interpolates between middle-game and end-game positional preferences using remaining
+/// non-pawn material. Black reuses the same PSQT tables by vertically mirroring each square.
 #[must_use]
 pub fn evaluate(position: &Position) -> i32 {
     let mut middle_game = 0_i32;
     let mut end_game = 0_i32;
     let mut phase = 0_i32;
+    let occupied = position.occupied();
 
     for color in Color::ALL {
         let sign = if color == Color::White { 1 } else { -1 };
+        middle_game += sign * king_safety_middle_game(position, color, occupied);
+
         for kind in PieceKind::ALL {
             let mut pieces = position.pieces(color, kind);
             let count = pieces.count() as i32;
@@ -59,6 +78,89 @@ pub fn evaluate(position: &Position) -> i32 {
         Color::White => white_minus_black,
         Color::Black => -white_minus_black,
     }
+}
+
+fn king_safety_middle_game(position: &Position, color: Color, occupied: Bitboard) -> i32 {
+    let Some(king) = position.pieces(color, PieceKind::King).into_iter().next() else {
+        return 0;
+    };
+    let zone = king_attacks(king).with(king);
+    let enemy = color.opposite();
+    let mut pressure_units = 0_i32;
+
+    for square in position.pieces(enemy, PieceKind::Pawn) {
+        pressure_units += i32::try_from((pawn_attacks(enemy, square) & zone).count())
+            .expect("king-zone hit count fits i32")
+            * PAWN_KING_ATTACK_UNIT;
+    }
+    for square in position.pieces(enemy, PieceKind::Knight) {
+        pressure_units += i32::try_from((knight_attacks(square) & zone).count())
+            .expect("king-zone hit count fits i32")
+            * KNIGHT_KING_ATTACK_UNIT;
+    }
+    for square in position.pieces(enemy, PieceKind::Bishop) {
+        pressure_units += i32::try_from((bishop_attacks(square, occupied) & zone).count())
+            .expect("king-zone hit count fits i32")
+            * BISHOP_KING_ATTACK_UNIT;
+    }
+    for square in position.pieces(enemy, PieceKind::Rook) {
+        pressure_units += i32::try_from((rook_attacks(square, occupied) & zone).count())
+            .expect("king-zone hit count fits i32")
+            * ROOK_KING_ATTACK_UNIT;
+    }
+    for square in position.pieces(enemy, PieceKind::Queen) {
+        pressure_units += i32::try_from((queen_attacks(square, occupied) & zone).count())
+            .expect("king-zone hit count fits i32")
+            * QUEEN_KING_ATTACK_UNIT;
+    }
+
+    pawn_shield_bonus(position, color, king.file(), king.rank())
+        - pressure_units * KING_PRESSURE_CP_PER_UNIT
+}
+
+fn pawn_shield_bonus(position: &Position, color: Color, king_file: u8, king_rank: u8) -> i32 {
+    let relative_rank = match color {
+        Color::White => king_rank,
+        Color::Black => 7 - king_rank,
+    };
+    if relative_rank > 1 {
+        return 0;
+    }
+
+    let own_pawns = position.pieces(color, PieceKind::Pawn);
+    let mut bonus = 0_i32;
+    let first_rank = match color {
+        Color::White => king_rank.checked_add(1),
+        Color::Black => king_rank.checked_sub(1),
+    };
+    let second_rank = match color {
+        Color::White => king_rank.checked_add(2),
+        Color::Black => king_rank.checked_sub(2),
+    };
+
+    let first_file = king_file.saturating_sub(1);
+    let last_file = king_file.saturating_add(1).min(7);
+    let mut file = first_file;
+    while file <= last_file {
+        if let Some(rank) = first_rank
+            && rank < 8
+            && let Some(square) = chess_core::Square::from_file_rank(file, rank)
+            && own_pawns.contains(square)
+        {
+            bonus += FIRST_SHIELD_PAWN_BONUS;
+        } else if let Some(rank) = second_rank
+            && rank < 8
+            && let Some(square) = chess_core::Square::from_file_rank(file, rank)
+            && own_pawns.contains(square)
+        {
+            bonus += SECOND_SHIELD_PAWN_BONUS;
+        }
+        if file == last_file {
+            break;
+        }
+        file += 1;
+    }
+    bonus
 }
 
 #[inline]
@@ -95,8 +197,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
     let file_centrality = 7 - file_distance;
 
     match piece {
-        // Pawns gain more from safe advancement in the endgame. A tiny central-file bonus nudges
-        // healthy central occupation without attempting to model pawn structure yet.
         0 => {
             let advance = if end_game {
                 match rank {
@@ -121,7 +221,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
             };
             advance + file_centrality / 2
         }
-        // Knights are the strongest centralisation signal in v1.
         1 => {
             if end_game {
                 centre * 3 - 18
@@ -129,7 +228,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
                 centre * 4 - 24
             }
         }
-        // Bishops prefer activity but are less sensitive to central squares than knights.
         2 => {
             if end_game {
                 centre * 2 - 6
@@ -137,8 +235,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
                 centre * 2 - 8
             }
         }
-        // Rooks get a modest seventh-rank/activity signal. File structure is deliberately deferred
-        // to a separate experiment so E1 remains a pure placement baseline.
         3 => {
             let seventh = if rank == 6 { 14 } else { 0 };
             if end_game {
@@ -147,8 +243,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
                 seventh + rank
             }
         }
-        // Queen placement is intentionally weakly weighted to avoid paying for brittle opening
-        // assumptions before development/king-safety terms exist.
         4 => {
             if end_game {
                 centre * 2 - 8
@@ -156,8 +250,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
                 centre - 8
             }
         }
-        // Middle-game kings prefer the home rank and castled files. End-game kings reverse that
-        // preference and are rewarded for centralisation.
         5 => {
             if end_game {
                 centre * 4 - 24
@@ -181,9 +273,9 @@ const fn abs_i32(value: i32) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use chess_core::Position;
+    use chess_core::{Color, Position};
 
-    use super::evaluate;
+    use super::{evaluate, king_safety_middle_game};
 
     #[test]
     fn starting_position_is_positionally_equal() {
@@ -217,5 +309,21 @@ mod tests {
         let central = Position::from_fen("7k/8/8/8/3K4/8/8/8 w - - 0 1").expect("valid FEN");
         let corner = Position::from_fen("7k/8/8/8/8/8/8/K7 w - - 0 1").expect("valid FEN");
         assert!(evaluate(&central) > evaluate(&corner));
+    }
+
+    #[test]
+    fn intact_home_rank_pawn_cover_receives_a_shield_bonus() {
+        let shielded = Position::from_fen("7k/8/8/8/8/8/5PPP/6K1 w - - 0 1").expect("valid FEN");
+        let exposed = Position::from_fen("7k/8/8/8/8/8/8/6K1 w - - 0 1").expect("valid FEN");
+        assert!(
+            king_safety_middle_game(&shielded, Color::White, shielded.occupied())
+                > king_safety_middle_game(&exposed, Color::White, exposed.occupied())
+        );
+    }
+
+    #[test]
+    fn direct_heavy_piece_pressure_penalises_the_king_zone() {
+        let pressured = Position::from_fen("6r1/7k/8/8/8/8/8/6K1 w - - 0 1").expect("valid FEN");
+        assert!(king_safety_middle_game(&pressured, Color::White, pressured.occupied()) < 0);
     }
 }
