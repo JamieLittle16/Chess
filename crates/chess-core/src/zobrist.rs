@@ -130,14 +130,10 @@ mod tests {
 
     #[test]
     fn key_is_deterministic_and_ignores_move_clocks() {
-        let a = Position::from_fen(
-            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-        )
-        .expect("valid FEN");
-        let b = Position::from_fen(
-            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 73 42",
-        )
-        .expect("valid FEN");
+        let a = Position::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
+            .expect("valid FEN");
+        let b = Position::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 73 42")
+            .expect("valid FEN");
         assert_eq!(a.zobrist_key(), b.zobrist_key());
         assert_eq!(a.zobrist_key(), a.recomputed_zobrist_key());
     }
@@ -146,10 +142,8 @@ mod tests {
     fn search_relevant_state_changes_key() {
         let white = Position::from_fen("8/8/8/8/8/8/8/K6k w - - 0 1").expect("valid FEN");
         let black = Position::from_fen("8/8/8/8/8/8/8/K6k b - - 0 1").expect("valid FEN");
-        let castling =
-            Position::from_fen("4k3/8/8/8/8/8/8/4K2R w K - 0 1").expect("valid FEN");
-        let no_castling =
-            Position::from_fen("4k3/8/8/8/8/8/8/4K2R w - - 0 1").expect("valid FEN");
+        let castling = Position::from_fen("4k3/8/8/8/8/8/8/4K2R w K - 0 1").expect("valid FEN");
+        let no_castling = Position::from_fen("4k3/8/8/8/8/8/8/4K2R w - - 0 1").expect("valid FEN");
         assert_ne!(white.zobrist_key(), black.zobrist_key());
         assert_ne!(castling.zobrist_key(), no_castling.zobrist_key());
     }
