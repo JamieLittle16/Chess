@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "protocol_id": "m4-qsearch-v1-screening",
+  "runner": "fastchess",
+  "games": 100,
+  "time_control": "1+0.01",
+  "concurrency": 1,
+  "seed": 20260906,
+  "max_moves": 300,
+  "opening_format": "epd",
+  "openings_required": true,
+  "opening_suite_id": "m3-uho-lichess-100-v1",
+  "opening_sha256": "599a45efb446e91952d13e79bc7fec8de319e332036a54552a3e8e4af91f9cf1",
+  "paired_colour_reversal": true,
+  "ponder": false,
+  "tablebases": false,
+  "evaluation_adjudication": false,
+  "notes": "Short-control equal-wall-clock screening of bounded M4 quiescence against the frozen M3 control at commit 5185f2c8de64b78ff84df12067d88d9f43ed3cb0. This protocol decides whether the tactical benefit pays for qsearch throughput cost before merge; it is not a published absolute rating."
+}
