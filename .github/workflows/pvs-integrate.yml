@@ -29,183 +29,146 @@ jobs:
           from pathlib import Path
 
           path = Path('crates/chess-search/src/lib.rs')
-          text = path.read_text()
+          lines = path.read_text().splitlines()
+          picker_line = 'let mut picker = MovePicker::new(&mut moves, hint);'
+          pickers = [i for i, line in enumerate(lines) if line.strip() == picker_line]
+          if len(pickers) != 2:
+              raise SystemExit(f'expected two search pickers, found {len(pickers)}')
 
-          root_old = '''        let mut moves = moves;
-          let mut picker = MovePicker::new(&mut moves, hint);
-          while let Some(mv) = picker.next(position) {
-              let undo = position.make_move(mv);
-              let child = self.negamax(
-                  position,
-                  prior_history,
-                  depth - 1,
-                  -INFINITY,
-                  -alpha,
-                  1,
-                  1,
-                  control,
-              );
-              position.unmake_move(mv, undo);
-              let score = -child?;
+          def loop_end(start: int) -> int:
+              depth = 0
+              seen = False
+              for i in range(start, len(lines)):
+                  depth += lines[i].count('{') - lines[i].count('}')
+                  seen = True
+                  if seen and depth == 0:
+                      return i
+              raise SystemExit('unterminated search loop')
 
-              if score > best_score {
-                  best_score = score;
-                  best_move = Some(mv);
-              }
-              alpha = alpha.max(score);
-          }
-          '''
-          root_new = '''        let mut moves = moves;
-          let mut picker = MovePicker::new(&mut moves, hint);
-          let mut first_move = true;
-          while let Some(mv) = picker.next(position) {
-              let undo = position.make_move(mv);
-              let child = if first_move {
-                  self.negamax(
-                      position,
-                      prior_history,
-                      depth - 1,
-                      -INFINITY,
-                      -alpha,
-                      1,
-                      1,
-                      control,
-                  )
-              } else {
-                  // Later root moves first get a null-window probe. Good ordering should make most
-                  // of them fail low cheaply; only a move that raises alpha is searched widely.
-                  let probe = self.negamax(
-                      position,
-                      prior_history,
-                      depth - 1,
-                      -alpha - 1,
-                      -alpha,
-                      1,
-                      1,
-                      control,
-                  );
-                  match probe {
-                      Some(probe_child) if -probe_child > alpha => self.negamax(
-                          position,
-                          prior_history,
-                          depth - 1,
-                          -INFINITY,
-                          -alpha,
-                          1,
-                          1,
-                          control,
-                      ),
-                      probe => probe,
-                  }
-              };
-              position.unmake_move(mv, undo);
-              let score = -child?;
-              first_move = false;
+          root_loop = [
+              '        let mut first_move = true;',
+              '        while let Some(mv) = picker.next(position) {',
+              '            let undo = position.make_move(mv);',
+              '            let child = if first_move {',
+              '                self.negamax(',
+              '                    position,',
+              '                    prior_history,',
+              '                    depth - 1,',
+              '                    -INFINITY,',
+              '                    -alpha,',
+              '                    1,',
+              '                    1,',
+              '                    control,',
+              '                )',
+              '            } else {',
+              '                // Later root moves first get a null-window probe. Good ordering',
+              '                // should make most fail low; only alpha-raising moves are re-searched.',
+              '                let probe = self.negamax(',
+              '                    position,',
+              '                    prior_history,',
+              '                    depth - 1,',
+              '                    -alpha - 1,',
+              '                    -alpha,',
+              '                    1,',
+              '                    1,',
+              '                    control,',
+              '                );',
+              '                match probe {',
+              '                    Some(probe_child) if -probe_child > alpha => self.negamax(',
+              '                        position,',
+              '                        prior_history,',
+              '                        depth - 1,',
+              '                        -INFINITY,',
+              '                        -alpha,',
+              '                        1,',
+              '                        1,',
+              '                        control,',
+              '                    ),',
+              '                    probe => probe,',
+              '                }',
+              '            };',
+              '            position.unmake_move(mv, undo);',
+              '            let score = -child?;',
+              '            first_move = false;',
+              '',
+              '            if score > best_score {',
+              '                best_score = score;',
+              '                best_move = Some(mv);',
+              '            }',
+              '            alpha = alpha.max(score);',
+              '        }',
+          ]
 
-              if score > best_score {
-                  best_score = score;
-                  best_move = Some(mv);
-              }
-              alpha = alpha.max(score);
-          }
-          '''
+          node_loop = [
+              '        let mut first_move = true;',
+              '        while let Some(mv) = picker.next(position) {',
+              '            let undo = position.make_move(mv);',
+              '            let child = if first_move {',
+              '                self.negamax(',
+              '                    position,',
+              '                    prior_history,',
+              '                    depth - 1,',
+              '                    -beta,',
+              '                    -alpha,',
+              '                    ply + 1,',
+              '                    path_len + 1,',
+              '                    control,',
+              '                )',
+              '            } else {',
+              '                // Principal variation search probes later moves with a one-point',
+              '                // window and verifies only genuine alpha improvements.',
+              '                let probe = self.negamax(',
+              '                    position,',
+              '                    prior_history,',
+              '                    depth - 1,',
+              '                    -alpha - 1,',
+              '                    -alpha,',
+              '                    ply + 1,',
+              '                    path_len + 1,',
+              '                    control,',
+              '                );',
+              '                match probe {',
+              '                    Some(probe_child)',
+              '                        if -probe_child > alpha && -probe_child < beta =>',
+              '                    {',
+              '                        self.negamax(',
+              '                            position,',
+              '                            prior_history,',
+              '                            depth - 1,',
+              '                            -beta,',
+              '                            -alpha,',
+              '                            ply + 1,',
+              '                            path_len + 1,',
+              '                            control,',
+              '                        )',
+              '                    }',
+              '                    probe => probe,',
+              '                }',
+              '            };',
+              '            position.unmake_move(mv, undo);',
+              '            let score = -child?;',
+              '            first_move = false;',
+              '',
+              '            if score > best {',
+              '                best = score;',
+              '                best_move = Some(mv);',
+              '            }',
+              '            alpha = alpha.max(score);',
+              '            if alpha >= beta {',
+              '                break;',
+              '            }',
+              '        }',
+          ]
 
-          node_old = '''        let mut moves = moves;
-          let mut picker = MovePicker::new(&mut moves, hint);
-          while let Some(mv) = picker.next(position) {
-              let undo = position.make_move(mv);
-              let child = self.negamax(
-                  position,
-                  prior_history,
-                  depth - 1,
-                  -beta,
-                  -alpha,
-                  ply + 1,
-                  path_len + 1,
-                  control,
-              );
-              position.unmake_move(mv, undo);
-              let score = -child?;
+          # Replace from the bottom so the first replacement cannot shift the second index.
+          for picker_idx, replacement in ((pickers[1], node_loop), (pickers[0], root_loop)):
+              start = picker_idx + 1
+              if lines[start].strip() != 'while let Some(mv) = picker.next(position) {':
+                  raise SystemExit('unexpected code between picker and search loop')
+              end = loop_end(start)
+              lines[start:end + 1] = replacement
 
-              if score > best {
-                  best = score;
-                  best_move = Some(mv);
-              }
-              alpha = alpha.max(score);
-              if alpha >= beta {
-                  break;
-              }
-          }
-          '''
-          node_new = '''        let mut moves = moves;
-          let mut picker = MovePicker::new(&mut moves, hint);
-          let mut first_move = true;
-          while let Some(mv) = picker.next(position) {
-              let undo = position.make_move(mv);
-              let child = if first_move {
-                  self.negamax(
-                      position,
-                      prior_history,
-                      depth - 1,
-                      -beta,
-                      -alpha,
-                      ply + 1,
-                      path_len + 1,
-                      control,
-                  )
-              } else {
-                  // Principal variation search: probe later moves with a one-point window, then
-                  // verify only moves that improve alpha without already failing high.
-                  let probe = self.negamax(
-                      position,
-                      prior_history,
-                      depth - 1,
-                      -alpha - 1,
-                      -alpha,
-                      ply + 1,
-                      path_len + 1,
-                      control,
-                  );
-                  match probe {
-                      Some(probe_child)
-                          if -probe_child > alpha && -probe_child < beta =>
-                      {
-                          self.negamax(
-                              position,
-                              prior_history,
-                              depth - 1,
-                              -beta,
-                              -alpha,
-                              ply + 1,
-                              path_len + 1,
-                              control,
-                          )
-                      }
-                      probe => probe,
-                  }
-              };
-              position.unmake_move(mv, undo);
-              let score = -child?;
-              first_move = false;
-
-              if score > best {
-                  best = score;
-                  best_move = Some(mv);
-              }
-              alpha = alpha.max(score);
-              if alpha >= beta {
-                  break;
-              }
-          }
-          '''
-
-          if root_old not in text:
-              raise SystemExit('root search loop not found exactly')
-          text = text.replace(root_old, root_new, 1)
-          if node_old not in text:
-              raise SystemExit('negamax search loop not found exactly')
-          text = text.replace(node_old, node_new, 1)
-          path.write_text(text)
+          path.write_text('\n'.join(lines) + '\n')
           PY
 
           cargo fmt --all
