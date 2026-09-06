@@ -9,8 +9,7 @@ fn child_repetition_key(position: &Position, mv: chess_core::ChessMove) -> u64 {
 
 #[test]
 fn winning_side_avoids_available_threefold_when_positive_play_exists() {
-    let mut root =
-        Position::from_fen("7k/8/8/8/8/8/K7/1Q6 w - - 0 1").expect("valid FEN");
+    let mut root = Position::from_fen("7k/8/8/8/8/8/K7/1Q6 w - - 0 1").expect("valid FEN");
     let original = root.clone();
     let legal = root.legal_moves();
     assert!(legal.len() >= 2, "test position needs alternatives");
@@ -24,7 +23,10 @@ fn winning_side_avoids_available_threefold_when_positive_play_exists() {
     let mut searcher = Searcher::default();
     let result = searcher.search_depth_with_history(&mut root, &[drawing_key, drawing_key], 1);
 
-    assert!(result.score > 0, "a winning side should prefer a positive continuation to a draw");
+    assert!(
+        result.score > 0,
+        "a winning side should prefer a positive continuation to a draw"
+    );
     assert_ne!(
         result.best_move,
         Some(drawing_move),
@@ -35,8 +37,7 @@ fn winning_side_avoids_available_threefold_when_positive_play_exists() {
 
 #[test]
 fn losing_side_seeks_available_threefold_over_negative_continuations() {
-    let mut root =
-        Position::from_fen("7k/8/8/8/8/8/K7/1Q6 b - - 0 1").expect("valid FEN");
+    let mut root = Position::from_fen("7k/8/8/8/8/8/K7/1Q6 b - - 0 1").expect("valid FEN");
     let original = root.clone();
     let legal = root.legal_moves();
     assert!(legal.len() >= 2, "test position needs alternatives");
@@ -49,7 +50,10 @@ fn losing_side_seeks_available_threefold_over_negative_continuations() {
     let mut searcher = Searcher::default();
     let result = searcher.search_depth_with_history(&mut root, &[drawing_key, drawing_key], 1);
 
-    assert_eq!(result.score, 0, "a forced/claimable draw is better than remaining losing");
+    assert_eq!(
+        result.score, 0,
+        "a forced/claimable draw is better than remaining losing"
+    );
     assert_eq!(
         result.best_move,
         Some(drawing_move),
@@ -60,8 +64,7 @@ fn losing_side_seeks_available_threefold_over_negative_continuations() {
 
 #[test]
 fn stalemate_is_an_exact_draw_not_a_static_evaluation() {
-    let mut root =
-        Position::from_fen("7k/5K2/6Q1/8/8/8/8/8 b - - 0 1").expect("valid FEN");
+    let mut root = Position::from_fen("7k/5K2/6Q1/8/8/8/8/8 b - - 0 1").expect("valid FEN");
     let mut searcher = Searcher::default();
     let result = searcher.search_depth(&mut root, 4);
 
