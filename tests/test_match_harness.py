@@ -15,6 +15,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HARNESS_PATH = REPO_ROOT / "scripts" / "match_harness.py"
 PROTOCOL_PATH = REPO_ROOT / "match" / "protocols" / "m3-baseline-v1.json"
+OPENINGS_PATH = REPO_ROOT / "match" / "openings" / "m3-uho-lichess-100-v1.epd"
+OPENINGS_SHA256 = "599a45efb446e91952d13e79bc7fec8de319e332036a54552a3e8e4af91f9cf1"
 
 spec = importlib.util.spec_from_file_location("match_harness", HARNESS_PATH)
 assert spec is not None and spec.loader is not None
@@ -35,6 +37,8 @@ class MatchHarnessTests(unittest.TestCase):
         self.assertEqual(protocol.concurrency, 1)
         self.assertEqual(protocol.seed, 20260906)
         self.assertTrue(protocol.openings_required)
+        self.assertEqual(protocol.opening_suite_id, "m3-uho-lichess-100-v1")
+        self.assertEqual(protocol.opening_sha256, OPENINGS_SHA256)
         self.assertTrue(protocol.paired_colour_reversal)
         self.assertFalse(protocol.ponder)
         self.assertFalse(protocol.tablebases)
@@ -56,6 +60,8 @@ class MatchHarnessTests(unittest.TestCase):
             replace(self.protocol, evaluation_adjudication=True).validate()
         with self.assertRaisesRegex(harness.HarnessError, "paired colour reversal"):
             replace(self.protocol, paired_colour_reversal=False).validate()
+        with self.assertRaisesRegex(harness.HarnessError, "64-character hexadecimal"):
+            replace(self.protocol, opening_sha256="not-a-hash").validate()
 
     def test_engine_options_are_explicit_name_value_pairs(self) -> None:
         self.assertEqual(harness.parse_engine_option("Hash=64"), "option.Hash=64")
@@ -127,6 +133,17 @@ class MatchHarnessTests(unittest.TestCase):
             self.assertEqual(identity.sha256, hashlib.sha256(payload).hexdigest())
             self.assertEqual(Path(identity.path), path.resolve())
 
+    def test_checked_in_opening_suite_matches_protocol_hash(self) -> None:
+        self.assertEqual(harness.sha256_file(OPENINGS_PATH), OPENINGS_SHA256)
+        self.assertEqual(harness.resolve_openings(OPENINGS_PATH, self.protocol), OPENINGS_PATH.resolve())
+
+    def test_wrong_opening_suite_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "wrong.epd"
+            path.write_text("8/8/8/8/8/8/8/K6k w - - 0 1\n", encoding="utf-8")
+            with self.assertRaisesRegex(harness.HarnessError, "opening suite hash mismatch"):
+                harness.resolve_openings(path, self.protocol)
+
     def test_output_directory_must_be_new_or_empty(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -167,7 +184,7 @@ class MatchHarnessTests(unittest.TestCase):
                     ]
                 )
             self.assertEqual(code, 2)
-            self.assertIn("requires an opening file", stderr.getvalue())
+            self.assertIn("requires opening suite", stderr.getvalue())
             self.assertFalse(output.exists())
 
     def test_dry_run_records_hashed_inputs_and_exact_command(self) -> None:
@@ -176,8 +193,6 @@ class MatchHarnessTests(unittest.TestCase):
             candidate = self._fake_executable(root / "candidate", "candidate")
             reference = self._fake_executable(root / "reference", "reference")
             fastchess = self._fake_executable(root / "fastchess", "fake-fastchess 1.0")
-            openings = root / "openings.epd"
-            openings.write_text("8/8/8/8/8/8/8/K6k w - - bm Ka2;\n", encoding="utf-8")
             output = root / "results"
 
             stdout = io.StringIO()
@@ -192,7 +207,7 @@ class MatchHarnessTests(unittest.TestCase):
                         "--fastchess",
                         str(fastchess),
                         "--openings",
-                        str(openings),
+                        str(OPENINGS_PATH),
                         "--output-dir",
                         str(output),
                         "--protocol",
@@ -209,6 +224,7 @@ class MatchHarnessTests(unittest.TestCase):
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(manifest["status"], "dry-run")
             self.assertEqual(manifest["protocol"]["protocol_id"], "m3-baseline-v1")
+            self.assertEqual(manifest["protocol"]["opening_suite_id"], "m3-uho-lichess-100-v1")
             self.assertEqual(
                 manifest["candidate"]["file"]["sha256"],
                 harness.sha256_file(candidate),
@@ -217,10 +233,7 @@ class MatchHarnessTests(unittest.TestCase):
                 manifest["reference"]["file"]["sha256"],
                 harness.sha256_file(reference),
             )
-            self.assertEqual(
-                manifest["openings"]["sha256"],
-                harness.sha256_file(openings),
-            )
+            self.assertEqual(manifest["openings"]["sha256"], OPENINGS_SHA256)
             self.assertEqual(manifest["runner"]["version_output"], "fake-fastchess 1.0")
             self.assertIn("-repeat", manifest["command"]["argv"])
             self.assertIn("-srand", manifest["command"]["argv"])

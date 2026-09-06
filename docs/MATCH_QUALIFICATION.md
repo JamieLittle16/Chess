@@ -18,16 +18,15 @@ protocol JSON
 + exact Fastchess executable
 + exact candidate executable
 + exact reference executable
-+ exact opening suite
++ exact protocol-pinned opening suite
 + explicit engine options
 + recorded machine/tool environment
 → manifest + raw runner log + PGN + UCI log
 ```
 
 A sample is immutable evidence. Do not append another tournament to an existing result directory and
-do not repair an interrupted sample in place.
-
-The wrapper therefore refuses a non-empty output directory.
+do not repair an interrupted sample in place. The wrapper therefore refuses a non-empty output
+directory.
 
 ## 2. Repository protocol
 
@@ -37,27 +36,76 @@ The first finite-time protocol is:
 match/protocols/m3-baseline-v1.json
 ```
 
-It currently fixes:
+It fixes:
 
 - 200 games / 100 opening pairs;
 - `10+0.1` time control;
 - one concurrent game;
 - deterministic seed `20260906`;
 - paired colour reversal;
-- a required versioned opening file;
+- opening suite `m3-uho-lichess-100-v1`;
+- opening SHA-256 `599a45efb446e91952d13e79bc7fec8de319e332036a54552a3e8e4af91f9cf1`;
 - maximum 300 moves;
 - no ponder;
 - no tablebases;
 - no evaluation-based resign/draw adjudication.
 
-The last restriction is deliberate. The M3 evaluator is material-only, so its numeric opinion is not
-credible enough to decide whether tournament games should be truncated as wins or draws. Baseline
-games terminate by chess rules or the fixed maximum-move guard.
+The harness verifies the supplied opening file against the protocol SHA-256 before it creates the
+result directory. A different book is therefore a different experiment, not another
+`m3-baseline-v1` sample.
+
+The no-score-adjudication restriction is deliberate. The M3 evaluator is material-only, so its
+numeric opinion is not credible enough to decide whether tournament games should be truncated as wins
+or draws. Baseline games terminate by chess rules or the fixed maximum-move guard.
 
 Changing one of these fields creates a different protocol. Do not silently edit a completed
 protocol's meaning while keeping the same `protocol_id`.
 
-## 3. Pairing
+## 3. Frozen opening corpus
+
+The vendored corpus is:
+
+```text
+match/openings/m3-uho-lichess-100-v1.epd
+match/openings/m3-uho-lichess-100-v1.json
+```
+
+It is derived from the official Stockfish opening-book repository:
+
+```text
+repository: official-stockfish/books
+commit:     65815ccdbc7727cd4f6aee252ba8f67fb740e92f
+archive:    UHO_Lichess_4852_v1.epd.zip
+Git blob:   e439636101786177ece850d3607356891c1cc2cd
+archive SHA-256:
+            4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07
+upstream uncompressed SHA-384 SRI:
+            QHAU1P3LurcJr7UTRI7HZCVFsoYBWC3OTsBqZY/FfQA6VQo3MmECWtByB4gVACW5
+upstream positions:
+            2,632,036
+license:    CC0-1.0
+```
+
+The source book is not copied wholesale into this repository. `scripts/build_opening_suite.py` verifies
+archive size/SHA-256, ZIP member, upstream uncompressed SRI and source position count, then ranks every
+non-empty normalized source position by:
+
+```text
+SHA256("Chess/m3-uho-lichess-100-v1" || NUL || EPD-line-bytes)
+```
+
+and retains the 100 smallest ranks. The final positions are stored in rank order. This samples across
+the entire pinned 2.63M-position source without a runtime RNG or a fragile "first 100 lines" rule.
+
+The derivation script also pins the final corpus hash, so regeneration fails if either the upstream
+artifact or the selection result differs.
+
+The normal CI gate does not redownload the 42.9 MB source book. It validates the vendored hash,
+metadata, count, uniqueness and rank order in Python, while `chess-core` independently parses all 100
+FENs and requires every one to be a legal nonterminal position. The upstream derivation can be rerun
+explicitly when auditing the corpus.
+
+## 4. Pairing
 
 Every opening is used as a two-game pair with colours reversed. The generated Fastchess command uses:
 
@@ -72,7 +120,7 @@ The wrapper deliberately does not pass crash-recovery/resume behaviour for quali
 engine crash makes that sample failed evidence rather than a tournament to continue and later mistake
 for one uninterrupted sample.
 
-## 4. Provenance manifest
+## 5. Provenance manifest
 
 Before the match starts, `scripts/match_harness.py` writes `manifest.json` containing:
 
@@ -90,7 +138,7 @@ After a completed, failed or interrupted run, existing generated artifacts are a
 A manifest that says `running` should therefore only describe a match that was genuinely still live
 when its process/environment disappeared unexpectedly.
 
-## 5. Output statuses
+## 6. Output statuses
 
 The manifest lifecycle is explicit:
 
@@ -109,7 +157,7 @@ without launching a tournament.
 Only `completed` samples are strength evidence. `failed`, `interrupted` and `dry-run` records are
 useful diagnostics but must not be mixed into reported match statistics.
 
-## 6. Running a qualification match
+## 7. Running a qualification match
 
 Build the engine binaries separately so candidate and reference are immutable files during the run.
 Then invoke, for example:
@@ -119,7 +167,7 @@ python3 scripts/match_harness.py \
   --candidate /absolute/path/to/candidate \
   --reference /absolute/path/to/reference \
   --fastchess /absolute/path/to/fastchess \
-  --openings /absolute/path/to/openings.epd \
+  --openings match/openings/m3-uho-lichess-100-v1.epd \
   --output-dir results/m3-baseline/<run-id> \
   --candidate-name candidate@<sha> \
   --reference-name reference@<sha>
@@ -136,22 +184,6 @@ If an engine requires a UCI option, make it explicit:
 
 The wrapper maps this to Fastchess `option.Hash=64`. Hidden per-machine engine configuration is not a
 valid qualification input.
-
-## 7. Opening suites
-
-The protocol requires an opening suite, but the opening corpus is intentionally a separate versioned
-artifact. Its content hash is part of every manifest.
-
-A qualification opening suite should:
-
-- contain legal positions suitable for both engines;
-- avoid trivially decided or pathological starts unless the experiment explicitly targets them;
-- be large enough that opening choice does not dominate the sample;
-- be frozen before inspecting candidate results;
-- be used identically for candidate/reference colour pairs.
-
-If the opening corpus changes, report a different opening-suite identity even when the time-control
-protocol is otherwise unchanged.
 
 ## 8. Reporting strength
 
@@ -182,27 +214,30 @@ into a human chess rating.
 CI does **not** run chess tournaments. Shared runners are unsuitable for stable time-control strength
 claims and Fastchess is intentionally not a build dependency.
 
-CI instead tests the repository-owned part of the experiment:
+CI tests the repository-owned experiment boundary:
 
 - strict protocol validation;
+- exact protocol-pinned opening SHA-256 enforcement;
+- opening metadata/count/uniqueness/rank-order checks;
+- all 100 openings parsed and checked as nonterminal by `chess-core`;
 - paired/seeded command construction;
 - forbidden recovery/adjudication flags remaining absent;
 - exact file hashing;
 - fresh-output-directory enforcement;
-- required openings being rejected before output creation;
+- required/wrong openings rejected before output creation;
 - dry-run manifest creation with fake executables;
 - output artifact hashing.
 
-These tests use only Python's standard library. `./scripts/check.sh` runs the same harness tests plus
-the complete Rust gate and deterministic reference-search benchmark.
+These qualification tests use only Python's standard library plus the existing Rust chess core.
+`./scripts/check.sh` runs them together with the complete Rust gate and deterministic reference-search
+benchmark.
 
 ## 10. M3 exit
 
-The harness itself is not the M3 exit condition. M3 closes only when we have:
+The measurement infrastructure and frozen opening corpus are now defined. M3 closes only when we also
+have:
 
-1. this reproducible match infrastructure green;
-2. a frozen opening suite;
-3. a retained completed baseline sample against a named reference;
-4. a reported relative result with uncertainty and all provenance evidence.
+1. a retained completed baseline sample against a named reference;
+2. a reported relative result with uncertainty and all provenance evidence.
 
 Only after that control group exists should M4 strength work begin in earnest.
