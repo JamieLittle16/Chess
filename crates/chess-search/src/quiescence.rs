@@ -133,8 +133,10 @@ mod tests {
         let mut position =
             Position::from_fen("3r3k/3p4/8/8/8/8/8/K2Q4 w - - 0 1").expect("valid FEN");
         let original = position.clone();
-        let mut searcher = Searcher::default();
-        searcher.nodes = 1;
+        let mut searcher = Searcher {
+            nodes: 1,
+            ..Searcher::default()
+        };
         let _ = searcher
             .quiescence(&mut position, &[], -INFINITY, INFINITY, 0, 0, &NeverStop)
             .expect("uncontrolled quiescence completes");
@@ -149,8 +151,10 @@ mod tests {
             Position::from_fen("4r2k/8/8/8/8/8/6Q1/4K3 w - - 0 1").expect("valid FEN");
         assert!(position.is_in_check(position.side_to_move()));
         let original = position.clone();
-        let mut searcher = Searcher::default();
-        searcher.nodes = 1;
+        let mut searcher = Searcher {
+            nodes: 1,
+            ..Searcher::default()
+        };
         let score = searcher
             .quiescence(&mut position, &[], -INFINITY, INFINITY, 0, 0, &NeverStop)
             .expect("uncontrolled quiescence completes");
