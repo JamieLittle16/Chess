@@ -1,4 +1,4 @@
-use crate::{Bitboard, Color, FenError, Piece, PieceKind, Square};
+use crate::{Bitboard, Color, FenError, Piece, PieceKind, Square, ZobristKey};
 
 const PIECE_SLOTS: usize = 12;
 
@@ -44,6 +44,7 @@ pub struct Position {
     en_passant: Option<Square>,
     halfmove_clock: u16,
     fullmove_number: u16,
+    zobrist: ZobristKey,
 }
 
 impl Position {
@@ -58,6 +59,7 @@ impl Position {
             en_passant: None,
             halfmove_clock: 0,
             fullmove_number: 1,
+            zobrist: ZobristKey::ZERO,
         }
     }
 
@@ -95,6 +97,19 @@ impl Position {
     #[must_use]
     pub const fn fullmove_number(&self) -> u16 {
         self.fullmove_number
+    }
+
+    #[must_use]
+    pub const fn zobrist_key(&self) -> ZobristKey {
+        self.zobrist
+    }
+
+    /// Reconstruct the search identity from canonical chess state.
+    ///
+    /// This is an oracle for tests and diagnostics; search should use [`Position::zobrist_key`].
+    #[must_use]
+    pub fn recomputed_zobrist_key(&self) -> ZobristKey {
+        crate::zobrist::recompute(self)
     }
 
     #[must_use]
@@ -148,6 +163,8 @@ impl Position {
         self.pieces[piece.slot()] = self.pieces[piece.slot()].with(square);
         self.occupancy[piece.color().index()] = self.occupancy[piece.color().index()].with(square);
         self.occupied = self.occupied.with(square);
+        self.zobrist
+            .toggle(crate::zobrist::piece_component(piece, square));
     }
 
     pub(crate) fn take_piece(&mut self, square: Square) -> Option<Piece> {
@@ -156,19 +173,33 @@ impl Position {
         self.occupancy[piece.color().index()] =
             self.occupancy[piece.color().index()].without(square);
         self.occupied = self.occupied.without(square);
+        self.zobrist
+            .toggle(crate::zobrist::piece_component(piece, square));
         Some(piece)
     }
 
     pub(crate) fn set_side_to_move(&mut self, color: Color) {
+        self.zobrist
+            .toggle(crate::zobrist::side_component(self.side_to_move));
         self.side_to_move = color;
+        self.zobrist
+            .toggle(crate::zobrist::side_component(self.side_to_move));
     }
 
     pub(crate) fn set_castling_rights(&mut self, rights: CastlingRights) {
+        self.zobrist
+            .toggle(crate::zobrist::castling_component(self.castling));
         self.castling = rights;
+        self.zobrist
+            .toggle(crate::zobrist::castling_component(self.castling));
     }
 
     pub(crate) fn set_en_passant(&mut self, square: Option<Square>) {
+        self.zobrist
+            .toggle(crate::zobrist::en_passant_component(self.en_passant));
         self.en_passant = square;
+        self.zobrist
+            .toggle(crate::zobrist::en_passant_component(self.en_passant));
     }
 
     pub(crate) fn set_clocks(&mut self, halfmove: u16, fullmove: u16) {
@@ -199,6 +230,7 @@ impl Position {
             && white == self.occupancy(Color::White)
             && black == self.occupancy(Color::Black)
             && (white & black).is_empty()
+            && self.zobrist == crate::zobrist::recompute(self)
     }
 }
 

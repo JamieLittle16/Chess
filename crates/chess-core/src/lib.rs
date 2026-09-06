@@ -15,6 +15,7 @@ mod position;
 mod reference;
 mod reversible;
 mod square;
+mod zobrist;
 
 pub use attacks::{
     bishop_attacks, is_square_attacked, king_attacks, knight_attacks, pawn_attacks, queen_attacks,
@@ -31,3 +32,4 @@ pub use piece::{Piece, PieceKind};
 pub use position::{CastlingRights, Position};
 pub use reversible::Undo;
 pub use square::Square;
+pub use zobrist::ZobristKey;
