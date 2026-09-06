@@ -7,6 +7,7 @@ use chess_core::Position;
 use chess_search::Searcher;
 
 pub const SUITE_NAME: &str = "reference-search-v1";
+pub const EXPECTED_SIGNATURE: u64 = 0xad74_d211_1aea_484e;
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -118,7 +119,7 @@ fn mix_bytes(mut hash: u64, bytes: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::run_reference_suite;
+    use super::{EXPECTED_SIGNATURE, run_reference_suite};
 
     #[test]
     fn suite_is_deterministic_within_the_same_build() {
@@ -126,9 +127,9 @@ mod tests {
     }
 
     #[test]
-    fn suite_produces_real_search_work_and_signature() {
+    fn suite_matches_the_reviewed_reference_signature() {
         let report = run_reference_suite();
-        assert_ne!(report.signature, 0);
+        assert_eq!(report.signature, EXPECTED_SIGNATURE);
         assert!(report.cases.iter().all(|case| case.nodes > 0));
         assert!(report.cases.iter().all(|case| case.best_move_raw.is_some()));
     }
