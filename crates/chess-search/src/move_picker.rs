@@ -1,6 +1,8 @@
 use chess_core::{ChessMove, MoveKind, MoveList, Position};
 
-use super::see::static_exchange_eval;
+#[path = "see.rs"]
+mod see;
+use see::static_exchange_eval;
 
 const ORDER_VALUES: [i32; 6] = [100, 320, 330, 500, 900, 20_000];
 
