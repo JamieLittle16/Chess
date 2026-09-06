@@ -749,8 +749,7 @@ mod tests {
 
     #[test]
     fn threefold_history_is_draw_even_with_non_draw_tt_entry() {
-        let mut root =
-            Position::from_fen("7k/8/8/8/8/8/6Q1/K7 w - - 0 1").expect("valid FEN");
+        let mut root = Position::from_fen("7k/8/8/8/8/8/6Q1/K7 w - - 0 1").expect("valid FEN");
         let original = root.clone();
         let mut searcher = Searcher::default();
         let warm = searcher.search_depth(&mut root, 1);
@@ -765,12 +764,10 @@ mod tests {
 
     #[test]
     fn fifty_move_rule_is_draw_but_checkmate_takes_precedence() {
-        let queen_up =
-            Position::from_fen("7k/8/8/8/8/8/6Q1/K7 w - - 100 1").expect("valid FEN");
+        let queen_up = Position::from_fen("7k/8/8/8/8/8/6Q1/K7 w - - 100 1").expect("valid FEN");
         assert_eq!(search(&queen_up, 2).score, 0);
 
-        let checkmate =
-            Position::from_fen("7k/6Q1/5K2/8/8/8/8/8 b - - 100 1").expect("valid FEN");
+        let checkmate = Position::from_fen("7k/6Q1/5K2/8/8/8/8/8 b - - 100 1").expect("valid FEN");
         let result = search(&checkmate, 2);
         assert_eq!(result.best_move, None);
         assert_eq!(result.score, -MATE_SCORE);
@@ -778,8 +775,7 @@ mod tests {
 
     #[test]
     fn insufficient_material_is_drawn_before_static_evaluation() {
-        let root =
-            Position::from_fen("7k/8/8/8/8/8/6B1/K7 w - - 0 1").expect("valid FEN");
+        let root = Position::from_fen("7k/8/8/8/8/8/6B1/K7 w - - 0 1").expect("valid FEN");
         let result = search(&root, 3);
         assert_eq!(result.score, 0);
         assert!(result.best_move.is_some());
