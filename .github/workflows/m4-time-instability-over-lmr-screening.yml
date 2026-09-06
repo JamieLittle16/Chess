@@ -1,0 +1,102 @@
+name: M4 time instability over LMR screening
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  screening:
+    if: github.head_ref == 'm4/time-instability-over-lmr-screening'
+    name: Adaptive time vs exact LMR v2
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - name: Apply exact LMR plus adaptive-time candidate
+        run: |
+          set -euo pipefail
+          python3 tools/apply_lmr_v2_for_stack.py
+          cargo fmt --all
+          echo '871a3b0d2aba3af2d590c8a0bd55bf6565df6299896e9a1d981178f33a58edeb  crates/chess-search/src/lib.rs' | sha256sum --check --strict
+          python3 tools/apply_time_instability_v1.py
+          cargo fmt --all
+          git diff --check
+          test -n "$(git diff -- crates/chess-search/src/lib.rs)"
+          test -n "$(git diff -- crates/chess-engine/src/lib.rs)"
+      - name: Verify stacked search timing and draw correctness
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test -p chess-search --all-features
+          cargo test -p chess-core --all-features
+          cargo test -p chess-engine --all-features
+          cargo test -p chess-uci --all-features
+      - name: Build candidate
+        run: |
+          set -euo pipefail
+          CANDIDATE_TARGET="$PWD/.qualification/candidate-target"
+          CARGO_TARGET_DIR="$CANDIDATE_TARGET" cargo build --release -p chess-uci
+          echo "CANDIDATE_BIN=$CANDIDATE_TARGET/release/chess-uci" >> "$GITHUB_ENV"
+      - name: Build exact LMR reference
+        run: |
+          set -euo pipefail
+          REFERENCE_SHA=63749df4689a3c1616d1fb8792e7ba8f20ecefd7
+          git fetch --depth=1 origin "$REFERENCE_SHA"
+          git worktree add --detach .qualification/reference "$REFERENCE_SHA"
+          echo '871a3b0d2aba3af2d590c8a0bd55bf6565df6299896e9a1d981178f33a58edeb  .qualification/reference/crates/chess-search/src/lib.rs' | sha256sum --check --strict
+          REFERENCE_TARGET="$PWD/.qualification/reference-target"
+          (
+            cd .qualification/reference
+            CARGO_TARGET_DIR="$REFERENCE_TARGET" cargo build --release -p chess-uci
+          )
+          echo "REFERENCE_BIN=$REFERENCE_TARGET/release/chess-uci" >> "$GITHUB_ENV"
+      - name: Fetch pinned Fastchess
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/fastchess
+          curl --fail --location --retry 3 --output .qualification/fastchess.tar \
+            https://github.com/Disservin/fastchess/releases/download/v1.8.2-alpha/fastchess-linux-x86-64.tar
+          echo '1003f920bebe841acdab5e6d7871e93171a4586857b3ec91c21ef5777f26ff96  .qualification/fastchess.tar' | sha256sum --check --strict
+          tar -xf .qualification/fastchess.tar -C .qualification/fastchess
+          FASTCHESS_BIN=$(find "$PWD/.qualification/fastchess" -type f -name fastchess -perm -111 -print -quit)
+          test -n "$FASTCHESS_BIN"
+          echo "FASTCHESS_BIN=$FASTCHESS_BIN" >> "$GITHUB_ENV"
+      - name: Record identities
+        run: |
+          set -euo pipefail
+          "$FASTCHESS_BIN" -version
+          sha256sum "$CANDIDATE_BIN" "$REFERENCE_BIN" "$FASTCHESS_BIN" match/openings/m3-uho-lichess-100-v1.epd
+      - name: Run paired marginal screen
+        run: |
+          set -euo pipefail
+          SHORT_SHA=${GITHUB_SHA:0:12}
+          python3 scripts/match_harness.py \
+            --protocol match/protocols/m4-time-instability-over-lmr-screening.json \
+            --candidate "$CANDIDATE_BIN" \
+            --candidate-name "Chess-LMR+time@$SHORT_SHA" \
+            --candidate-option Hash=32 \
+            --reference "$REFERENCE_BIN" \
+            --reference-name 'Chess-LMR@63749df4689a' \
+            --reference-option Hash=32 \
+            --fastchess "$FASTCHESS_BIN" \
+            --openings match/openings/m3-uho-lichess-100-v1.epd \
+            --output-dir screening-results
+      - name: Upload retained evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m4-time-over-lmr-${{ github.sha }}
+          path: screening-results/
+          if-no-files-found: warn
+          retention-days: 30
