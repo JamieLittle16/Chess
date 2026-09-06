@@ -7,7 +7,7 @@ The roadmap is ordered by dependency and evidence, not by visual excitement.
 - **M0 complete** — core representation, toolchain and CI are green.
 - **M1 complete** — legal chess and reference perft are green.
 - **M2 complete** — reversible state and deterministic position identity are green.
-- **M3 in progress** — the classical reference engine, deterministic benchmark, cooperative search limits and synchronous UCI path are operational; asynchronous stop/clock allocation and reproducible match qualification remain.
+- **M3 in progress** — the reference engine, deterministic benchmark, interruptible UCI worker, cooperative limits and standard game-clock budgeting are operational; draw/history qualification and reproducible match testing remain.
 
 ## M0 — Core foundations — complete
 
@@ -53,18 +53,20 @@ Implemented:
 - bounded transposition table;
 - persistent engine orchestration;
 - generic cooperative cancellation in search;
-- depth, node and movetime limits owned by engine orchestration;
-- synchronous UCI target with FEN/startpos and `go depth` / `go nodes` / `go movetime` constraints;
+- depth, node and wall-clock limits owned by engine orchestration;
+- interruptible UCI worker with single-owner engine/search state and asynchronous `stop`;
+- UCI `go depth`, `go nodes`, `go movetime`, `wtime`, `btime`, `winc`, `binc` and `movestogo` support;
+- protocol-neutral `ClockState` with a conservative, pinned M3 allocation policy;
 - versioned deterministic reference-search benchmark/signature in CI.
 
 Remaining before M3 exit:
 
-- asynchronous UCI worker boundary so `stop` can interrupt a live search;
-- full clock allocation (`wtime`, `btime`, increments, moves-to-go) and `go infinite` semantics;
+- audit and implement complete draw/history semantics needed by search and match play (repetition, move-count rules and insufficient-material handling where appropriate);
+- finish remaining tournament-facing UCI semantics such as `go infinite` where useful;
 - automated match harness integration;
 - first reproducible baseline Elo under a documented protocol.
 
-Exit condition: a correctly timed UCI engine with a reproducible baseline Elo.
+Exit condition: a correctly timed, draw-correct UCI engine with a reproducible baseline Elo.
 
 ## M4 — Tactical engine
 
@@ -72,7 +74,7 @@ Exit condition: a correctly timed UCI engine with a reproducible baseline Elo.
 - stronger move ordering;
 - bounded tactical TT refinements;
 - carefully measured pruning/reduction mechanisms;
-- production time management.
+- production time-management tuning.
 
 Exit condition: strong, stable reference search and automated paired-game testing.
 
