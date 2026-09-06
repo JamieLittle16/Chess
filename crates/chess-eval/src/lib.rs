@@ -1,11 +1,14 @@
 //! Transparent classical evaluation used as the permanent reference baseline.
 //!
-//! M4 E1 extends the original material-only control with a deliberately small tapered piece-square
-//! model. The tables are generated at compile time from transparent geometric rules rather than
-//! copied from another engine. Runtime evaluation remains allocation-free: iterate the existing
-//! piece bitboards, perform table lookups, and interpolate one middle-game/end-game score pair.
+//! M4 E2-safe extends tapered material/PSQT with cheap pawn-safe geometric mobility. Runtime
+//! evaluation remains allocation-free: iterate existing piece bitboards, perform table
+//! lookups/attack queries, and interpolate one middle-game/end-game score pair. Mobility deliberately
+//! avoids legal move generation and make/unmake.
 
-use chess_core::{Color, PieceKind, Position};
+use chess_core::{
+    Bitboard, Color, PieceKind, Position, Square, bishop_attacks, knight_attacks, pawn_attacks,
+    queen_attacks, rook_attacks,
+};
 
 /// Conventional centipawn-like material values retained from the material-only reference.
 pub const PIECE_VALUES: [i32; 6] = [100, 320, 330, 500, 900, 0];
@@ -14,6 +17,11 @@ const PHASE_WEIGHTS: [i32; 6] = [0, 1, 1, 2, 4, 0];
 const MAX_PHASE: i32 = 24;
 const MG_PSQT: [[i16; 64]; 6] = generate_psqt(false);
 const EG_PSQT: [[i16; 64]; 6] = generate_psqt(true);
+
+// Keep the same E2-v1 weights so this experiment isolates the mobility-area hypothesis. Pawns and
+// kings remain excluded: pawn structure and king safety are independent evaluation experiments.
+const MG_MOBILITY_PER_SQUARE: [i32; 6] = [0, 4, 4, 2, 1, 0];
+const EG_MOBILITY_PER_SQUARE: [i32; 6] = [0, 4, 5, 4, 2, 0];
 
 /// Return the material owned by one side in centipawn-like units.
 #[must_use]
@@ -27,16 +35,21 @@ pub fn material(position: &Position, color: Color) -> i32 {
 /// Evaluate a position from the side-to-move perspective.
 ///
 /// Positive values favour the player to move; negative values favour their opponent. The tapered
-/// score interpolates between middle-game and end-game piece-square preferences using remaining
-/// non-pawn material. Black reuses the same tables by vertically mirroring each square.
+/// score interpolates between middle-game and end-game positional preferences using remaining
+/// non-pawn material. Black reuses the same PSQT tables by vertically mirroring each square.
 #[must_use]
 pub fn evaluate(position: &Position) -> i32 {
     let mut middle_game = 0_i32;
     let mut end_game = 0_i32;
     let mut phase = 0_i32;
+    let occupied = position.occupied();
 
     for color in Color::ALL {
         let sign = if color == Color::White { 1 } else { -1 };
+        let own_occupied = color_occupied(position, color);
+        let unsafe_by_pawn = pawn_attack_map(position, color.opposite());
+        let mobility_area = !own_occupied & !unsafe_by_pawn;
+
         for kind in PieceKind::ALL {
             let mut pieces = position.pieces(color, kind);
             let count = pieces.count() as i32;
@@ -49,6 +62,10 @@ pub fn evaluate(position: &Position) -> i32 {
                 let relative_index = relative_square_index(color, square.file(), square.rank());
                 middle_game += sign * i32::from(MG_PSQT[kind.index()][relative_index]);
                 end_game += sign * i32::from(EG_PSQT[kind.index()][relative_index]);
+
+                let mobility = mobility_count(kind, square, occupied, mobility_area);
+                middle_game += sign * mobility * MG_MOBILITY_PER_SQUARE[kind.index()];
+                end_game += sign * mobility * EG_MOBILITY_PER_SQUARE[kind.index()];
             }
         }
     }
@@ -59,6 +76,41 @@ pub fn evaluate(position: &Position) -> i32 {
         Color::White => white_minus_black,
         Color::Black => -white_minus_black,
     }
+}
+
+#[inline]
+fn color_occupied(position: &Position, color: Color) -> Bitboard {
+    let mut occupied = Bitboard::EMPTY;
+    for kind in PieceKind::ALL {
+        occupied = occupied | position.pieces(color, kind);
+    }
+    occupied
+}
+
+#[inline]
+fn pawn_attack_map(position: &Position, color: Color) -> Bitboard {
+    let mut attacks = Bitboard::EMPTY;
+    for square in position.pieces(color, PieceKind::Pawn) {
+        attacks = attacks | pawn_attacks(color, square);
+    }
+    attacks
+}
+
+#[inline]
+fn mobility_count(
+    kind: PieceKind,
+    square: Square,
+    occupied: Bitboard,
+    mobility_area: Bitboard,
+) -> i32 {
+    let attacks = match kind {
+        PieceKind::Knight => knight_attacks(square),
+        PieceKind::Bishop => bishop_attacks(square, occupied),
+        PieceKind::Rook => rook_attacks(square, occupied),
+        PieceKind::Queen => queen_attacks(square, occupied),
+        PieceKind::Pawn | PieceKind::King => return 0,
+    };
+    (attacks & mobility_area).count() as i32
 }
 
 #[inline]
@@ -95,8 +147,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
     let file_centrality = 7 - file_distance;
 
     match piece {
-        // Pawns gain more from safe advancement in the endgame. A tiny central-file bonus nudges
-        // healthy central occupation without attempting to model pawn structure yet.
         0 => {
             let advance = if end_game {
                 match rank {
@@ -121,7 +171,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
             };
             advance + file_centrality / 2
         }
-        // Knights are the strongest centralisation signal in v1.
         1 => {
             if end_game {
                 centre * 3 - 18
@@ -129,7 +178,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
                 centre * 4 - 24
             }
         }
-        // Bishops prefer activity but are less sensitive to central squares than knights.
         2 => {
             if end_game {
                 centre * 2 - 6
@@ -137,8 +185,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
                 centre * 2 - 8
             }
         }
-        // Rooks get a modest seventh-rank/activity signal. File structure is deliberately deferred
-        // to a separate experiment so E1 remains a pure placement baseline.
         3 => {
             let seventh = if rank == 6 { 14 } else { 0 };
             if end_game {
@@ -147,8 +193,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
                 seventh + rank
             }
         }
-        // Queen placement is intentionally weakly weighted to avoid paying for brittle opening
-        // assumptions before development/king-safety terms exist.
         4 => {
             if end_game {
                 centre * 2 - 8
@@ -156,8 +200,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
                 centre - 8
             }
         }
-        // Middle-game kings prefer the home rank and castled files. End-game kings reverse that
-        // preference and are rewarded for centralisation.
         5 => {
             if end_game {
                 centre * 4 - 24
@@ -181,9 +223,9 @@ const fn abs_i32(value: i32) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use chess_core::Position;
+    use chess_core::{Bitboard, Color, PieceKind, Position, Square};
 
-    use super::evaluate;
+    use super::{color_occupied, evaluate, mobility_count, pawn_attack_map};
 
     #[test]
     fn starting_position_is_positionally_equal() {
@@ -217,5 +259,36 @@ mod tests {
         let central = Position::from_fen("7k/8/8/8/3K4/8/8/8 w - - 0 1").expect("valid FEN");
         let corner = Position::from_fen("7k/8/8/8/8/8/8/K7 w - - 0 1").expect("valid FEN");
         assert!(evaluate(&central) > evaluate(&corner));
+    }
+
+    #[test]
+    fn enemy_pawn_control_is_removed_from_knight_mobility() {
+        let position = Position::from_fen("7k/8/4p3/8/3N4/8/8/7K w - - 0 1")
+            .expect("valid FEN");
+        let d4 = Square::from_file_rank(3, 3).expect("d4");
+        let own = color_occupied(&position, Color::White);
+        let unsafe_by_pawn = pawn_attack_map(&position, Color::Black);
+        let mobility_area = !own & !unsafe_by_pawn;
+        assert_eq!(
+            mobility_count(PieceKind::Knight, d4, position.occupied(), mobility_area),
+            7
+        );
+    }
+
+    #[test]
+    fn bishop_mobility_excludes_own_blockers() {
+        let position = Position::from_fen("7k/8/8/2P1P3/3B4/2P1P3/8/7K w - - 0 1")
+            .expect("valid FEN");
+        let d4 = Square::from_file_rank(3, 3).expect("d4");
+        let own = color_occupied(&position, Color::White);
+        assert_eq!(
+            mobility_count(
+                PieceKind::Bishop,
+                d4,
+                position.occupied(),
+                !own & Bitboard::FULL,
+            ),
+            0
+        );
     }
 }
