@@ -34,6 +34,15 @@ impl MoveList {
         &self.moves[..self.len]
     }
 
+    /// Borrow the populated prefix as mutable scratch storage.
+    ///
+    /// Search may reorder a freshly generated move list in place. The list owns its fixed backing
+    /// array, so doing so neither allocates nor mutates chess position state.
+    #[must_use]
+    pub fn as_mut_slice(&mut self) -> &mut [ChessMove] {
+        &mut self.moves[..self.len]
+    }
+
     pub(crate) fn push(&mut self, mv: ChessMove) {
         assert!(self.len < MAX_MOVES, "move list capacity exceeded");
         self.moves[self.len] = mv;
@@ -98,5 +107,23 @@ mod tests {
             size_of::<MoveList>(),
             MAX_MOVES * size_of::<ChessMove>() + size_of::<usize>()
         );
+    }
+
+    #[test]
+    fn populated_prefix_can_be_reordered_in_place() {
+        let a1 = Square::from_file_rank(0, 0).expect("a1");
+        let a2 = Square::from_file_rank(0, 1).expect("a2");
+        let b1 = Square::from_file_rank(1, 0).expect("b1");
+        let b2 = Square::from_file_rank(1, 1).expect("b2");
+        let first = ChessMove::new(a1, a2, MoveKind::Quiet);
+        let second = ChessMove::new(b1, b2, MoveKind::Quiet);
+
+        let mut list = MoveList::new();
+        list.push(first);
+        list.push(second);
+        list.as_mut_slice().swap(0, 1);
+
+        assert_eq!(list.as_slice(), &[second, first]);
+        assert_eq!(list.len(), 2);
     }
 }
