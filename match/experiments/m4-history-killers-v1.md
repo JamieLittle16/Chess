@@ -43,4 +43,4 @@ The history table uses 2 × 64 × 64 signed scores (32 KiB with `i32` entries), 
 
 Counter-moves remain a later isolated experiment so their marginal value is measurable.
 
-Implementation is being integrated mechanically from the frozen PVS baseline; this note is not acceptance evidence.
+The implementation integration is mechanical from the frozen PVS baseline; this document records intent but is not acceptance evidence.
