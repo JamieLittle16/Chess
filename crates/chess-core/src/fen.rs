@@ -148,9 +148,7 @@ fn parse_en_passant(field: &str) -> Result<Option<Square>, FenError> {
         return Ok(None);
     }
     let bytes = field.as_bytes();
-    if bytes.len() != 2
-        || !(b'a'..=b'h').contains(&bytes[0])
-        || !(b'1'..=b'8').contains(&bytes[1])
+    if bytes.len() != 2 || !(b'a'..=b'h').contains(&bytes[0]) || !(b'1'..=b'8').contains(&bytes[1])
     {
         return Err(FenError::InvalidEnPassant);
     }
