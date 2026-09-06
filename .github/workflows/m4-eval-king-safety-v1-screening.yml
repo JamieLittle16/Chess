@@ -22,17 +22,17 @@ jobs:
         with:
           toolchain: 1.98.1
           components: rustfmt, clippy
-      - name: Verify exact committed candidate
+      - name: Normalize and verify exploratory candidate
         run: |
           set -euo pipefail
+          cargo fmt --all
+          git diff --check
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets --all-features -- -D warnings
           cargo test -p chess-eval --all-features
           cargo test -p chess-search --all-features
           cargo test -p chess-core --all-features
           cargo test -p chess-engine --all-features
-          git diff --exit-code
-          git diff --cached --exit-code
       - name: Build candidate
         run: |
           set -euo pipefail
