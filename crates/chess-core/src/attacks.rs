@@ -25,29 +25,29 @@ const KING_DELTAS: [(i8, i8); 8] = [
 const BISHOP_DIRECTIONS: [(i8, i8); 4] = [(1, 1), (-1, 1), (1, -1), (-1, -1)];
 const ROOK_DIRECTIONS: [(i8, i8); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
 
+// Pawn, knight and king attack geometry is occupancy-independent. Generate all 64 masks at compile
+// time so move generation, attack queries and later mobility evaluation perform a single indexed
+// load instead of rebuilding the same tiny bitboard through coordinate loops at every node.
+const PAWN_ATTACKS: [[u64; 64]; 2] = generate_pawn_attacks();
+const KNIGHT_ATTACKS: [u64; 64] = generate_leaper_attacks(&KNIGHT_DELTAS);
+const KING_ATTACKS: [u64; 64] = generate_leaper_attacks(&KING_DELTAS);
+
 #[must_use]
+#[inline]
 pub fn pawn_attacks(color: Color, square: Square) -> Bitboard {
-    let rank_delta = match color {
-        Color::White => 1,
-        Color::Black => -1,
-    };
-    let mut attacks = Bitboard::EMPTY;
-    for file_delta in [-1, 1] {
-        if let Some(target) = offset(square, file_delta, rank_delta) {
-            attacks = attacks.with(target);
-        }
-    }
-    attacks
+    Bitboard::from_raw(PAWN_ATTACKS[color.index()][usize::from(square.index())])
 }
 
 #[must_use]
+#[inline]
 pub fn knight_attacks(square: Square) -> Bitboard {
-    leaper_attacks(square, &KNIGHT_DELTAS)
+    Bitboard::from_raw(KNIGHT_ATTACKS[usize::from(square.index())])
 }
 
 #[must_use]
+#[inline]
 pub fn king_attacks(square: Square) -> Bitboard {
-    leaper_attacks(square, &KING_DELTAS)
+    Bitboard::from_raw(KING_ATTACKS[usize::from(square.index())])
 }
 
 #[must_use]
@@ -96,14 +96,43 @@ pub fn is_square_attacked(position: &Position, square: Square, attacker: Color) 
     !(rook_attacks(square, occupied) & rooks_and_queens).is_empty()
 }
 
-fn leaper_attacks(square: Square, deltas: &[(i8, i8)]) -> Bitboard {
-    let mut attacks = Bitboard::EMPTY;
-    for &(file_delta, rank_delta) in deltas {
-        if let Some(target) = offset(square, file_delta, rank_delta) {
-            attacks = attacks.with(target);
-        }
+const fn generate_pawn_attacks() -> [[u64; 64]; 2] {
+    let mut table = [[0_u64; 64]; 2];
+    let mut square = 0_usize;
+    while square < 64 {
+        table[Color::White as usize][square] =
+            offset_mask(square, -1, 1) | offset_mask(square, 1, 1);
+        table[Color::Black as usize][square] =
+            offset_mask(square, -1, -1) | offset_mask(square, 1, -1);
+        square += 1;
     }
-    attacks
+    table
+}
+
+const fn generate_leaper_attacks(deltas: &[(i8, i8)]) -> [u64; 64] {
+    let mut table = [0_u64; 64];
+    let mut square = 0_usize;
+    while square < 64 {
+        let mut mask = 0_u64;
+        let mut delta = 0_usize;
+        while delta < deltas.len() {
+            mask |= offset_mask(square, deltas[delta].0, deltas[delta].1);
+            delta += 1;
+        }
+        table[square] = mask;
+        square += 1;
+    }
+    table
+}
+
+const fn offset_mask(square: usize, file_delta: i8, rank_delta: i8) -> u64 {
+    let file = (square & 7) as i8 + file_delta;
+    let rank = (square >> 3) as i8 + rank_delta;
+    if file < 0 || file >= 8 || rank < 0 || rank >= 8 {
+        0
+    } else {
+        1_u64 << ((rank as u32) * 8 + file as u32)
+    }
 }
 
 fn slider_attacks(square: Square, occupied: Bitboard, directions: &[(i8, i8)]) -> Bitboard {
@@ -134,7 +163,33 @@ fn offset(square: Square, file_delta: i8, rank_delta: i8) -> Option<Square> {
 mod tests {
     use crate::{Bitboard, Color, Position, Square};
 
-    use super::{bishop_attacks, is_square_attacked, king_attacks, knight_attacks, pawn_attacks};
+    use super::{
+        KING_DELTAS, KNIGHT_DELTAS, bishop_attacks, is_square_attacked, king_attacks,
+        knight_attacks, pawn_attacks,
+    };
+
+    #[test]
+    fn precomputed_fixed_attacks_match_coordinate_reference_exhaustively() {
+        for index in 0..64 {
+            let square = Square::from_index(index).expect("board square");
+            assert_eq!(
+                knight_attacks(square),
+                reference_leaper_attacks(square, &KNIGHT_DELTAS)
+            );
+            assert_eq!(
+                king_attacks(square),
+                reference_leaper_attacks(square, &KING_DELTAS)
+            );
+            assert_eq!(
+                pawn_attacks(Color::White, square),
+                reference_leaper_attacks(square, &[(-1, 1), (1, 1)])
+            );
+            assert_eq!(
+                pawn_attacks(Color::Black, square),
+                reference_leaper_attacks(square, &[(-1, -1), (1, -1)])
+            );
+        }
+    }
 
     #[test]
     fn leapers_respect_board_edges() {
@@ -195,5 +250,20 @@ mod tests {
         let e4 = Square::from_file_rank(4, 3).expect("e4");
         assert!(is_square_attacked(&position, e3, Color::White));
         assert!(!is_square_attacked(&position, e4, Color::White));
+    }
+
+    fn reference_leaper_attacks(square: Square, deltas: &[(i8, i8)]) -> Bitboard {
+        let mut attacks = Bitboard::EMPTY;
+        for &(file_delta, rank_delta) in deltas {
+            let file = square.file() as i8 + file_delta;
+            let rank = square.rank() as i8 + rank_delta;
+            if (0..8).contains(&file)
+                && (0..8).contains(&rank)
+                && let Some(target) = Square::from_file_rank(file as u8, rank as u8)
+            {
+                attacks = attacks.with(target);
+            }
+        }
+        attacks
     }
 }
