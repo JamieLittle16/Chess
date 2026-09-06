@@ -137,24 +137,26 @@ mod tests {
             "7k/8/8/8/8/8/8/K7 w - - 0 1",
             "7k/8/8/8/8/8/6B1/K7 w - - 0 1",
             "7k/8/8/8/8/8/6N1/K7 w - - 0 1",
-            "5b1k/8/8/8/8/8/6B1/K7 w - - 0 1",
+            "5b1k/8/8/8/8/8/5B2/K7 w - - 0 1",
         ] {
             assert!(
                 Position::from_fen(fen)
                     .expect("valid FEN")
-                    .is_insufficient_material()
+                    .is_insufficient_material(),
+                "expected dead material for {fen}"
             );
         }
 
         for fen in [
-            "2b4k/8/8/8/8/8/6B1/K7 w - - 0 1",
+            "2b4k/8/8/8/8/8/5B2/K7 w - - 0 1",
             "7k/8/8/8/8/8/5NN1/K7 w - - 0 1",
             "7k/8/8/8/8/8/6P1/K7 w - - 0 1",
         ] {
             assert!(
                 !Position::from_fen(fen)
                     .expect("valid FEN")
-                    .is_insufficient_material()
+                    .is_insufficient_material(),
+                "expected potentially mating material for {fen}"
             );
         }
     }
