@@ -21,7 +21,7 @@ This change is not allowed to alter chess or search semantics.
 
 The branch includes an exhaustive differential test over all 64 squares comparing the production tables against an independent coordinate-based reference for both pawn colours, knights and kings. Existing move-generation, perft, reversible-state and search tests remain authoritative.
 
-After E1 became production, final qualification must be performed against the `reference-search-v6` E1 baseline. The exact v6 scores, best moves, node counts, TT hits and signature must remain unchanged. Any deterministic search drift is a rejection, not a new baseline.
+After E1 became production at `main@5de2435540467db07f4b3bdb4ac2bfef890c792b`, final qualification must be performed against the `reference-search-v6` E1 baseline. The exact v6 scores, best moves, node counts, TT hits and signature `0xed4d9e0addb78419` must remain unchanged. Any deterministic search drift is a rejection, not a new baseline.
 
 ## Performance rationale
 
