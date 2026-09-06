@@ -16,16 +16,31 @@ Perft is a correctness tool, not an Elo benchmark.
 
 ## 2. Deterministic engine benchmark
 
-We will add a stable `bench` command once search exists. A versioned suite of positions will run at deterministic limits and report at least:
+The repository now contains `tools/chess-bench`, whose first versioned suite is `reference-search-v1`.
 
-- elapsed time;
-- tactical nodes;
-- strategic expansions;
-- neural evaluations;
-- transposition hits;
-- graph hits/transposition merges;
-- peak strategic memory;
-- a deterministic result/signature suitable for regression detection.
+Each case starts from repository-owned FEN, creates cold search state, and runs deterministic iterative deepening to a fixed depth. The report records:
+
+- final score;
+- searched nodes;
+- transposition-table hits;
+- encoded best move;
+- one deterministic 64-bit signature over the complete suite result.
+
+CI runs:
+
+```sh
+cargo run --release --quiet -p chess-bench
+```
+
+and prints the complete report/signature after the normal formatting, Clippy and test gates.
+
+### What the CI signature means
+
+The signature is a **behavior/search-shape regression marker**, not a strength score. A change in evaluator, move ordering, pruning, TT behavior or search may legitimately change it. Such a change should be understood and the benchmark baseline updated deliberately rather than being treated as automatically bad.
+
+Wall-clock thresholds are intentionally **not** enforced on shared CI runners. Timing claims require controlled hardware. CI establishes deterministic behavior; local/dedicated benchmark machines establish speed.
+
+As the architecture grows, the benchmark report will add the relevant counters, for example tactical nodes, strategic expansions, neural evaluations, graph hits/transposition merges and memory high-water marks.
 
 Node counts from different engine architectures are **not** directly comparable. Equal wall-clock strength is the important cross-engine metric.
 
@@ -45,7 +60,7 @@ Record CPU, compiler/toolchain, build flags and benchmark corpus. Optimisations 
 
 ## 4. Elo testing
 
-The engine will expose UCI so established match runners such as Fastchess can test it under controlled conditions.
+The engine exposes UCI so established match runners such as Fastchess can test it under controlled conditions once production time controls are available.
 
 ### Paired-game protocol
 

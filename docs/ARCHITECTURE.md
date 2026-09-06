@@ -1,6 +1,6 @@
 # Architecture
 
-Status: **v0.1 — foundation contract**
+Status: **v0.2 — operational reference-engine contract**
 
 This document records the architecture we intend to preserve while the implementation changes. Details marked **research hypothesis** must prove themselves empirically; they are not protected merely because they are novel.
 
@@ -17,21 +17,23 @@ Strength and simplicity are allowed to overrule novelty. We are not implementing
 
 ## 2. Dependency direction
 
-The intended dependency graph is one-way:
+The implemented runtime dependency graph is one-way:
 
 ```text
 chess-core
    ↑
-chess-eval       (future)
+chess-eval
    ↑
-chess-search     (future)
+chess-search
    ↑
-chess-engine     (future orchestration/time control)
-  ↙       ↘
-UCI      WASM
+chess-engine
+   ↑
+chess-uci
 ```
 
-Training, arena, and benchmark tooling sit outside the runtime engine and consume public interfaces. Browser, UCI, filesystem, thread-pool, and training concerns must not leak into `chess-core`.
+The future WASM frontend branches from the engine/search boundary rather than duplicating chess rules. Training, arena, and benchmark tooling sit outside the runtime engine and consume public interfaces; `tools/chess-bench` is the first implemented example.
+
+Browser, UCI, filesystem, thread-pool, benchmark, and training concerns must not leak into `chess-core`.
 
 Crates are introduced when they own real behaviour. We avoid creating empty abstraction layers in advance.
 
@@ -51,15 +53,15 @@ Crates are introduced when they own real behaviour. We avoid creating empty abst
 
 Ordinary move generation, make/unmake and search traversal must not perform routine heap allocation. State mutation is centralised so redundant caches cannot silently diverge.
 
-The design target is a compact mutable `Position` plus stack-local reversible state. Cloning full positions inside the main search is not an accepted search strategy.
+The implemented design is a compact mutable `Position` plus stack-local reversible `Undo`. An independent immutable transition remains available as a differential correctness oracle. Cloning full positions inside recursive search is not an accepted search strategy.
 
 `unsafe` Rust is forbidden at workspace level initially. A future use requires an ADR containing the measured benefit, invariants, tests and a safe fallback/reference path where practical.
 
-## 4. Incremental evaluation
+## 4. Evaluation
 
-The eventual evaluator is not part of chess correctness. Its state is derived and disposable.
+Evaluation is not part of chess correctness. The current `chess-eval` implementation is deliberately simple material scoring and exists as a transparent reference baseline.
 
-A move should update evaluation state from its small position delta rather than reconstructing the entire neural input. The target neural interface produces at least:
+The eventual learned evaluator remains derived and disposable. A move should update evaluation state from its small position delta rather than reconstructing the entire neural input. The target neural interface produces at least:
 
 - **value** — expected position quality;
 - **policy** — relative usefulness of currently legal moves;
@@ -69,11 +71,20 @@ The precise network topology is deliberately not frozen. CPU inference must rema
 
 ## 5. Search architecture
 
-### 5.1 Stable requirement: exact local calculation
+### 5.1 Implemented stable reference: exact local calculation
 
-Chess contains forcing lines that must be calculated rather than merely judged. We therefore preserve a fast local negamax/alpha-beta-style tactical search primitive. It should use worker-local state, compact stacks and a bounded transposition cache.
+The repository now contains a conventional reference search in `chess-search`:
 
-Using alpha-beta as an exact calculation primitive is not the same as making it the whole engine architecture.
+- reversible negamax/alpha-beta;
+- iterative deepening;
+- deterministic move ordering;
+- bounded direct-mapped transposition storage;
+- exact/lower/upper TT bounds;
+- mate-distance normalization across transposition ply.
+
+This implementation is intentionally retained as a control group even after more advanced search exists. Chess contains forcing lines that must be calculated rather than merely judged, so a fast local alpha-beta-style tactical primitive also remains a likely component of the advanced architecture.
+
+Using alpha-beta as an exact calculation primitive is not the same as freezing it as the whole long-term engine architecture.
 
 ### 5.2 Research hypothesis: sparse strategic DAG
 
@@ -97,7 +108,15 @@ Instead of treating nominal depth as the sole unit of progress, a frontier sched
 
 This hypothesis must beat simpler baselines under equal wall-clock resources. If it does not, it changes.
 
-## 6. Memory model
+## 6. Engine orchestration and protocols
+
+`chess-engine` owns persistent game position plus reusable search state. It is the boundary where search limits, time control and later worker orchestration belong.
+
+`chess-uci` translates protocol text into engine operations. It resolves incoming coordinate moves against the legal move list rather than re-implementing move semantics. The first UCI implementation is deliberately synchronous and fixed-depth; interruptible timed search is the next orchestration boundary.
+
+Protocol-specific strings, parsing and I/O are outside search hot paths.
+
+## 7. Memory model
 
 Persistent search memory is bounded explicitly. The intended categories are:
 
@@ -107,11 +126,11 @@ Persistent search memory is bounded explicitly. The intended categories are:
 - evaluator/network storage;
 - fixed search stacks and move buffers.
 
-Strategic nodes should live in contiguous arenas and be referenced by compact integer IDs where practical. We avoid individually allocated, reference-counted graph nodes in inner search paths.
+The current classical TT is bounded and allocated once per reusable `Searcher`. Strategic nodes should eventually live in contiguous arenas and be referenced by compact integer IDs where practical. We avoid individually allocated, reference-counted graph nodes in inner search paths.
 
-## 7. Parallelism
+## 8. Parallelism
 
-Workers own their tactical hot state. Shared strategic state is touched at coarse work boundaries rather than on every searched node.
+Workers should own their tactical hot state. Shared strategic state is touched at coarse work boundaries rather than on every searched node.
 
 The design preference is:
 
@@ -125,9 +144,9 @@ worker-local tactical calculation
        compact result/update
 ```
 
-This is intended to preserve cache locality and minimise locks/atomics. Exact concurrency mechanisms remain experimental and must be profiled.
+This is intended to preserve cache locality and minimise locks/atomics. Exact concurrency mechanisms remain experimental and must be profiled. The current reference search is single-threaded; concurrency is not introduced merely to claim parallelism.
 
-## 8. WebAssembly
+## 9. WebAssembly
 
 The website is a target, not a fork. The same engine core is compiled for native and WASM.
 
@@ -139,29 +158,32 @@ Baseline web deployment:
 - memory and network size are explicitly budgeted;
 - optional parallel search must degrade cleanly when browser threading is unavailable.
 
-## 9. Reference search
+## 10. Reference search and measurement
 
-Before relying on experimental graph search, we will maintain a simple classical reference search. It provides:
+The classical reference search provides:
 
 - a correctness/debugging oracle;
-- a stable Elo baseline;
+- a stable Elo baseline once timed match infrastructure is complete;
 - a way to isolate evaluation improvements from scheduler improvements;
 - evidence when a more complex search mechanism genuinely helps.
 
-## 10. Architectural invariants
+`tools/chess-bench` sits outside the runtime dependency chain and produces a deterministic fixed-work search signature in CI. Wall-clock performance and Elo are measured separately on controlled resources.
+
+## 11. Architectural invariants
 
 1. Chess correctness is independent of learned intelligence.
 2. No routine allocation in the core traversal hot path.
 3. Make/unmake is exactly reversible and heavily tested.
 4. Derived caches are updated through controlled mutation boundaries.
-5. Persistent search state is sparse and bounded.
+5. Persistent search state is sparse or otherwise explicitly bounded.
 6. Tactical inner search is worker-local and synchronisation-light.
 7. Neural outputs guide decisions but never define legal chess.
 8. Search, evaluation, protocol and deployment remain replaceable at explicit boundaries.
 9. Native and WASM share the chess/search implementation.
 10. Benchmarks and Elo, not intuition, decide performance-sensitive research hypotheses.
+11. Tooling such as benchmarks and arenas consumes runtime APIs; it does not become a runtime dependency.
 
-## 11. What is deliberately not frozen
+## 12. What is deliberately not frozen
 
 - exact bitboard attack-generation technique;
 - neural topology and feature representation;
@@ -169,6 +191,7 @@ Before relying on experimental graph search, we will maintain a simple classical
 - graph replacement/eviction policy;
 - tactical pruning details;
 - thread scheduling implementation;
+- classical TT replacement policy/size;
 - whether some or all strategic graph ideas survive strength testing.
 
 Freezing these before measurement would turn architecture into dogma.

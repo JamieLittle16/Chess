@@ -5,6 +5,7 @@ members = [
     "crates/chess-search",
     "crates/chess-engine",
     "crates/chess-uci",
+    "tools/chess-bench",
 ]
 resolver = "2"
 
