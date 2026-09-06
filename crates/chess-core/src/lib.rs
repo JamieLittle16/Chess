@@ -13,6 +13,7 @@ mod perft;
 mod piece;
 mod position;
 mod reference;
+mod reversible;
 mod square;
 
 pub use attacks::{
@@ -28,4 +29,5 @@ pub use movegen::generate_legal_moves;
 pub use perft::perft;
 pub use piece::{Piece, PieceKind};
 pub use position::{CastlingRights, Position};
+pub use reversible::Undo;
 pub use square::Square;
