@@ -9,9 +9,11 @@
   "max_moves": 300,
   "opening_format": "epd",
   "openings_required": true,
+  "opening_suite_id": "m3-uho-lichess-100-v1",
+  "opening_sha256": "599a45efb446e91952d13e79bc7fec8de319e332036a54552a3e8e4af91f9cf1",
   "paired_colour_reversal": true,
   "ponder": false,
   "tablebases": false,
   "evaluation_adjudication": false,
-  "notes": "First finite-time M3 qualification protocol. Games are paired by opening with colours reversed. No score-based resign/draw adjudication is used because the reference evaluator is intentionally primitive; actual game termination plus max_moves is the baseline."
+  "notes": "First finite-time M3 qualification protocol. Games are paired by opening with colours reversed. The opening corpus is frozen by suite ID and SHA-256. No score-based resign/draw adjudication is used because the reference evaluator is intentionally primitive; actual game termination plus max_moves is the baseline."
 }
