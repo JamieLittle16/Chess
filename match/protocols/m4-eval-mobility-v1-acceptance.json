@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "protocol_id": "m4-eval-mobility-v1-acceptance",
+  "runner": "fastchess",
+  "games": 200,
+  "time_control": "1+0.01",
+  "concurrency": 1,
+  "seed": 20260906,
+  "max_moves": 300,
+  "opening_format": "epd",
+  "openings_required": true,
+  "opening_suite_id": "m3-uho-lichess-100-v1",
+  "opening_sha256": "599a45efb446e91952d13e79bc7fec8de319e332036a54552a3e8e4af91f9cf1",
+  "paired_colour_reversal": true,
+  "ponder": false,
+  "tablebases": false,
+  "evaluation_adjudication": false,
+  "notes": "Clean acceptance rerun of raw E2 geometric mobility on slider-ray optimized main c463c1e596ef82d9411f34e5cdd90733d16d5c56. Uses all 100 pinned opening positions as 100 colour-reversed pairs (200 games). Both engines use explicit Hash=32; candidate differs only by E2 mobility."
+}
