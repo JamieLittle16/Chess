@@ -172,7 +172,8 @@ impl Engine {
     /// must be discarded.
     pub fn set_position(&mut self, position: Position) {
         self.repetition_history.clear();
-        self.repetition_history.push(position.repetition_key().raw());
+        self.repetition_history
+            .push(position.repetition_key().raw());
         self.position = position;
     }
 
@@ -237,13 +238,12 @@ impl Engine {
             deadline,
         };
         let prior_len = self.repetition_history.len().saturating_sub(1);
-        self.searcher
-            .iterative_deepening_controlled_with_history(
-                &mut self.position,
-                &self.repetition_history[..prior_len],
-                limits.max_depth,
-                &control,
-            )
+        self.searcher.iterative_deepening_controlled_with_history(
+            &mut self.position,
+            &self.repetition_history[..prior_len],
+            limits.max_depth,
+            &control,
+        )
     }
 }
 
@@ -314,8 +314,7 @@ mod tests {
     #[test]
     fn replacing_position_resets_or_rebuilds_history_explicitly() {
         let mut engine = Engine::new();
-        let position =
-            Position::from_fen("7k/8/8/8/8/8/6Q1/K7 w - - 0 1").expect("valid FEN");
+        let position = Position::from_fen("7k/8/8/8/8/8/6Q1/K7 w - - 0 1").expect("valid FEN");
         let key = position.repetition_key().raw();
 
         engine.set_position(position.clone());
@@ -328,8 +327,7 @@ mod tests {
     #[test]
     fn engine_search_consumes_repetition_history_without_mutating_it() {
         let mut engine = Engine::new();
-        let position =
-            Position::from_fen("7k/8/8/8/8/8/6Q1/K7 w - - 0 1").expect("valid FEN");
+        let position = Position::from_fen("7k/8/8/8/8/8/6Q1/K7 w - - 0 1").expect("valid FEN");
         let key = position.repetition_key().raw();
         engine.set_position_with_prior_history(position, vec![key, key]);
         let history = engine.repetition_history().to_vec();
