@@ -15,11 +15,15 @@ A from-scratch, high-performance chess engine built around a deliberately modula
 
 The repository is at **M3: Classical Reference Engine**.
 
-The chess layer is already functional: `chess-core` parses FEN, generates legal moves, handles castling/en-passant/promotions, makes and unmakes moves reversibly, passes published perft gates, and maintains independently reconstructable Zobrist identity.
+The chess layer is functional: `chess-core` parses FEN, generates legal moves, handles castling/en-passant/promotions, makes and unmakes moves reversibly, passes published perft gates, and maintains independently reconstructable Zobrist identity. It also exposes a separate rule-correct repetition identity so unusable or king-pinned en-passant metadata does not create false distinctions between repeated positions.
 
-Above it, `chess-eval` provides the deliberately simple material reference evaluator and `chess-search` provides deterministic negamax/alpha-beta, iterative deepening, bounded transposition storage, mate/stalemate handling, reversible root search and cooperative cancellation. `chess-engine` owns persistent game/search state, node/deadline control, and protocol-neutral game-clock budgeting. `chess-uci` runs the engine on a single-owner worker thread and exposes asynchronous `stop`, fixed limits, and standard UCI clocks.
+Above it, `chess-eval` provides the deliberately simple material reference evaluator and `chess-search` provides deterministic negamax/alpha-beta, iterative deepening, bounded transposition storage, mate/stalemate handling, threefold/50-move/dead-material draw adjudication, reversible root search and cooperative cancellation. Search keeps speculative repetition history in a fixed-capacity path buffer rather than allocating in recursion.
 
-This is now a real but intentionally weak playable engine baseline. Before treating it as tournament-qualified, M3 is auditing draw/history semantics and adding reproducible match measurement. Strength work follows that correctness boundary.
+`chess-engine` owns persistent game/search state, actual game repetition history, node/deadline control and protocol-neutral game-clock budgeting. `chess-uci` runs the engine on a single-owner worker thread, exposes asynchronous `stop`, fixed limits and standard UCI clocks, and preserves repetition history transactionally through `position ... moves ...` commands.
+
+The deterministic draw-aware reference benchmark is `reference-search-v2`, currently pinned at `0x1a149495c23a7d8e` in CI.
+
+This is now a real but intentionally weak, rule-correct playable engine baseline. The remaining M3 boundary is reproducible match qualification and a measured external baseline; strength work follows that measurement boundary.
 
 ## Workspace
 
@@ -41,10 +45,10 @@ Future WASM and other frontends branch from the orchestration/search layers rath
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — architectural constitution and subsystem boundaries.
 - [`docs/STATE_TRANSITIONS.md`](docs/STATE_TRANSITIONS.md) — reversible move-state design and reference-oracle strategy.
-- [`docs/POSITION_IDENTITY.md`](docs/POSITION_IDENTITY.md) — deterministic incremental Zobrist identity.
+- [`docs/POSITION_IDENTITY.md`](docs/POSITION_IDENTITY.md) — TT identity, repetition identity and deterministic incremental Zobrist hashing.
 - [`docs/PERFT.md`](docs/PERFT.md) — legal-chess reference positions and acceptance gates.
-- [`docs/REFERENCE_ENGINE.md`](docs/REFERENCE_ENGINE.md) — evaluator, alpha-beta, iterative deepening and TT baseline.
-- [`docs/UCI.md`](docs/UCI.md) — supported UCI surface and current deliberate limits.
+- [`docs/REFERENCE_ENGINE.md`](docs/REFERENCE_ENGINE.md) — evaluator, draw-aware alpha-beta, iterative deepening and TT baseline.
+- [`docs/UCI.md`](docs/UCI.md) — supported UCI surface, worker ownership, clocks and transactional history.
 - [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md) — correctness, performance, and Elo methodology.
 - [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) — engineering rules for changes.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — staged route from core chess rules to the neural search engine and browser target.
@@ -58,10 +62,10 @@ The project pins Rust 1.98.1. Run the complete local gate with:
 ./scripts/check.sh
 ```
 
-Once the UCI target is built, it can be launched with:
+Build and launch the UCI engine with:
 
 ```sh
 cargo run --release -p chess-uci
 ```
 
-The UCI executable supports `go depth N`, `go nodes N`, `go movetime MS`, standard `wtime`/`btime`/increment/`movestogo` clocks, compatible limit combinations, and asynchronous `stop`. Search state remains single-owner on the engine worker rather than shared behind a mutex.
+The executable supports `go depth N`, `go nodes N`, `go movetime MS`, standard `wtime`/`btime`/increment/`movestogo` clocks, compatible limit combinations, and asynchronous `stop`. Search state remains single-owner on the engine worker rather than shared behind a mutex.
