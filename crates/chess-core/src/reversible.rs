@@ -133,7 +133,10 @@ impl Position {
                     .take_piece(mv.to())
                     .expect("made promotion must have a destination piece");
                 debug_assert_eq!(promoted.color(), us);
-                debug_assert_eq!(promoted.kind(), mv.kind().promotion_piece().expect("promotion"));
+                debug_assert_eq!(
+                    promoted.kind(),
+                    mv.kind().promotion_piece().expect("promotion")
+                );
                 self.place_piece(Piece::new(us, PieceKind::Pawn), mv.from());
             }
             MoveKind::KingCastle | MoveKind::QueenCastle => {
