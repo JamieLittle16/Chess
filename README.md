@@ -13,23 +13,19 @@ A from-scratch, high-performance chess engine built around a deliberately modula
 
 ## Current state
 
-**M3 is complete; M4 tactical-strength work is now in progress.**
+**M3 is complete; M4 tactical-strength work is active and already has three measured accepted upgrades.**
 
 The chess layer is functional: `chess-core` parses FEN, generates legal moves, handles castling/en-passant/promotions, makes and unmakes moves reversibly, passes published perft gates, and maintains independently reconstructable Zobrist identity. It also exposes a separate rule-correct repetition identity so unusable or king-pinned en-passant metadata does not create false distinctions between repeated positions.
 
-Above it, `chess-eval` provides the deliberately simple material reference evaluator and `chess-search` provides deterministic negamax/alpha-beta, iterative deepening, bounded transposition storage, mate/stalemate handling, threefold/50-move/dead-material draw adjudication, reversible root search and cooperative cancellation. Search keeps speculative repetition history in a fixed-capacity path buffer rather than allocating in recursion.
+Above it, `chess-eval` still provides the deliberately simple material reference evaluator. `chess-search` now combines draw-correct iterative-deepening alpha-beta, bounded transposition storage, bounded quiescence, an allocation-free staged MovePicker and principal variation search. Search keeps speculative repetition history in a fixed-capacity path buffer rather than allocating in recursion.
 
 `chess-engine` owns persistent game/search state, actual game repetition history, node/deadline control and protocol-neutral game-clock budgeting. `chess-uci` runs the engine on a single-owner worker thread, exposes asynchronous `stop`, fixed limits and standard UCI clocks, and preserves repetition history transactionally through `position ... moves ...` commands.
 
-The deterministic draw-aware M3 benchmark is `reference-search-v2`, pinned at `0x1a149495c23a7d8e` in CI.
+The current reviewed deterministic benchmark is `reference-search-v5`, signature `0xcf75635bf2de5791`.
 
-M3 also has repository-owned paired-game qualification tooling. `match/protocols/m3-baseline-v1.json` freezes the first finite-time experiment settings, including the exact `m3-uho-lichess-100-v1` opening-suite SHA-256. `scripts/match_harness.py` wraps Fastchess while recording exact engine/runner/opening hashes, git/environment provenance, command line, PGN, raw output and UCI logs, and refuses a mismatched opening file before creating result state.
+### Measured strength progression
 
-The 100-position opening corpus is vendored under `match/openings/` and is deterministically derived from a pinned CC0 official Stockfish UHO Lichess book containing 2.63 million source positions. Python tests pin its provenance/hash/rank ordering and `chess-core` independently validates every FEN as legal and nonterminal.
-
-### First measured external calibration
-
-The intentionally weak material-only M3 control has now completed a retained 100-game short-control calibration against Stockfish 19 configured with `UCI_LimitStrength=true` and `UCI_Elo=1320`:
+The intentionally weak material-only M3 control first completed a retained 100-game short-control calibration against Stockfish 19 configured with `UCI_LimitStrength=true` and `UCI_Elo=1320`:
 
 ```text
 M3 vs Stockfish-19-Elo1320, 1+0.01
@@ -38,9 +34,21 @@ Score: 35.5 / 100
 Fastchess relative Elo: -103.73 +/- 71.87
 ```
 
-This is a protocol-specific engine comparison, **not** a claim that the bot has a FIDE rating of roughly 1216. Exact engine hashes, opening/protocol identity, pentanomial result and retained artifact are recorded in [`docs/STRENGTH_BASELINES.md`](docs/STRENGTH_BASELINES.md).
+This is a protocol-specific engine comparison, **not** a human/FIDE rating.
 
-M4 now strengthens the frozen control experimentally. The first active candidate is transparent quiescence search; subsequent move-ordering, evaluation and pruning changes must each justify themselves against historical baselines under paired games.
+M4 then accepted three isolated equal-time improvements on the frozen development protocol:
+
+```text
+bounded qsearch vs M3:             +281.68 +/- 58.17 Elo
+staged MovePicker vs qsearch:       +74.06 +/- 37.99 Elo
+PVS v1 vs staged MovePicker:        +41.89 +/- 30.29 Elo
+```
+
+These are incremental development screens and must not be added mechanically into an absolute rating claim. Exact protocols, hashes and retained evidence live under `match/experiments/`.
+
+Negative results are retained too. SEE ordering v1 passed correctness tests but scored `-13.90 +/- 33.29` Elo versus the accepted picker and was rejected instead of merged.
+
+M4 next targets quiet-move intelligence (killer/history/counter-move), aspiration windows, conservative null-move pruning, LMR, later futility/LMP, qsearch refinements, time prediction and hot-path profiling. The evaluator remains material-only, leaving substantial strength available before the learned M5 programme even begins.
 
 ## Workspace
 
@@ -58,6 +66,12 @@ chess-uci
 
 Future WASM and other frontends branch from the orchestration/search layers rather than duplicating chess rules.
 
+## Research direction
+
+The long-term engine keeps a brutally fast tactical calculator as the objective reference and experiments with deliberately tiny, incremental learned evaluation. Model acceptance is based on equal-wall-clock Elo, not validation loss in isolation. Policy and uncertainty arrive only after their inference cost is justified.
+
+The opponent-aware programme in `docs/OPPONENT_EXPLOITATION.md` is a separate later research layer. Objective search defines a safety envelope; opponent modelling may choose among objectively safe moves but may not redefine chess truth.
+
 ## Documentation
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — architectural constitution and subsystem boundaries.
@@ -69,9 +83,10 @@ Future WASM and other frontends branch from the orchestration/search layers rath
 - [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md) — correctness, performance and Elo methodology.
 - [`docs/MATCH_QUALIFICATION.md`](docs/MATCH_QUALIFICATION.md) — frozen openings, reproducible paired-game protocol, provenance manifest and evidence rules.
 - [`docs/STRENGTH_BASELINES.md`](docs/STRENGTH_BASELINES.md) — retained external and historical strength measurements.
+- [`docs/OPPONENT_EXPLOITATION.md`](docs/OPPONENT_EXPLOITATION.md) — mathematical programme for safe opponent-aware practical selection.
 - [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) — engineering rules for changes.
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) — staged route from core chess rules to the neural search engine and browser target.
-- [`docs/adr/0001-architecture-v0.1.md`](docs/adr/0001-architecture-v0.1.md) — first architectural decision record.
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — staged route from core chess rules to the neural/search research engine and browser target.
+- [`docs/adr/`](docs/adr/) — architectural decisions.
 
 ## Development
 

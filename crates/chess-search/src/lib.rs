@@ -267,20 +267,50 @@ impl Searcher {
 
         let mut moves = moves;
         let mut picker = MovePicker::new(&mut moves, hint);
+        let mut first_move = true;
         while let Some(mv) = picker.next(position) {
             let undo = position.make_move(mv);
-            let child = self.negamax(
-                position,
-                prior_history,
-                depth - 1,
-                -INFINITY,
-                -alpha,
-                1,
-                1,
-                control,
-            );
+            let child = if first_move {
+                self.negamax(
+                    position,
+                    prior_history,
+                    depth - 1,
+                    -INFINITY,
+                    -alpha,
+                    1,
+                    1,
+                    control,
+                )
+            } else {
+                // Later root moves first get a null-window probe. Good ordering
+                // should make most fail low; only alpha-raising moves are re-searched.
+                let probe = self.negamax(
+                    position,
+                    prior_history,
+                    depth - 1,
+                    -alpha - 1,
+                    -alpha,
+                    1,
+                    1,
+                    control,
+                );
+                match probe {
+                    Some(probe_child) if -probe_child > alpha => self.negamax(
+                        position,
+                        prior_history,
+                        depth - 1,
+                        -INFINITY,
+                        -alpha,
+                        1,
+                        1,
+                        control,
+                    ),
+                    probe => probe,
+                }
+            };
             position.unmake_move(mv, undo);
             let score = -child?;
+            first_move = false;
 
             if score > best_score {
                 best_score = score;
@@ -372,20 +402,51 @@ impl Searcher {
 
         let mut moves = moves;
         let mut picker = MovePicker::new(&mut moves, hint);
+        let mut first_move = true;
         while let Some(mv) = picker.next(position) {
             let undo = position.make_move(mv);
-            let child = self.negamax(
-                position,
-                prior_history,
-                depth - 1,
-                -beta,
-                -alpha,
-                ply + 1,
-                path_len + 1,
-                control,
-            );
+            let child = if first_move {
+                self.negamax(
+                    position,
+                    prior_history,
+                    depth - 1,
+                    -beta,
+                    -alpha,
+                    ply + 1,
+                    path_len + 1,
+                    control,
+                )
+            } else {
+                // Principal variation search probes later moves with a one-point
+                // window and verifies only genuine alpha improvements.
+                let probe = self.negamax(
+                    position,
+                    prior_history,
+                    depth - 1,
+                    -alpha - 1,
+                    -alpha,
+                    ply + 1,
+                    path_len + 1,
+                    control,
+                );
+                match probe {
+                    Some(probe_child) if -probe_child > alpha && -probe_child < beta => self
+                        .negamax(
+                            position,
+                            prior_history,
+                            depth - 1,
+                            -beta,
+                            -alpha,
+                            ply + 1,
+                            path_len + 1,
+                            control,
+                        ),
+                    probe => probe,
+                }
+            };
             position.unmake_move(mv, undo);
             let score = -child?;
+            first_move = false;
 
             if score > best {
                 best = score;

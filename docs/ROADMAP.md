@@ -8,7 +8,7 @@ The roadmap is ordered by dependency and evidence, not by visual excitement.
 - **M1 complete** — legal chess and reference perft are green.
 - **M2 complete** — reversible state and deterministic position identity are green.
 - **M3 complete** — the classical reference engine is timed, draw-correct, externally measurable and now has a retained Stockfish calibration.
-- **M4 in progress** — tactical strength work has started with transparent quiescence search, and every candidate is measured against frozen M3 before acceptance.
+- **M4 in progress** — bounded quiescence, staged allocation-free move picking and principal variation search have each earned acceptance through isolated equal-time paired-game tests. SEE ordering v1 was correctly rejected after a negative screen.
 
 ## M0 — Core foundations — complete
 
@@ -62,7 +62,7 @@ Implemented and qualified:
 - separate conservative TT identity and rule-correct repetition identity, including legal/pinned en-passant semantics;
 - threefold repetition, 50-move and conservative dead-material draw adjudication before TT reuse;
 - fixed-capacity search-path repetition history with no recursive heap growth;
-- versioned deterministic `reference-search-v2` benchmark/signature in CI;
+- versioned deterministic benchmark/signature in CI;
 - repository-owned paired-game qualification protocol;
 - Fastchess provenance wrapper with exact runner/engine/opening hashes, command/environment capture and retained PGN/raw/UCI evidence;
 - hermetic match-harness tests in CI and the local gate;
@@ -79,13 +79,34 @@ Exit condition: a correctly timed, draw-correct UCI engine with a reproducible m
 
 ## M4 — Tactical engine — in progress
 
-Planned/active:
+Accepted so far:
 
-- quiescence/forcing search;
-- stronger move ordering;
-- bounded tactical TT refinements;
-- carefully measured pruning/reduction mechanisms;
-- production time-management tuning.
+- bounded four-qply quiescence with a specialized tactical-only legal generator;
+- allocation-free staged `MovePicker` with lazy tactical selection and no global sort;
+- principal variation search / null-window probing for later moves.
+
+Measured short-control gains on the frozen development protocol:
+
+- qsearch v1 vs M3: `+281.68 +/- 58.17` Elo;
+- staged MovePicker vs qsearch: `+74.06 +/- 37.99` Elo;
+- PVS v1 vs staged MovePicker: `+41.89 +/- 30.29` Elo.
+
+These are incremental equal-time development screens, not additive absolute ratings.
+
+Rejected experiments are retained as evidence too: SEE ordering v1 was correct but scored `-13.90 +/- 33.29` Elo versus the accepted picker and was not merged.
+
+Next high-value work:
+
+- killer moves and quiet history ordering;
+- counter-move heuristic;
+- aspiration windows;
+- bounded tactical TT refinements where measurements justify them;
+- null-move pruning with conservative zugzwang/material gates;
+- late-move reductions;
+- futility and late-move pruning only after stronger ordering/reduction baselines exist;
+- qsearch refinements such as selectively measured SEE/delta pruning rather than reusing the rejected SEE-ordering policy;
+- branching-factor / next-iteration time prediction;
+- hot-path profiling and micro-optimization of move generation, make/unmake, TT, timing checks and evaluator calls.
 
 Evidence rule: every meaningful search change is first checked for correctness and deterministic benchmark drift, then plays paired games against a frozen historical engine under equal resources. A mechanism is not retained merely because it is conventional or intuitively attractive.
 
@@ -94,24 +115,31 @@ Exit condition: strong, stable reference search and automated paired-game testin
 ## M5 — Learned intelligence
 
 - training data format/pipeline;
+- a strong classical positional-evaluation control before neural replacement;
+- experiment ladder from tiny scalar learned value to incremental sparse / king-relative features;
 - incremental quantised evaluator;
 - value head;
-- legal-move policy head;
+- legal-move policy head only after value cost is qualified;
 - uncertainty calibration experiments;
+- explicit measurement of inference/update latency, NPS, completed depth and equal-time Elo;
 - native SIMD and WASM qualification.
 
-Exit condition: learned evaluator beats the handcrafted reference under equal-time matches.
+Exit condition: learned evaluator beats the handcrafted reference under equal-time matches. Validation loss alone is not an acceptance metric.
 
-## M6 — Strategic search research
+## M6 — Strategic search and opponent-aware research
 
 - bounded sparse node/edge arenas;
 - strategic transposition identity;
 - frontier scheduler;
 - policy/uncertainty-directed work allocation;
 - local tactical verifier integration;
-- graph eviction/reuse experiments.
+- graph eviction/reuse experiments;
+- opponent-response and fragility features within an objective safety envelope;
+- synthetic search-ablation opponent populations, holdout validation and later online opponent inference.
 
-Exit condition: graph/search variants beat the simpler reference across short and long time controls, or are revised/removed.
+The opponent-aware programme is specified in `docs/OPPONENT_EXPLOITATION.md` and ADR 0003. Objective search remains independently available and defines the safety envelope; opponent modelling may choose among safe moves but must not redefine chess truth.
+
+Exit condition: strategic/opponent-aware variants beat the simpler objective reference across held-out populations and equal-resource matches, or are revised/removed.
 
 ## M7 — Parallel and browser engine
 
