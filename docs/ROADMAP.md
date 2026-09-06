@@ -7,7 +7,7 @@ The roadmap is ordered by dependency and evidence, not by visual excitement.
 - **M0 complete** — core representation, toolchain and CI are green.
 - **M1 complete** — legal chess and reference perft are green.
 - **M2 complete** — reversible state and deterministic position identity are green.
-- **M3 in progress** — the classical reference engine is legal, reversible, draw-aware, interruptible and clock-driven; reproducible match tooling now exists, with the frozen opening corpus and first retained measured baseline remaining.
+- **M3 in progress** — the classical reference engine, draw/history correctness, reproducible match tooling and frozen opening corpus are in place; the first retained measured baseline is the remaining exit item.
 
 ## M0 — Core foundations — complete
 
@@ -64,12 +64,14 @@ Implemented:
 - versioned deterministic `reference-search-v2` benchmark/signature in CI;
 - repository-owned paired-game qualification protocol;
 - Fastchess provenance wrapper with exact runner/engine/opening hashes, command/environment capture and retained PGN/raw/UCI evidence;
-- hermetic match-harness tests in CI and the local gate.
+- hermetic match-harness tests in CI and the local gate;
+- frozen `m3-uho-lichess-100-v1` opening corpus derived deterministically from a pinned CC0 Stockfish UHO Lichess source;
+- protocol-level opening suite ID/SHA-256 enforcement before a match result directory is created;
+- independent Python provenance/rank/hash validation and Rust legality/nonterminal validation for all 100 openings.
 
 Remaining before M3 exit:
 
-- freeze/version the opening corpus used by `m3-baseline-v1`;
-- run the first retained completed baseline against a named external reference under that protocol;
+- run the first retained completed baseline against a named external reference under `m3-baseline-v1`;
 - record the resulting relative Elo and uncertainty with its manifest/PGN/raw evidence rather than claiming an absolute rating.
 
 `go infinite`, ponder, configurable UCI options and richer GUI-facing features are useful tournament compatibility work but are no longer correctness blockers for the first finite-time baseline match protocol. They can be added when selected harnesses/opponents require them.
