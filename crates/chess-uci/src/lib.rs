@@ -98,8 +98,9 @@ impl UciSession {
                 response(Vec::new(), false)
             }
             "position" => match parse_position(&tokens) {
-                Ok(position) => {
-                    self.engine.set_position(position);
+                Ok(parsed) => {
+                    self.engine
+                        .set_position_with_prior_history(parsed.position, parsed.prior_history);
                     response(Vec::new(), false)
                 }
                 Err(message) => response(vec![format!("info string {message}")], false),
@@ -292,7 +293,12 @@ fn parse_millis(value: &str, error: &'static str) -> Result<Duration, &'static s
         .map_err(|_| error)
 }
 
-fn parse_position(tokens: &[&str]) -> Result<Position, &'static str> {
+struct ParsedPosition {
+    position: Position,
+    prior_history: Vec<u64>,
+}
+
+fn parse_position(tokens: &[&str]) -> Result<ParsedPosition, &'static str> {
     let Some(kind) = tokens.get(1).copied() else {
         return Err("position requires 'startpos' or 'fen'");
     };
@@ -310,8 +316,12 @@ fn parse_position(tokens: &[&str]) -> Result<Position, &'static str> {
         _ => return Err("position requires 'startpos' or 'fen'"),
     };
 
+    let mut prior_history = Vec::new();
     if index == tokens.len() {
-        return Ok(position);
+        return Ok(ParsedPosition {
+            position,
+            prior_history,
+        });
     }
     if tokens.get(index) != Some(&"moves") {
         return Err("unexpected token after base position");
@@ -320,10 +330,14 @@ fn parse_position(tokens: &[&str]) -> Result<Position, &'static str> {
 
     while let Some(text) = tokens.get(index) {
         let mv = resolve_uci_move(&position, text).ok_or("illegal or malformed UCI move")?;
+        prior_history.push(position.repetition_key().raw());
         let _undo = position.make_move(mv);
         index += 1;
     }
-    Ok(position)
+    Ok(ParsedPosition {
+        position,
+        prior_history,
+    })
 }
 
 /// Resolve UCI coordinate notation against the legal moves of `position`.
@@ -434,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn position_move_sequence_is_resolved_through_legal_chess() {
+    fn position_move_sequence_is_resolved_through_legal_chess_and_history() {
         let mut session = UciSession::new();
         assert!(
             session
@@ -443,15 +457,45 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(session.engine().position().side_to_move(), Color::White);
+        assert_eq!(session.engine().repetition_history().len(), 3);
+        assert_eq!(
+            session.engine().repetition_history().last().copied(),
+            Some(session.engine().position().repetition_key().raw())
+        );
     }
 
     #[test]
-    fn invalid_position_command_is_transactional() {
+    fn invalid_position_command_is_transactional_for_board_and_history() {
         let mut session = UciSession::new();
         let root = session.engine().position().clone();
-        let response = session.handle_line("position startpos moves e2e5");
+        let history = session.engine().repetition_history().to_vec();
+        let response = session.handle_line("position startpos moves e2e4 e7e5 e4e6");
         assert_eq!(response.lines().len(), 1);
         assert_eq!(session.engine().position(), &root);
+        assert_eq!(session.engine().repetition_history(), history);
+    }
+
+    #[test]
+    fn uci_move_sequence_preserves_threefold_context_for_search() {
+        let mut session = UciSession::new();
+        let command = concat!(
+            "position fen 7k/8/8/8/8/8/6Q1/K7 w - - 0 1 moves ",
+            "a1a2 h8h7 a2a1 h7h8 a1a2 h8h7 a2a1 h7h8"
+        );
+        assert!(session.handle_line(command).lines().is_empty());
+
+        let key = session.engine().position().repetition_key().raw();
+        assert_eq!(
+            session
+                .engine()
+                .repetition_history()
+                .iter()
+                .filter(|&&candidate| candidate == key)
+                .count(),
+            3
+        );
+        let response = session.handle_line("go depth 1");
+        assert!(response.lines()[0].contains("score cp 0"));
     }
 
     #[test]
