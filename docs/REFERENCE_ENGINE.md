@@ -1,6 +1,6 @@
 # Reference Engine
 
-Status: **M3 baseline in progress**
+Status: **M3 baseline in progress — alpha-beta + iterative deepening + bounded TT**
 
 The reference engine is intentionally conventional and transparent. Its purpose is to give every later evaluator, pruning rule, graph scheduler and learned component a stable opponent and debugging oracle.
 
@@ -48,7 +48,32 @@ Properties that are requirements rather than temporary implementation details:
 - a search must restore the supplied mutable position exactly;
 - node counts are deterministic for a fixed implementation and position.
 
-The first version intentionally has no transposition table, quiescence, history heuristics, killer moves, reductions or learned ordering. Those are layered on only after this baseline is green.
+## M3.2 iterative deepening and transposition memory
+
+A reusable `Searcher` now owns bounded search state. Iterative deepening runs depths `1..=N` and deliberately retains the same transposition table between iterations.
+
+The first table is intentionally simple:
+
+- fixed entry count supplied when the `Searcher` is created;
+- direct mapped by deterministic Zobrist key;
+- full key retained in every entry, so index collisions are never treated as hits;
+- depth-preferred replacement;
+- exact/lower/upper bound classification;
+- best move retained for ordering;
+- mate scores normalized on store/probe so a transposition reached at a different ply retains the correct mate distance;
+- zero entries is a supported configuration and produces correct search with no table.
+
+The default table contains 32,768 entries. This is a baseline, not a permanently chosen size or replacement policy.
+
+### Move ordering
+
+Ordering remains deterministic and allocation-free:
+
+1. transposition-table move when present and legal;
+2. captures and promotions;
+3. remaining quiet moves in generator order.
+
+This gives alpha-beta useful structure without yet introducing history tables, killer moves or evaluator-specific policy.
 
 ## Score convention
 
@@ -60,15 +85,19 @@ The first version intentionally has no transposition table, quiescence, history 
 
 ## Evidence gates
 
-Before the reference search is considered established:
+The reference search currently requires all of the following:
 
 1. start-position search returns a legal move;
 2. mutable search leaves its root bit-exactly unchanged;
 3. a forced mate-in-one is found at depth one;
 4. stalemate returns no move and a zero score;
-5. formatting, strict Clippy, debug tests and release tests are green.
+5. iterative deepening reaches the same final score as an exact search;
+6. iterative deepening demonstrates transposition reuse;
+7. disabling the table entirely preserves correctness;
+8. mate-score transposition normalization is tested explicitly;
+9. formatting, strict Clippy, debug tests and release tests are green.
 
-Next layers are iterative deepening, deterministic move ordering, a bounded transposition table, UCI orchestration and a reproducible search benchmark.
+Next layers are UCI-ready orchestration, explicit search limits/time management, a deterministic engine benchmark, then quiescence and stronger move ordering.
 
 ## Why this remains after the advanced engine exists
 
