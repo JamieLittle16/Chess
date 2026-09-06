@@ -121,12 +121,16 @@ new_impl = '''    fn probe(&self, key: u64) -> Option<TtEntry> {
         Some((start, TT_CLUSTER_SIZE))
     }'''
 text = replace_once(text, old_impl, new_impl, "TT implementation")
-text = replace_once(
-    text,
-    "        score_from_tt, score_to_tt, search, search_mut, tt_entries_for_megabytes,\n    };",
-    "        Bound, TranspositionTable, MATE_SCORE, SearchControl, Searcher,\n        has_two_prior_occurrences, iterative_deepening, score_from_tt, score_to_tt, search,\n        search_mut, tt_entries_for_megabytes,\n    };",
-    "test imports",
-)
+old_imports = '''    use super::{
+        MATE_SCORE, SearchControl, Searcher, has_two_prior_occurrences, iterative_deepening,
+        score_from_tt, score_to_tt, search, search_mut, tt_entries_for_megabytes,
+    };'''
+new_imports = '''    use super::{
+        Bound, MATE_SCORE, SearchControl, Searcher, TranspositionTable,
+        has_two_prior_occurrences, iterative_deepening, score_from_tt, score_to_tt, search,
+        search_mut, tt_entries_for_megabytes,
+    };'''
+text = replace_once(text, old_imports, new_imports, "test imports")
 text = replace_once(
     text,
     "    #[test]\n    fn megabyte_tt_sizing_matches_entry_layout_and_never_returns_zero() {",
