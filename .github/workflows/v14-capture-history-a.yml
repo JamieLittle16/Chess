@@ -1,0 +1,134 @@
+name: V14 capture history A/B
+
+on:
+  push:
+    branches: [analysis/v14-capture-history-a-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Reconstruct exact final V13 control and candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum -c -
+          rm -rf /tmp/base /tmp/cand
+          mkdir -p /tmp/base /tmp/cand
+          unzip -q /tmp/v13.zip -d /tmp/base
+          unzip -q /tmp/v13.zip -d /tmp/cand
+          patch /tmp/base/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          patch /tmp/cand/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          for DIR in /tmp/base /tmp/cand; do
+            DIR="$DIR" python - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path(os.environ['DIR'])/'experiments/numba_search.py'; s=p.read_text()
+          old='    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          new='    correction = correction // 6\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          assert s.count(old)==1,s.count(old)
+          p.write_text(s.replace(old,new,1))
+          PY
+            python scripts/patch_v13_legality_context.py "$DIR/experiments/numba_core.py"
+            python scripts/patch_v13_qsearch_tactical.py "$DIR/experiments/numba_core.py" "$DIR/experiments/numba_search.py"
+          done
+          echo '401f6580028a72361286bd99bee1f0022c74e6c8a65da8acd47448835a1ff360  /tmp/base/experiments/numba_search.py' | sha256sum --check --strict
+          python scripts/patch_v14_capture_history.py /tmp/cand/experiments/numba_search.py
+          python -m py_compile /tmp/base/agent.py /tmp/base/experiments/*.py /tmp/cand/agent.py /tmp/cand/experiments/*.py
+          cmp /tmp/base/agent.py /tmp/cand/agent.py
+          cmp /tmp/base/experiments/numba_core.py /tmp/cand/experiments/numba_core.py
+          cmp /tmp/base/experiments/v13_residual.i16 /tmp/cand/experiments/v13_residual.i16
+          grep -Fq 'CAPTURE_HISTORY_ORDER_SCALE = 24' /tmp/cand/experiments/numba_search.py
+
+      - name: Competition API smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=/tmp/cand python - <<'PY'
+          import chess, agent
+          for fen in (
+              chess.STARTING_FEN,
+              'r1bq1rk1/pp2bppp/2n1pn2/2pp4/3P4/2PBPN2/PP3PPP/R1BQ1RK1 w - - 2 9',
+              'k3r3/8/8/8/8/8/4R3/4K3 w - - 0 1',
+          ):
+              board=chess.Board(fen)
+              move=chess.Move.from_uci(agent.get_move(fen,120000))
+              assert move in board.legal_moves,(fen,move)
+              print('legal',move)
+          PY
+
+      - name: Fixed-node throughput guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p capture-history-results
+          cat >/tmp/ch_worker.py <<'PY'
+          import json,sys,chess,numpy as np
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful
+          for line in sys.stdin:
+              q=json.loads(line); b=chess.Board(q['fen']); e=encode_position(b); h=np.empty(0,dtype=np.uint64)
+              o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,int(q['nodes']))
+              print(json.dumps({'move':int(o[0]),'score':int(o[1]),'depth':int(o[2]),'nodes':int(o[3])}),flush=True)
+          PY
+          python - <<'PY'
+          import json,os,statistics,subprocess,sys,time
+          from pathlib import Path
+          roots=[x.strip() for x in open('match/openings/m3-uho-lichess-100-v1.epd') if x.strip() and not x.startswith('#')][:40]
+          def start(path):
+              env=os.environ.copy();env['PYTHONPATH']=path
+              return subprocess.Popen([sys.executable,'/tmp/ch_worker.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=env)
+          def run(p,order):
+              total_nodes=0; out=[]; t=time.perf_counter()
+              for fen in order:
+                  p.stdin.write(json.dumps({'fen':fen,'nodes':30000})+'\n');p.stdin.flush()
+                  row=json.loads(p.stdout.readline()); out.append(row); total_nodes+=row['nodes']
+              return time.perf_counter()-t,total_nodes,out
+          base=start('/tmp/base');cand=start('/tmp/cand');ratios=[];rows=[]
+          try:
+              # JIT warmup
+              for p in (base,cand):
+                  p.stdin.write(json.dumps({'fen':roots[0],'nodes':300})+'\n');p.stdin.flush();json.loads(p.stdout.readline())
+              for rep in range(3):
+                  order=roots if rep%2==0 else list(reversed(roots))
+                  if rep%2==0:
+                      bt,bn,_=run(base,order);ct,cn,_=run(cand,order)
+                  else:
+                      ct,cn,_=run(cand,order);bt,bn,_=run(base,order)
+                  base_nps=bn/bt; cand_nps=cn/ct; ratio=cand_nps/base_nps
+                  ratios.append(ratio);rows.append({'rep':rep,'base_nps':base_nps,'candidate_nps':cand_nps,'nps_ratio':ratio})
+                  print(rows[-1])
+          finally:
+              for p in (base,cand):p.terminate();p.wait()
+          summary={'median_nps_ratio':statistics.median(ratios),'records':rows}
+          Path('capture-history-results/throughput.json').write_text(json.dumps(summary,indent=2));print(summary)
+          PY
+
+      - name: Paired fixed-node discovery screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/bin/time -f 'ARENA_WALL_SEC=%e MAX_RSS_KB=%M' \
+            python -u .v13/v13_arena.py /tmp/cand /tmp/base 16000 32 2026090801 220 \
+              match/openings/m3-uho-lichess-100-v1.epd 0 \
+            | tee capture-history-results/arena.log
+          grep '^FINAL ' capture-history-results/arena.log
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v14-capture-history-a-${{ github.sha }}
+          path: capture-history-results/
+          retention-days: 14
