@@ -1,0 +1,102 @@
+name: M5 search-generation v1 equal-nodes
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  equal-nodes:
+    if: github.head_ref == 'm5/search-generation-v1-equal-nodes'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: Strict candidate correctness gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          cargo run --quiet --release -p chess-bench | tee candidate-bench.txt
+          grep -Fx 'signature 0x81422e1cbe496370' candidate-bench.txt
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci candidate-engine
+          sha256sum candidate-engine | tee candidate-engine.sha256
+
+      - name: Materialize exact current main reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin main
+          git worktree add --detach .qualification/reference origin/main
+          (
+            cd .qualification/reference
+            cargo run --quiet --release -p chess-bench | tee ../../reference-bench.txt
+            grep -Fx 'signature 0x4c3bbe8701fbbb68' ../../reference-bench.txt
+            cargo build --release -p chess-uci
+            cp target/release/chess-uci ../../reference-engine
+          )
+          sha256sum reference-engine | tee reference-engine.sha256
+          git -C .qualification/reference rev-parse HEAD | tee reference-main.sha
+
+      - name: Build pinned Fastchess 1.8.2-alpha
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = 'f618e34540f94f4719ad3817950618dabe441318'
+          make -C .qualification/fastchess-src -j2
+
+      - name: Run paired 100-game equal-nodes screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/equal-nodes
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/candidate-engine" name=search-generation-v1 nodes=25000 option.Hash=32 \
+            -engine cmd="$PWD/reference-engine" name=production-main nodes=25000 option.Hash=32 \
+            -openings file=match/openings/m3-uho-lichess-100-v1.epd format=epd order=random \
+            -srand 20261028 \
+            -rounds 50 -repeat -concurrency 1 -maxmoves 300 \
+            -ratinginterval 20 \
+            -pgnout file=.qualification/equal-nodes/games.pgn notation=uci append=false nodes=true nps=true \
+            -log file=.qualification/equal-nodes/uci.log level=info engine=true append=false \
+            | tee .qualification/equal-nodes/fastchess.stdout.log
+
+      - name: Record immutable evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/equal-nodes
+          cp candidate-bench.txt reference-bench.txt candidate-engine.sha256 reference-engine.sha256 reference-main.sha .qualification/equal-nodes/ || true
+          cat > .qualification/equal-nodes/evidence.txt <<EOF
+          experiment=search-generation-v1-equal-nodes
+          candidate_source=1a055e637dcb580e500d958c50683ae91630e697
+          nodes_per_move=25000
+          games=100
+          seed=20261028
+          opening_sha256=599a45efb446e91952d13e79bc7fec8de319e332036a54552a3e8e4af91f9cf1
+          candidate_signature=0x81422e1cbe496370
+          reference_signature=0x4c3bbe8701fbbb68
+          fastchess_commit=f618e34540f94f4719ad3817950618dabe441318
+          EOF
+
+      - name: Upload equal-nodes evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m5-search-generation-v1-equal-nodes-${{ github.sha }}
+          path: .qualification/equal-nodes/
+          retention-days: 30
