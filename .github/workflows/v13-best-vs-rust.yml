@@ -18,28 +18,25 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {name: fast-a, start: 0,  count: 6, base_ms: 2500, inc_ms: 50,  nodes: 10000}
-          - {name: fast-b, start: 6,  count: 6, base_ms: 2500, inc_ms: 50,  nodes: 10000}
-          - {name: fast-c, start: 12, count: 6, base_ms: 2500, inc_ms: 50,  nodes: 10000}
-          - {name: fast-d, start: 18, count: 6, base_ms: 2500, inc_ms: 50,  nodes: 10000}
+          - {name: fast-a, start: 0, count: 6, base_ms: 2500, inc_ms: 50, nodes: 10000}
+          - {name: fast-b, start: 6, count: 6, base_ms: 2500, inc_ms: 50, nodes: 10000}
+          - {name: fast-c, start: 12, count: 6, base_ms: 2500, inc_ms: 50, nodes: 10000}
+          - {name: fast-d, start: 18, count: 6, base_ms: 2500, inc_ms: 50, nodes: 10000}
           - {name: slow-a, start: 24, count: 3, base_ms: 8000, inc_ms: 100, nodes: 25000}
           - {name: slow-b, start: 27, count: 3, base_ms: 8000, inc_ms: 100, nodes: 25000}
 
     steps:
       - name: Checkout pinned diagnostic branch
         uses: actions/checkout@v4
-
       - name: Install Rust 1.98.1
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.98.1
           components: rustfmt, clippy
-
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
       - name: Install runtime and Stockfish
         run: |
           python -m pip install --upgrade pip
@@ -47,14 +44,16 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y stockfish
 
-      - name: Reconstruct exact uploaded V13 BEST
+      - name: Reconstruct source-exact V13 BEST
         shell: bash
         run: |
           set -euo pipefail
-          base64 -d .analysis/v13_best_payload.b64 > /tmp/v13best.zip
-          echo 'acf6ba72c95fa61fb6b54245f2e24ab9aa1665950b29cecf421ac3c7ab9a738a  /tmp/v13best.zip' | sha256sum -c -
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13old.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13old.zip' | sha256sum -c -
           rm -rf /tmp/v13best && mkdir -p /tmp/v13best
-          unzip -q /tmp/v13best.zip -d /tmp/v13best
+          unzip -q /tmp/v13old.zip -d /tmp/v13best
+          patch /tmp/v13best/experiments/numba_search.py < .analysis/v13best_search.patch
+          patch /tmp/v13best/experiments/numba_core.py < .analysis/v13best_core.patch
           echo 'df346b21be42832a0ae97e7faa15953ab460f0387fb0358961651466557ebde8  /tmp/v13best/agent.py' | sha256sum -c -
           echo '6422eb8eb8713e02e6d62d33ef230f37cf707188e864b575226802aead128b2f  /tmp/v13best/experiments/__init__.py' | sha256sum -c -
           echo '0306e8145a453d91b9b5ac92e9980931510d9e18f8ba598a7548d08b85165c35  /tmp/v13best/experiments/numba_core.py' | sha256sum -c -
@@ -103,21 +102,16 @@ jobs:
             --analysis-nodes ${{ matrix.nodes }} \
             --out-dir "$OUT" | tee "$OUT/run.log"
           {
-            echo 'candidate=Little-Gambit-V13-BEST'
-            echo 'zip_sha256=acf6ba72c95fa61fb6b54245f2e24ab9aa1665950b29cecf421ac3c7ab9a738a'
+            echo 'candidate=Little-Gambit-V13-BEST source-exact'
+            echo 'uploaded_zip_sha256=acf6ba72c95fa61fb6b54245f2e24ab9aa1665950b29cecf421ac3c7ab9a738a'
             echo 'search_sha256=401f6580028a72361286bd99bee1f0022c74e6c8a65da8acd47448835a1ff360'
             echo 'core_sha256=0306e8145a453d91b9b5ac92e9980931510d9e18f8ba598a7548d08b85165c35'
+            echo 'weights_sha256=7d0fc5f7a186e79317cf12a2ff285d7716c651fbd045c53d65a3cc6eb1b15319'
             echo 'rust_sha=44c1e16d3713cdca1ff1bd71f7596ef3b5804037'
             echo "shard=${{ matrix.name }}"
-            echo "opening_start=${{ matrix.start }}"
-            echo "opening_count=${{ matrix.count }}"
-            echo "base_ms=${{ matrix.base_ms }}"
-            echo "increment_ms=${{ matrix.inc_ms }}"
-            echo "analysis_nodes=${{ matrix.nodes }}"
             cat /tmp/v13best-init.txt || true
             python --version
             rustc --version
-            python -m pip show chess numpy numba | grep -E '^(Name|Version):'
           } > "$OUT/provenance.txt"
 
       - name: Upload diagnostic shard
