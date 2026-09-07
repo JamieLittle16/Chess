@@ -250,7 +250,7 @@ const fn pawn_promotes_on(color: Color, rank: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use chess_core::{Position, Square};
+    use chess_core::{MoveKind, Position, Square};
 
     use super::see;
 
@@ -285,9 +285,10 @@ mod tests {
     #[test]
     fn pinned_recapture_is_not_counted_as_legal() {
         // After Bxd7+, the black rook on e7 geometrically attacks d7 but cannot recapture: moving
-        // off the e-file would expose the black king on e8 to the white rook on e1.
+        // off the e-file would expose the black king on e8 to the white rook on e1. A second white
+        // rook on d1 protects d7, so the king itself cannot provide an alternative recapture.
         let position =
-            Position::from_fen("4k3/3qr3/8/8/6B1/8/8/K3R3 w - - 0 1").expect("valid FEN");
+            Position::from_fen("4k3/3qr3/8/8/6B1/8/8/K2RR3 w - - 0 1").expect("valid FEN");
         let g4 = Square::from_file_rank(6, 3).expect("g4");
         let d7 = Square::from_file_rank(3, 6).expect("d7");
         let mv = position
@@ -297,5 +298,30 @@ mod tests {
             .find(|mv| mv.from() == g4 && mv.to() == d7)
             .expect("Bxd7 is legal");
         assert!(see(&position, mv) >= 800);
+    }
+
+    #[test]
+    fn en_passant_removes_the_off_target_captured_pawn() {
+        let position =
+            Position::from_fen("k7/8/8/4KPp1/8/8/8/8 w - g6 0 1").expect("valid FEN");
+        let mv = position
+            .legal_moves()
+            .iter()
+            .copied()
+            .find(|mv| mv.kind() == MoveKind::EnPassant)
+            .expect("en-passant is legal");
+        assert_eq!(see(&position, mv), 100);
+    }
+
+    #[test]
+    fn quiet_promotion_counts_the_material_transformation() {
+        let position = Position::from_fen("7k/P7/8/8/8/8/8/K7 w - - 0 1").expect("valid FEN");
+        let mv = position
+            .legal_moves()
+            .iter()
+            .copied()
+            .find(|mv| mv.kind() == MoveKind::PromoteQueen)
+            .expect("queen promotion is legal");
+        assert_eq!(see(&position, mv), 800);
     }
 }
