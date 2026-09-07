@@ -1,0 +1,182 @@
+--- a/experiments/numba_search.py
++++ b/experiments/numba_search.py
+@@ -58,6 +58,7 @@
+     ROOK,
+     WHITE,
+     generate_legal_moves_into_with_king,
++    generate_pseudo_moves_into,
+     is_square_attacked,
+     make_move_inplace,
+     move_from,
+@@ -138,7 +139,8 @@
+             # +35/+100 urgency bonus overvalued blocked/lost passers and could make a losing side
+             # reject a rule draw. Promotion urgency is handled by search below, where the
+             # defender gets a complete reply.
+-            static_bonus[side_index, PAWN, square] = rank * 9 + (7 - abs(2 * file - 7)) * 2
++            pawn_progress = (0, 0, 5, 10, 20, 35, 60, 0)[rank]
++            static_bonus[side_index, PAWN, square] = pawn_progress + (7 - abs(2 * file - 7))
+             static_bonus[side_index, KNIGHT, square] = 36 - 4 * distance
+             static_bonus[side_index, BISHOP, square] = 24 - 2 * distance
+             static_bonus[side_index, ROOK, square] = rank * 3 + (10 if rank == 6 else 0)
+@@ -172,7 +174,8 @@
+     distance = abs(2 * file - 7) + abs(2 * rank - 7)
+ 
+     if piece == PAWN:
+-        return rank * 9 + (7 - abs(2 * file - 7)) * 2
++        pawn_progress = (0, 0, 5, 10, 20, 35, 60, 0)[rank]
++        return pawn_progress + (7 - abs(2 * file - 7))
+     if piece == KNIGHT:
+         return 36 - 4 * distance
+     if piece == BISHOP:
+@@ -807,6 +810,126 @@
+     )
+ 
+ 
++@njit(cache=False)
++def _qsearch_legal_moves_with_checks(
++    board: np.ndarray,
++    side: int,
++    castling: int,
++    ep_square: int,
++    pseudo: np.ndarray,
++    legal: np.ndarray,
++    own_king: int,
++    enemy_king: int,
++) -> int:
++    """Generate legal moves and mark exact quiet checks in pseudo[:count].
++
++    Legality already requires make/unmake. On the first forcing qsearch layers, reuse that child
++    position to classify quiet checks (including discovered checks) exactly, avoiding a second
++    make/unmake pass. Tactical moves do not need a check flag because qsearch already searches them.
++    """
++    pseudo_count = generate_pseudo_moves_into(board, side, castling, ep_square, pseudo)
++    legal_count = 0
++    for index in range(pseudo_count):
++        move = int(pseudo[index])
++        from_square = move_from(move)
++        moving_piece = abs(int(board[from_square]))
++        _, _, captured_piece, captured_square = make_move_inplace(
++            board, side, castling, ep_square, move
++        )
++        check_square = move_to(move) if moving_piece == KING else own_king
++        legal_move = check_square >= 0 and not is_square_attacked(board, check_square, -side)
++        if legal_move:
++            gives_quiet_check = False
++            if (
++                enemy_king >= 0
++                and captured_piece == EMPTY
++                and move_promotion(move) == 0
++                and not (move & FLAG_EP)
++            ):
++                gives_quiet_check = is_square_attacked(board, enemy_king, side)
++            legal[legal_count] = move
++            # legal_count <= index, so this consumed pseudo prefix is safe scratch storage.
++            pseudo[legal_count] = 1 if gives_quiet_check else 0
++            legal_count += 1
++        undo_move_inplace(board, side, move, captured_piece, captured_square)
++    return legal_count
++
++
++@njit(cache=False, inline="always")
++def _quiet_check_order_score(board: np.ndarray, move: int) -> int:
++    piece = abs(int(board[move_from(move)]))
++    if piece == KNIGHT or piece == BISHOP:
++        base = 5_360_000
++    elif piece == ROOK:
++        base = 5_340_000
++    elif piece == PAWN:
++        base = 5_330_000
++    else:
++        base = 5_300_000
++    return base + int(ORDER_CENTER_BONUS[move_to(move)])
++
++
++@njit(cache=False, inline="always")
++def _order_qsearch_forcing_moves(
++    board: np.ndarray,
++    moves: np.ndarray,
++    check_flags: np.ndarray,
++    count: int,
++    scores: np.ndarray,
++) -> int:
++    """Compact tacticals plus at most three exact quiet checks into the qsearch prefix."""
++    selected = 0
++    check_move0 = -1
++    check_move1 = -1
++    check_move2 = -1
++    check_score0 = -1
++    check_score1 = -1
++    check_score2 = -1
++    for index in range(count):
++        move = int(moves[index])
++        if _is_tactical(board, move):
++            moves[selected] = move
++            scores[selected] = _move_order_score(board, move, -1)
++            selected += 1
++        elif int(check_flags[index]) != 0:
++            score = _quiet_check_order_score(board, move)
++            if score > check_score0:
++                check_move2, check_score2 = check_move1, check_score1
++                check_move1, check_score1 = check_move0, check_score0
++                check_move0, check_score0 = move, score
++            elif score > check_score1:
++                check_move2, check_score2 = check_move1, check_score1
++                check_move1, check_score1 = move, score
++            elif score > check_score2:
++                check_move2, check_score2 = move, score
++    if check_move0 >= 0:
++        moves[selected] = check_move0
++        scores[selected] = check_score0
++        selected += 1
++    if check_move1 >= 0:
++        moves[selected] = check_move1
++        scores[selected] = check_score1
++        selected += 1
++    if check_move2 >= 0:
++        moves[selected] = check_move2
++        scores[selected] = check_score2
++        selected += 1
++    for index in range(1, selected):
++        move = int(moves[index])
++        score = int(scores[index])
++        cursor = index - 1
++        while cursor >= 0 and int(scores[cursor]) < score:
++            moves[cursor + 1] = moves[cursor]
++            scores[cursor + 1] = scores[cursor]
++            cursor -= 1
++        moves[cursor + 1] = move
++        scores[cursor + 1] = score
++    return selected
++
++
+ @njit(cache=False, inline="always")
+ def _search_budget_exhausted(
+     nodes: np.ndarray,
+@@ -872,13 +995,24 @@
+ 
+     pseudo = pseudo_stack[ply]
+     moves = move_stack[ply]
+-    count = _legal_moves_for_state(
+-        board, side, castling, ep_square, pseudo, moves, eval_stack[ply]
+-    )
++    if not checked and qply <= 4:
++        own_king = int(eval_stack[ply, EVAL_WHITE_KING] if side == WHITE else eval_stack[ply, EVAL_BLACK_KING])
++        enemy_king = int(eval_stack[ply, EVAL_BLACK_KING] if side == WHITE else eval_stack[ply, EVAL_WHITE_KING])
++        count = _qsearch_legal_moves_with_checks(
++            board, side, castling, ep_square, pseudo, moves, own_king, enemy_king
++        )
++    else:
++        count = _legal_moves_for_state(
++            board, side, castling, ep_square, pseudo, moves, eval_stack[ply]
++        )
+     if count == 0:
+         return (-MATE + ply if checked else 0), False
+     if checked:
+         _order_moves(board, moves, count, -1, score_stack[ply])
++    elif qply <= 4:
++        count = _order_qsearch_forcing_moves(board, moves, pseudo, count, score_stack[ply])
++        if count == 0:
++            return alpha, False
+     else:
+         count = _order_tactical_moves(board, moves, count, -1, score_stack[ply])
+         if count == 0:
