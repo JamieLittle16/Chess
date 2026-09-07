@@ -7,7 +7,7 @@
 mod move_picker;
 mod quiescence;
 
-use chess_core::{ChessMove, Position, generate_legal_moves_mut};
+use chess_core::{ChessMove, PieceKind, Position, generate_legal_moves_mut};
 use chess_eval::evaluate;
 use move_picker::MovePicker;
 
@@ -412,6 +412,24 @@ impl Searcher {
             return Some(score);
         }
 
+        // Conservative reverse futility pruning. Terminal positions have already been handled, and
+        // only narrow-window shallow nodes are eligible. A generous depth-scaled margin plus a
+        // non-pawn-material guard keeps this away from the most obvious zugzwang/endgame hazards.
+        let in_check = position.is_in_check(position.side_to_move());
+        let null_window = beta == alpha + 1;
+        if depth <= 3
+            && null_window
+            && !in_check
+            && beta.abs() < MATE_TT_THRESHOLD
+            && has_reverse_futility_material(position)
+        {
+            let static_eval = evaluate(position);
+            let margin = 120 * i32::from(depth);
+            if static_eval.saturating_sub(margin) >= beta {
+                return Some(static_eval);
+            }
+        }
+
         debug_assert!(path_len < MAX_SEARCH_PLY);
         self.path_keys[path_len] = repetition_key;
 
@@ -590,6 +608,15 @@ fn has_two_prior_occurrences(key: u64, prior_history: &[u64], search_path: &[u64
         }
     }
     false
+}
+
+fn has_reverse_futility_material(position: &Position) -> bool {
+    let us = position.side_to_move();
+    !(position.pieces(us, PieceKind::Knight)
+        | position.pieces(us, PieceKind::Bishop)
+        | position.pieces(us, PieceKind::Rook)
+        | position.pieces(us, PieceKind::Queen))
+    .is_empty()
 }
 
 fn terminal_score(position: &Position, ply: u16) -> i32 {
