@@ -20,7 +20,15 @@ def main() -> int:
     if args.margin < 0:
         raise SystemExit("margin must be non-negative")
     p = args.path
-    s = p.read_text()
+    source = p.read_text()
+
+    qstart = source.find("def _quiescence(")
+    if qstart < 0:
+        raise SystemExit("quiescence start missing")
+    qend = source.find("\n@njit", qstart + 1)
+    if qend < 0:
+        raise SystemExit("quiescence end missing")
+    q = source[qstart:qend]
 
     loop_anchor = (
         "    for index in range(count):\n"
@@ -41,7 +49,7 @@ def main() -> int:
         "                    delta_prune = True\n"
         "        child_halfmove = _next_halfmove_clock(board, move, halfmove_clock)\n"
     )
-    s = replace_once(s, loop_anchor, loop_new, "qsearch move loop")
+    q = replace_once(q, loop_anchor, loop_new, "qsearch move loop")
 
     make_anchor = (
         "        child_castling, child_ep, captured_piece, captured_square = make_move_inplace(\n"
@@ -53,9 +61,10 @@ def main() -> int:
         "            undo_move_inplace(board, side, move, captured_piece, captured_square)\n"
         "            continue\n"
     )
-    s = replace_once(s, make_anchor, make_new, "qsearch post-move check")
+    q = replace_once(q, make_anchor, make_new, "qsearch post-move check")
 
-    p.write_text(s)
+    source = source[:qstart] + q + source[qend:]
+    p.write_text(source)
     return 0
 
 
