@@ -6,6 +6,8 @@
 //! piece bitboards, perform table lookups, and interpolate one middle-game/end-game score pair.
 
 pub mod nnue;
+#[cfg(feature = "search-trace")]
+mod search_trace;
 
 use chess_core::{Color, PieceKind, Position};
 
@@ -41,6 +43,9 @@ pub fn material(position: &Position, color: Color) -> i32 {
 /// non-pawn material. Black reuses the same tables by vertically mirroring each square.
 #[must_use]
 pub fn evaluate(position: &Position) -> i32 {
+    #[cfg(feature = "search-trace")]
+    search_trace::observe(position);
+
     let mut middle_game = 0_i32;
     let mut end_game = 0_i32;
     let mut phase = 0_i32;
