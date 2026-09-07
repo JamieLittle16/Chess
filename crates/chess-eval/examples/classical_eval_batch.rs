@@ -1,4 +1,7 @@
-use std::{io::{self, BufRead}, process};
+use std::{
+    io::{self, BufRead},
+    process,
+};
 
 use chess_core::Position;
 use chess_eval::evaluate;
