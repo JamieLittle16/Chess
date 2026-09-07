@@ -1,0 +1,4 @@
+# Offline analysis/training tooling only. This is not a runtime engine dependency.
+# `chess` is the maintained python-chess package and is GPL-3.0+; it is not vendored or linked into
+# the Rust engine binaries. Pinning keeps PGN/UCI analysis reproducible.
+chess==1.11.2
