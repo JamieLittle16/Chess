@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import math
 import random
 import struct
 from array import array
@@ -48,6 +47,14 @@ class Example(NamedTuple):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--teacher", type=Path, required=True)
+    parser.add_argument(
+        "--teacher-id",
+        default=None,
+        help=(
+            "stable logical corpus identity stored in model provenance; defaults to the teacher "
+            "file SHA-256 and never uses an absolute filesystem path"
+        ),
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--hidden", type=int, choices=SUPPORTED_HIDDEN, default=32)
     parser.add_argument("--epochs", type=int, default=1)
@@ -103,7 +110,7 @@ def active_features(board: chess.Board, perspective: bool) -> tuple[int, ...]:
 def load_examples(path: Path, *, target_clip_cp: float, max_records: int | None) -> list[Example]:
     examples: list[Example] = []
     with path.open(encoding="utf-8") as handle:
-        for line_no, line in enumerate(handle, start=1):
+        for line in handle:
             if not line.strip():
                 continue
             record = json.loads(line)
@@ -153,7 +160,9 @@ class ReferenceNetwork:
     def activate(value: float) -> float:
         return max(0.0, min(ACTIVATION_FLOAT_MAX, value))
 
-    def forward(self, example: Example) -> tuple[float, list[float], list[float], list[float], list[float]]:
+    def forward(
+        self, example: Example
+    ) -> tuple[float, list[float], list[float], list[float], list[float]]:
         white_acc = self.accum(example.white)
         black_acc = self.accum(example.black)
         if example.side_to_move == chess.WHITE:
@@ -283,8 +292,12 @@ def main() -> int:
         raise SystemExit("--epochs must be positive")
     if args.learning_rate <= 0:
         raise SystemExit("--learning-rate must be positive")
+    if args.teacher_id is not None and not args.teacher_id.strip():
+        raise SystemExit("--teacher-id must be non-empty when supplied")
     args.output_dir.mkdir(parents=True, exist_ok=False)
 
+    teacher_sha256 = sha256_file(args.teacher)
+    teacher_id = args.teacher_id or f"sha256:{teacher_sha256}"
     examples = load_examples(
         args.teacher,
         target_clip_cp=args.target_clip_cp,
@@ -313,8 +326,8 @@ def main() -> int:
         "schema_version": 1,
         "trainer": "scripts/train_nnue_reference.py",
         "feature_set_id": FEATURE_SET_ID,
-        "teacher_path": str(args.teacher.resolve()),
-        "teacher_sha256": sha256_file(args.teacher),
+        "teacher_id": teacher_id,
+        "teacher_sha256": teacher_sha256,
         "hidden": args.hidden,
         "epochs": args.epochs,
         "learning_rate": args.learning_rate,

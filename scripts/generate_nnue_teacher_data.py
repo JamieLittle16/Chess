@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Generate reproducible Stockfish teacher records for learned-evaluation experiments.
 
-PGN positions are split by whole source game, never by individual position, so adjacent positions from
-the same game cannot leak across train/validation/holdout. EPD/FEN sources use one source line as the
-group unless the caller prepares a stronger external grouping scheme. Group identity is derived from
-the source-file hash rather than its local path so copying/renaming a corpus cannot change its split.
+Teacher splits are assigned by canonical starting position, never by individual sampled position.
+That is stronger than grouping by PGN game: colour-reversed games from the same opening and an EPD
+copy of that same opening all share one group, so no trajectory/root leakage can cross
+train/validation/holdout. Local file paths and move clocks do not affect the group identity.
 """
 from __future__ import annotations
 
@@ -52,12 +52,21 @@ def deterministic_split(group: str, *, salt: str, validation: int, holdout: int)
     return "train"
 
 
+def canonical_root_group(board: chess.Board) -> str:
+    """Stable split identity shared by PGN and EPD representations of one opening root."""
+    fields = board.fen(en_passant="fen").split()
+    return "root:" + " ".join(fields[:4])
+
+
 def pgn_positions(
     path: Path,
     source_sha256: str,
     min_ply: int,
     max_ply: int,
 ) -> Iterator[tuple[str, str, chess.Board]]:
+    # `source_sha256` remains in the helper API for callers/tests from NNUE-1. Split identity no
+    # longer depends on it: canonical root state is the stronger cross-source grouping key.
+    _ = source_sha256
     with path.open(encoding="utf-8", errors="replace") as handle:
         game_index = 0
         while True:
@@ -65,32 +74,33 @@ def pgn_positions(
             if game is None:
                 return
             game_index += 1
-            group = f"pgn:{source_sha256}:{game_index}"
             board = game.board()
-            # Include the game root as ply zero only when explicitly requested.
+            group = canonical_root_group(board)
             if min_ply <= 0 <= max_ply:
-                yield group, "root", board.copy(stack=False)
+                yield group, f"game:{game_index}:root", board.copy(stack=False)
             for node in game.mainline():
                 board.push(node.move)
                 ply = board.ply()
                 if min_ply <= ply <= max_ply:
-                    yield group, f"ply:{ply}", board.copy(stack=False)
+                    yield group, f"game:{game_index}:ply:{ply}", board.copy(stack=False)
 
 
-def epd_positions(path: Path, source_sha256: str) -> Iterator[tuple[str, str, chess.Board]]:
+def epd_positions(
+    path: Path,
+    source_sha256: str,
+) -> Iterator[tuple[str, str, chess.Board]]:
+    _ = source_sha256
     with path.open(encoding="utf-8", errors="replace") as handle:
         for line_no, line in enumerate(handle, start=1):
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
                 continue
-            # The first four EPD fields are exactly the board/turn/castling/en-passant FEN prefix.
             fields = stripped.split()
             if len(fields) < 4:
                 raise ValueError(f"{path}:{line_no}: expected at least four EPD/FEN fields")
             fen = " ".join(fields[:4]) + " 0 1"
             board = chess.Board(fen)
-            group = f"epd:{source_sha256}:{line_no}"
-            yield group, f"line:{line_no}", board
+            yield canonical_root_group(board), f"line:{line_no}", board
 
 
 def main() -> int:
@@ -119,6 +129,7 @@ def main() -> int:
 
     output_path = args.output_dir / "teacher.jsonl"
     split_counts: Counter[str] = Counter()
+    group_counts: Counter[str] = Counter()
     seen = 0
     written = 0
 
@@ -165,6 +176,7 @@ def main() -> int:
             }
             output.write(json.dumps(record, sort_keys=True) + "\n")
             split_counts[split] += 1
+            group_counts[group] += 1
             written += 1
             if args.max_positions is not None and written >= args.max_positions:
                 break
@@ -183,11 +195,13 @@ def main() -> int:
             "salt": args.split_salt,
             "validation_permille": args.validation_permille,
             "holdout_permille": args.holdout_permille,
-            "assignment_unit": "whole PGN game; individual EPD line",
-            "group_source_identity": "source SHA-256",
+            "assignment_unit": "canonical opening root across PGN games and EPD records",
+            "group_source_identity": "first four canonical FEN fields; move clocks ignored",
         },
         "positions_seen_before_stride": seen,
         "positions_written": written,
+        "groups_written": len(group_counts),
+        "largest_group_positions": max(group_counts.values(), default=0),
         "split_counts": dict(sorted(split_counts.items())),
         "output": output_path.name,
     }

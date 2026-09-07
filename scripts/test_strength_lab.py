@@ -26,7 +26,9 @@ class StrengthLabTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             deterministic_split("x", salt="s", validation=600, holdout=400)
 
-    def test_pgn_positions_keep_whole_games_in_one_content_stable_group(self) -> None:
+    def test_pgn_positions_share_one_group_for_one_opening_root(self) -> None:
+        # Both games deliberately begin from startpos. They model a paired colour-reversed opening:
+        # trajectory differences must not let the pair leak across teacher splits.
         pgn = """[Event \"A\"]
 [Result \"*\"]
 
@@ -49,13 +51,11 @@ class StrengthLabTests(unittest.TestCase):
 
         groups = [group for group, _, _ in positions]
         self.assertEqual(len(positions), 6)
-        self.assertEqual(len(set(groups[:3])), 1)
-        self.assertEqual(len(set(groups[3:])), 1)
-        self.assertNotEqual(groups[0], groups[3])
+        self.assertEqual(len(set(groups)), 1)
         self.assertEqual(groups, [group for group, _, _ in copied])
-        self.assertTrue(groups[0].startswith(f"pgn:{source_sha256}:"))
+        self.assertTrue(groups[0].startswith("root:rnbqkbnr/pppppppp/"))
 
-    def test_epd_lines_are_distinct_and_path_independent_groups(self) -> None:
+    def test_epd_distinct_roots_are_path_independent_groups(self) -> None:
         epd = """8/8/8/8/8/8/4K3/7k w - -
 8/8/8/8/8/8/3K4/7k b - -
 """
@@ -74,7 +74,24 @@ class StrengthLabTests(unittest.TestCase):
             [group for group, _, _ in positions],
             [group for group, _, _ in copied],
         )
-        self.assertTrue(positions[0][0].startswith(f"epd:{source_sha256}:"))
+        self.assertTrue(positions[0][0].startswith("root:"))
+
+    def test_pgn_and_epd_same_root_share_cross_source_group(self) -> None:
+        pgn = """[Event \"Root only\"]
+[Result \"*\"]
+
+*
+"""
+        epd = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -\n"
+        with tempfile.TemporaryDirectory() as directory:
+            pgn_path = Path(directory) / "root.pgn"
+            epd_path = Path(directory) / "root.epd"
+            pgn_path.write_text(pgn)
+            epd_path.write_text(epd)
+            pgn_group = list(pgn_positions(pgn_path, sha256_file(pgn_path), 0, 0))[0][0]
+            epd_group = list(epd_positions(epd_path, sha256_file(epd_path)))[0][0]
+
+        self.assertEqual(pgn_group, epd_group)
 
     def test_move_classification_is_factual(self) -> None:
         board = chess.Board()
