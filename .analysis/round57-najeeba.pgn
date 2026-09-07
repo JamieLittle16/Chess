@@ -1,0 +1,12 @@
+[Event "AI Chessathon Rated"]
+[Site "aichessathon.com"]
+[Date "2026.09.07"]
+[Round "57"]
+[White "Little Gambit"]
+[Black "NajeebA"]
+[Result "0-1"]
+[FEN "rn1q1rk1/pbppbppp/1p2pn2/8/2PP4/5NP1/PP2PPBP/RNBQR1K1 b - - 6 7"]
+[SetUp "1"]
+[Termination "checkmate"]
+
+7... c5 8. e3 d5 9. Nbd2 dxc4 10. Nxc4 Bd5 11. Nce5 Qc7 12. a4 Nc6 13. Nxc6 Bxc6 14. Ne5 Bxg2 15. Kxg2 Rad8 16. b3 cxd4 17. exd4 Bb4 18. Re2 Bc3 19. Bb2 Rxd4 20. Qc2 Qb7+ 21. f3 Bxb2 22. Qxb2 Rd5 23. Ra3 Rfd8 24. h4 Nd7 25. Nc4 Nc5 26. b4 Nd3 27. Qc3 Rd4 28. b5 g6 29. Ne5 Nxe5 30. Rxe5 Rd2+ 31. Kf1 Rh2 32. Kg1 Rdd2 33. Qe3 Qd7 34. Rc3 Rdg2+ 35. Kf1 Qd1+ 36. Qe1 Rh1+ 37. Kxg2 Rxe1 38. Rc8+ Kg7 39. Rxe1 Qxe1 40. g4 Qxh4 41. Rc7 h5 42. Rxa7 hxg4 43. fxg4 Qxg4+ 44. Kf1 Kf6 45. Ke1 Qe4+ 46. Kf2 g5 47. Kf1 g4 48. Rd7 Qxa4 49. Kg2 Qxb5 50. Ra7 Qe2+ 51. Kg3 Qf3+ 52. Kh2 g3+ 53. Kh3 g2+ 54. Kh2 Qf1 55. Rxf7+ Kxf7 56. Kg3 g1=Q+ 57. Kh4 Qf4+ 58. Kh5 Qgg5# 0-1
