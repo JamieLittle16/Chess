@@ -1,0 +1,52 @@
+name: V13 dynamic runtime inspect
+
+on:
+  push:
+    branches:
+      - analysis/v13-dynamic-runtime-20260907
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Reconstruct exact V13 evaluator
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum -c -
+          rm -rf /tmp/v13 && mkdir /tmp/v13
+          unzip -q /tmp/v13.zip -d /tmp/v13
+          patch /tmp/v13/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+      - name: Extract evaluator/state insertion context
+        shell: bash
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          p=Path('/tmp/v13/experiments/numba_search.py')
+          s=p.read_text()
+          t=ast.parse(s)
+          wanted=[]
+          for n in t.body:
+              if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and (
+                  'eval' in n.name.lower() or 'residual' in n.name.lower() or n.name in {'search_root','negamax','quiescence'}
+              ):
+                  wanted.append((n.lineno,getattr(n,'end_lineno',n.lineno),n.name))
+          print('FUNCTIONS')
+          for a,b,n in wanted:
+              print(f'{n}: {a}-{b}')
+          print('\nCONTEXT')
+          lines=s.splitlines()
+          for a,b,n in wanted:
+              if n in {'_evaluate_state','_learned_residual','_evaluate_position','_evaluate_with_state','_advance_eval_state_into','_advance_residual_state_into'} or 'evaluate' in n:
+                  lo=max(1,a-8); hi=min(len(lines),b+8)
+                  print(f'\n### {n} {a}-{b}')
+                  for i in range(lo-1,hi):
+                      print(f'{i+1:04d}: {lines[i]}')
+          PY
