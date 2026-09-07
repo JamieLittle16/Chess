@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "protocol_id": "m4-clock-horizon-v1-over-lmr-screening",
+  "runner": "fastchess",
+  "games": 100,
+  "time_control": "1+0.01",
+  "concurrency": 1,
+  "seed": 20261001,
+  "max_moves": 300,
+  "opening_format": "epd",
+  "openings_required": true,
+  "opening_suite_id": "m3-uho-lichess-100-v1",
+  "opening_sha256": "599a45efb446e91952d13e79bc7fec8de319e332036a54552a3e8e4af91f9cf1",
+  "paired_colour_reversal": true,
+  "ponder": false,
+  "tablebases": false,
+  "evaluation_adjudication": false,
+  "notes": "Time-management-only screen over accepted LMR v3. Default no-movestogo horizon changes from 30 to 24 moves; 5% reserve, explicit movestogo handling, increment share, spendable cap and all search/eval semantics remain unchanged. Time losses are part of the result and are not adjudicated away."
+}
