@@ -65,9 +65,7 @@ pub fn evaluate(position: &Position) -> i32 {
 fn experimental_absolute_nnue() -> Option<&'static Network> {
     EXPERIMENTAL_ABSOLUTE_NNUE
         .get_or_init(|| {
-            let Some(path) = env::var_os(EXPERIMENTAL_ABSOLUTE_NNUE_ENV) else {
-                return None;
-            };
+            let path = env::var_os(EXPERIMENTAL_ABSOLUTE_NNUE_ENV)?;
             let bytes = fs::read(&path).unwrap_or_else(|error| {
                 panic!(
                     "failed to read {EXPERIMENTAL_ABSOLUTE_NNUE_ENV} model {}: {error}",
