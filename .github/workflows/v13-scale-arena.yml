@@ -1,0 +1,218 @@
+name: V13 residual model x amplitude arena
+
+on:
+  push:
+    branches:
+      - analysis/v13-scale-arena-20260907
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  arena:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: old-half, model: old, static_bp: 0, alpha_bp: 0, diverse_bp: 0, clamp: 600, denom: 2}
+          - {name: old-quarter, model: old, static_bp: 0, alpha_bp: 0, diverse_bp: 0, clamp: 600, denom: 4}
+          - {name: static-full, model: blend, static_bp: 10000, alpha_bp: 0, diverse_bp: 0, clamp: 400, denom: 1}
+          - {name: static-half, model: blend, static_bp: 10000, alpha_bp: 0, diverse_bp: 0, clamp: 400, denom: 2}
+          - {name: static-quarter, model: blend, static_bp: 10000, alpha_bp: 0, diverse_bp: 0, clamp: 400, denom: 4}
+          - {name: alpha-half, model: blend, static_bp: 0, alpha_bp: 10000, diverse_bp: 0, clamp: 0, denom: 2}
+          - {name: alpha-quarter, model: blend, static_bp: 0, alpha_bp: 10000, diverse_bp: 0, clamp: 0, denom: 4}
+          - {name: diverse-quarter, model: blend, static_bp: 0, alpha_bp: 0, diverse_bp: 10000, clamp: 0, denom: 4}
+          - {name: s85a15-full, model: blend, static_bp: 8500, alpha_bp: 1500, diverse_bp: 0, clamp: 400, denom: 1}
+          - {name: s85a15-half, model: blend, static_bp: 8500, alpha_bp: 1500, diverse_bp: 0, clamp: 400, denom: 2}
+          - {name: s85a15-quarter, model: blend, static_bp: 8500, alpha_bp: 1500, diverse_bp: 0, clamp: 400, denom: 4}
+          - {name: s70a30-half, model: blend, static_bp: 7000, alpha_bp: 3000, diverse_bp: 0, clamp: 400, denom: 2}
+          - {name: s70a30-quarter, model: blend, static_bp: 7000, alpha_bp: 3000, diverse_bp: 0, clamp: 400, denom: 4}
+          - {name: s70a15d15-half, model: blend, static_bp: 7000, alpha_bp: 1500, diverse_bp: 1500, clamp: 400, denom: 2}
+          - {name: s70a15d15-quarter, model: blend, static_bp: 7000, alpha_bp: 1500, diverse_bp: 1500, clamp: 400, denom: 4}
+    steps:
+      - name: Check out V13 research harness
+        uses: actions/checkout@v4
+
+      - name: Check out exact fixed-node arena implementation
+        uses: actions/checkout@v4
+        with:
+          ref: fba49531cda65bf89ec16586004999b3f878142a
+          path: arena-src
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install exact competition dependencies
+        run: python -m pip install --disable-pip-version-check numba==0.67.0 numpy==2.5.2 chess==1.11.2
+
+      - name: Reconstruct exact integrated V13
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum -c -
+          rm -rf /tmp/cand /tmp/base
+          mkdir /tmp/cand
+          unzip -q /tmp/v13.zip -d /tmp/cand
+          patch /tmp/cand/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+
+      - name: Download static residual
+        if: matrix.model == 'blend'
+        uses: actions/download-artifact@v4
+        with:
+          name: v13-static-teacher-residual-5e0243e7b78e088675fcf2177175d21d31f9be4d
+          path: /tmp/models/static
+          repository: JamieLittle16/Chess
+          run-id: 34159146417
+          github-token: ${{ github.token }}
+
+      - name: Download diversity residual
+        if: matrix.model == 'blend'
+        uses: actions/download-artifact@v4
+        with:
+          name: v13-diverse-residual-v2-b8306a4473fd1d6b1062cc85ce05e02f58226fa0
+          path: /tmp/models/diverse
+          repository: JamieLittle16/Chess
+          run-id: 34158845488
+          github-token: ${{ github.token }}
+
+      - name: Download alpha300 residual
+        if: matrix.model == 'blend'
+        uses: actions/download-artifact@v4
+        with:
+          name: v13-alpha300-residual-b951334a9d57f7288a833dfd522ee4660c1f0b8f
+          path: /tmp/models/alpha300
+          repository: JamieLittle16/Chess
+          run-id: 34158910686
+          github-token: ${{ github.token }}
+
+      - name: Install model and exact final correction scale
+        shell: bash
+        env:
+          MODEL_KIND: ${{ matrix.model }}
+          STATIC_BP: ${{ matrix.static_bp }}
+          ALPHA_BP: ${{ matrix.alpha_bp }}
+          DIVERSE_BP: ${{ matrix.diverse_bp }}
+          CLAMP_CP: ${{ matrix.clamp }}
+          DENOM: ${{ matrix.denom }}
+          MODEL_NAME: ${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+          import hashlib, json, os, re
+          from pathlib import Path
+          import numpy as np
+
+          root = Path('/tmp/cand')
+          src = root / 'experiments/numba_search.py'
+          weights_path = root / 'experiments/v13_residual.i16'
+          text = src.read_text()
+          kind = os.environ['MODEL_KIND']
+          denom = int(os.environ['DENOM'])
+          if denom not in (1, 2, 4):
+              raise SystemExit(f'unsupported denominator {denom}')
+
+          if kind == 'blend':
+              roots = {
+                  'static': Path('/tmp/models/static'),
+                  'alpha300': Path('/tmp/models/alpha300'),
+                  'diverse': Path('/tmp/models/diverse'),
+              }
+              coeff = {
+                  'static': int(os.environ['STATIC_BP']),
+                  'alpha300': int(os.environ['ALPHA_BP']),
+                  'diverse': int(os.environ['DIVERSE_BP']),
+              }
+              if sum(coeff.values()) != 10_000:
+                  raise SystemExit(coeff)
+              arrays = {}
+              meta = {}
+              for name, p in roots.items():
+                  arrays[name] = np.fromfile(p / 'weights.i16', dtype='<i2').astype(np.int64)
+                  meta[name] = json.loads((p / 'model.json').read_text())
+                  if arrays[name].shape != (24_576,):
+                      raise SystemExit((name, arrays[name].shape))
+              blended = np.rint(sum(coeff[n] * arrays[n] for n in roots) / 10_000.0)
+              np.clip(blended, -32768, 32767).astype('<i2').tofile(weights_path)
+              bias = int(round(sum(coeff[n] * int(meta[n]['bias_cp']) for n in roots) / 10_000.0))
+              clamp = int(os.environ['CLAMP_CP'])
+              text, n1 = re.subn(r'RESIDUAL_BIAS\s*=\s*-?\d+', f'RESIDUAL_BIAS = {bias}', text, count=1)
+              text, n2 = re.subn(r'RESIDUAL_CLAMP\s*=\s*-?\d+', f'RESIDUAL_CLAMP = {clamp}', text, count=1)
+              if (n1, n2) != (1, 1):
+                  raise SystemExit((n1, n2))
+          else:
+              bias = int(re.search(r'RESIDUAL_BIAS\s*=\s*(-?\d+)', text).group(1))
+              clamp = int(re.search(r'RESIDUAL_CLAMP\s*=\s*(-?\d+)', text).group(1))
+              coeff = {'embedded_old': 10_000}
+
+          old = 'return score + correction'
+          if text.count(old) != 1:
+              raise SystemExit(f'evaluator return count={text.count(old)}')
+          ret = old if denom == 1 else f'return score + correction // {denom}'
+          text = text.replace(old, ret)
+          src.write_text(text)
+
+          prov = {
+              'name': os.environ['MODEL_NAME'],
+              'coefficients_basis_points': coeff,
+              'bias_cp_before_scale': bias,
+              'clamp_cp_before_scale': clamp,
+              'final_correction_denominator': denom,
+              'weights_sha256': hashlib.sha256(weights_path.read_bytes()).hexdigest(),
+          }
+          Path('/tmp/provenance.json').write_text(json.dumps(prov, indent=2, sort_keys=True) + '\n')
+          print(json.dumps(prov, indent=2, sort_keys=True))
+          PY
+          cp -a /tmp/cand /tmp/base
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          p = Path('/tmp/base/experiments/numba_search.py')
+          s = p.read_text()
+          s, n = re.subn(r'return score \+ correction(?: // [124])?', 'return score', s, count=1)
+          if n != 1:
+              raise SystemExit(f'classical replacement count={n}')
+          p.write_text(s)
+          PY
+          python -m py_compile /tmp/cand/agent.py /tmp/cand/experiments/*.py /tmp/base/agent.py /tmp/base/experiments/*.py
+
+      - name: Run paired fixed-node arena on fresh UHO positions
+        id: play
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="v13-scale-results/${{ matrix.name }}"; mkdir -p "$OUT"
+          /usr/bin/time -f 'ARENA_WALL_SEC=%e MAX_RSS_KB=%M' \
+            python -u arena-src/.v13/v13_arena.py /tmp/cand /tmp/base 20000 20 97000 220 \
+              match/openings/m3-uho-lichess-100-v1.epd 60 \
+            | tee "$OUT/arena.log"
+          cp /tmp/provenance.json "$OUT/provenance.json"
+          python - <<'PY'
+          import os, re
+          from pathlib import Path
+          text = Path('v13-scale-results/${{ matrix.name }}/arena.log').read_text()
+          ms = re.findall(r'^FINAL\s+([0-9.]+)\s+/\s+(\d+)\s+WDL\s+(\d+)\s+(\d+)\s+(\d+)\s*$', text, re.M)
+          if len(ms) != 1:
+              raise SystemExit(ms)
+          score,total,w,d,l = ms[0]
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'score={score}\n')
+              f.write(f'total={total}\n')
+              f.write(f'w={w}\n')
+              f.write(f'd={d}\n')
+              f.write(f'l={l}\n')
+          print({'score':score,'total':total,'WDL':(w,d,l)})
+          PY
+
+      - name: Upload scored evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: v13-scale-${{ matrix.name }}-S${{ steps.play.outputs.score }}of${{ steps.play.outputs.total }}-W${{ steps.play.outputs.w }}D${{ steps.play.outputs.d }}L${{ steps.play.outputs.l }}-${{ github.sha }}
+          path: v13-scale-results/${{ matrix.name }}
+          retention-days: 14
