@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "protocol_id": "m4-late-quiet-futility-v1-over-lmr-screening",
+  "protocol_id": "m4-late-quiet-futility-v1-over-lmr-acceptance",
   "runner": "fastchess",
-  "games": 100,
+  "games": 200,
   "time_control": "1+0.01",
   "concurrency": 1,
-  "seed": 20260930,
+  "seed": 20261002,
   "max_moves": 300,
   "opening_format": "epd",
   "openings_required": true,
@@ -15,5 +15,5 @@
   "ponder": false,
   "tablebases": false,
   "evaluation_adjudication": false,
-  "notes": "Conservative late-quiet futility over accepted LMR v3. Only depth<=2 internal scout nodes with non-pawn material and non-mate windows are eligible; only fifth-and-later quiet non-killer moves that do not give check are skipped when static_eval + 180cp*depth <= alpha."
+  "notes": "Fresh-seed 200-game acceptance of the exact frozen late-quiet futility v1 policy that screened +45.42 Elo / 95.93% LOS over accepted LMR v3. No policy or coefficient changes: depth<=2 internal scout nodes only; fifth-and-later ordinary quiet non-killer non-checking moves may be skipped when static_eval + 180cp*depth <= alpha; all tactical/check/mate/draw safety gates unchanged."
 }
