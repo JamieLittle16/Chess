@@ -20,31 +20,6 @@ jobs:
         with:
           toolchain: 1.98.1
           components: rustfmt, clippy
-      - name: Record production depth-four search identity
-        run: |
-          set -euo pipefail
-          cat > crates/chess-search/tests/aspiration_baseline_probe.rs <<'RS'
-          use chess_core::Position;
-          use chess_search::{iterative_deepening, search};
-
-          #[test]
-          fn print_baseline_depth_four_identity() {
-              let root = Position::startpos();
-              let direct = search(&root, 4);
-              let iterative = iterative_deepening(&root, 4);
-              println!(
-                  "BASELINE_DEPTH4 direct_score={} direct_move={:?} iterative_score={} iterative_move={:?} iterative_nodes={} iterative_tt_hits={}",
-                  direct.score,
-                  direct.best_move.map(|mv| mv.raw()),
-                  iterative.score,
-                  iterative.best_move.map(|mv| mv.raw()),
-                  iterative.nodes,
-                  iterative.tt_hits,
-              );
-          }
-          RS
-          cargo test -p chess-search --test aspiration_baseline_probe -- --nocapture
-          rm crates/chess-search/tests/aspiration_baseline_probe.rs
       - name: Apply isolated aspiration candidate
         run: |
           set -euo pipefail
@@ -77,6 +52,56 @@ jobs:
           REFERENCE_TARGET="$PWD/.qualification/reference-target"
           (cd .qualification/reference && CARGO_TARGET_DIR="$REFERENCE_TARGET" cargo build --release -p chess-uci)
           echo "REFERENCE_BIN=$REFERENCE_TARGET/release/chess-uci" >> "$GITHUB_ENV"
+      - name: Verify fixed-depth production parity
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import subprocess
+
+          candidate = os.environ["CANDIDATE_BIN"]
+          reference = os.environ["REFERENCE_BIN"]
+          cases = [
+              ("startpos", "position startpos", 4),
+              (
+                  "kiwipete",
+                  "position fen r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+                  4,
+              ),
+              ("en-passant", "position fen 8/8/8/3pP3/8/8/8/K6k w - d6 0 1", 4),
+              ("promotion", "position fen 7k/P7/8/8/8/8/8/K7 w - - 0 1", 4),
+              ("mate-net", "position fen 7k/5Q2/6K1/8/8/8/8/8 w - - 0 1", 4),
+          ]
+
+          def result(binary: str, position: str, depth: int):
+              commands = f"uci\nisready\n{position}\ngo depth {depth}\nquit\n"
+              proc = subprocess.run(
+                  [binary],
+                  input=commands,
+                  text=True,
+                  capture_output=True,
+                  check=True,
+                  timeout=60,
+              )
+              info = [line for line in proc.stdout.splitlines() if line.startswith("info depth ")]
+              best = [line for line in proc.stdout.splitlines() if line.startswith("bestmove ")]
+              if not info or not best:
+                  raise SystemExit(f"missing UCI result from {binary}:\n{proc.stdout}\n{proc.stderr}")
+              tokens = info[-1].split()
+              try:
+                  score_index = tokens.index("score")
+                  score = (tokens[score_index + 1], tokens[score_index + 2])
+              except (ValueError, IndexError) as exc:
+                  raise SystemExit(f"cannot parse score from {info[-1]!r}") from exc
+              return score, best[-1].split()[1]
+
+          for name, position, depth in cases:
+              cand = result(candidate, position, depth)
+              ref = result(reference, position, depth)
+              print(f"PARITY {name} depth={depth} candidate={cand} reference={ref}")
+              if cand != ref:
+                  raise SystemExit(f"aspiration production-parity mismatch for {name}: {cand} != {ref}")
+          PY
       - name: Fetch pinned Fastchess
         run: |
           set -euo pipefail
