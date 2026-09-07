@@ -1,0 +1,103 @@
+name: V13 quarter dynamic fixed-node arena
+
+on:
+  push:
+    branches:
+      - analysis/v13-quarter-dynamic-fixednodes-20260907
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  arena:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: q0-a, qply: 0, start: 0, seed: 97101 }
+          - { name: q0-b, qply: 0, start: 20, seed: 97102 }
+          - { name: q1-a, qply: 1, start: 0, seed: 97201 }
+          - { name: q1-b, qply: 1, start: 20, seed: 97202 }
+          - { name: all-a, qply: 10, start: 0, seed: 97301 }
+          - { name: all-b, qply: 10, start: 20, seed: 97302 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: analysis/v13-linear-residual
+          path: arena-src
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition dependencies
+        run: python -m pip install --disable-pip-version-check numba==0.67.0 numpy==2.5.2 chess==1.11.2
+      - name: Download matched dynamic-scale artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: v13-dynamic-scale-retrain-19940dd20d6cb38339933d176734580e22dda778
+          path: /tmp/dynamic-models
+          repository: JamieLittle16/Chess
+          run-id: 34162733288
+          github-token: ${{ github.token }}
+      - name: Reconstruct quarter control and matched dynamic candidate
+        shell: bash
+        env:
+          QPLY: ${{ matrix.qply }}
+        run: |
+          set -euo pipefail
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum -c -
+          rm -rf /tmp/base /tmp/cand
+          mkdir /tmp/base /tmp/cand
+          unzip -q /tmp/v13.zip -d /tmp/base
+          unzip -q /tmp/v13.zip -d /tmp/cand
+          patch /tmp/base/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          patch /tmp/cand/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          DIR=/tmp/base python - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path(os.environ['DIR'])/'experiments/numba_search.py'; s=p.read_text()
+          old='    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          new='    correction = correction // 4\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          assert s.count(old)==1,s.count(old)
+          p.write_text(s.replace(old,new,1))
+          PY
+          python scripts/patch_v13_dynamic_runtime.py /tmp/cand/experiments/numba_search.py --qply-max "$QPLY"
+          python - <<'PY'
+          import json,re
+          from pathlib import Path
+          model=json.loads(Path('/tmp/dynamic-models/dynamic-quarter-model.json').read_text())
+          p=Path('/tmp/cand/experiments/numba_search.py'); s=p.read_text()
+          s,n1=re.subn(r'RESIDUAL_SCALE_NUM\s*=\s*\d+','RESIDUAL_SCALE_NUM = 1',s,count=1)
+          s,n2=re.subn(r'RESIDUAL_SCALE_DEN\s*=\s*\d+','RESIDUAL_SCALE_DEN = 4',s,count=1)
+          s,n3=re.subn(r'DYNAMIC_BIAS_Q\s*=\s*-?\d+',f'DYNAMIC_BIAS_Q = {model["dynamic_bias_q"]}',s,count=1)
+          s,n4=re.subn(r'DYNAMIC_CLAMP_Q\s*=\s*\d+\s*\*\s*DYNAMIC_Q',f'DYNAMIC_CLAMP_Q = {model["dynamic_clamp_cp"]} * DYNAMIC_Q',s,count=1)
+          weights=', '.join(str(int(x)) for x in model['dynamic_weights_q'])
+          pattern=r'DYNAMIC_WEIGHTS_Q\s*=\s*np\.array\(\s*\(.*?\),\s*dtype=np\.int16,\s*\)'
+          repl=f'DYNAMIC_WEIGHTS_Q = np.array(\n    ({weights}),\n    dtype=np.int16,\n)'
+          s,n5=re.subn(pattern,repl,s,count=1,flags=re.S)
+          assert (n1,n2,n3,n4,n5)==(1,1,1,1,1),(n1,n2,n3,n4,n5)
+          p.write_text(s)
+          print(model)
+          PY
+          python -m py_compile /tmp/base/agent.py /tmp/base/experiments/*.py /tmp/cand/agent.py /tmp/cand/experiments/*.py
+      - name: Run fixed-node paired arena
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p v13-results
+          /usr/bin/time -f 'ARENA_WALL_SEC=%e MAX_RSS_KB=%M' \
+            python -u arena-src/.v13/v13_arena.py /tmp/cand /tmp/base 20000 20 '${{ matrix.seed }}' 220 \
+              match/openings/m3-uho-lichess-100-v1.epd '${{ matrix.start }}' \
+            | tee 'v13-results/${{ matrix.name }}.log'
+          grep '^FINAL ' 'v13-results/${{ matrix.name }}.log'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v13-quarter-dynamic-${{ matrix.name }}-${{ github.sha }}
+          path: v13-results/
+          retention-days: 7
