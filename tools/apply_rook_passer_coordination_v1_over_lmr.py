@@ -67,7 +67,7 @@ text = replace_once(
             Color::White => usize::from(pawn.rank()),
             Color::Black => usize::from(7 - pawn.rank()),
         };
-        if relative_rank < 3 || relative_rank >= 7 {
+        if !(3..7).contains(&relative_rank) {
             continue;
         }
 
