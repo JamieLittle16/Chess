@@ -1,0 +1,134 @@
+name: M5 joint tapered PSQT v1 screen
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  screen:
+    if: github.head_ref == 'm5/joint-tapered-psqt-v1-screen'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: Strict correctness gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+
+      - name: Verify accepted reference search identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset CHESS_EXPERIMENTAL_JOINT_TAPERED_PSQT_V1
+          cargo run --quiet --release -p chess-bench | tee reference-bench.txt
+          grep -Fx 'signature 0x4c3bbe8701fbbb68' reference-bench.txt
+
+      - name: Build one shared release engine binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release -p chess-uci
+          test -x target/release/chess-uci
+          sha256sum target/release/chess-uci | tee engine.sha256
+
+      - name: Record candidate deterministic drift
+        shell: bash
+        env:
+          CHESS_EXPERIMENTAL_JOINT_TAPERED_PSQT_V1: '1'
+        run: |
+          set -euo pipefail
+          cargo run --quiet --release -p chess-bench | tee candidate-bench.txt
+
+      - name: Build pinned Fastchess 1.8.2-alpha
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = 'f618e34540f94f4719ad3817950618dabe441318'
+          make -C .qualification/fastchess-src -j2
+          test -x .qualification/fastchess-src/fastchess
+
+      - name: Create same-binary candidate and reference launchers
+        shell: bash
+        run: |
+          set -euo pipefail
+          ENGINE="$PWD/target/release/chess-uci"
+          mkdir -p .qualification/launchers .qualification/screen
+          cat > .qualification/launchers/candidate.sh <<EOF
+          #!/usr/bin/env bash
+          export CHESS_EXPERIMENTAL_JOINT_TAPERED_PSQT_V1=1
+          exec '$ENGINE'
+          EOF
+          cat > .qualification/launchers/reference.sh <<EOF
+          #!/usr/bin/env bash
+          unset CHESS_EXPERIMENTAL_JOINT_TAPERED_PSQT_V1
+          exec '$ENGINE'
+          EOF
+          chmod +x .qualification/launchers/candidate.sh .qualification/launchers/reference.sh
+          sha256sum .qualification/launchers/candidate.sh .qualification/launchers/reference.sh | tee launchers.sha256
+
+      - name: Run frozen paired 100-game screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/.qualification/launchers/candidate.sh" name=joint-tapered-psqt-v1 option.Hash=32 \
+            -engine cmd="$PWD/.qualification/launchers/reference.sh" name=classical option.Hash=32 \
+            -each tc=1+0.01 \
+            -openings file=match/openings/m3-uho-lichess-100-v1.epd format=epd order=random \
+            -srand 20261025 \
+            -rounds 50 -repeat -concurrency 1 -maxmoves 300 \
+            -ratinginterval 20 \
+            -pgnout file=.qualification/screen/games.pgn notation=uci append=false nodes=true nps=true \
+            -log file=.qualification/screen/uci.log level=info engine=true append=false \
+            | tee .qualification/screen/fastchess.stdout.log
+
+      - name: Record immutable experiment identities
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/screen
+          cp engine.sha256 .qualification/screen/engine.sha256 || true
+          cp launchers.sha256 .qualification/screen/launchers.sha256 || true
+          cp reference-bench.txt .qualification/screen/reference-bench.txt || true
+          cp candidate-bench.txt .qualification/screen/candidate-bench.txt || true
+          cat > .qualification/screen/evidence.txt <<EOF
+          experiment=joint-tapered-psqt-v1
+          base_main=2a6172aaf460cc6c8c7811c4dc0c9e2ceed6205b
+          teacher_records=2500
+          teacher_train=2029
+          teacher_validation=228
+          teacher_holdout=243
+          teacher_corpus_sha256=0fe794272d2a8198f82dd81894b3248ad2dfcc8be75595c155db4753556ea2da
+          ridge_alpha=100
+          fitted_coefficients=423
+          games=100
+          tc=1+0.01
+          seed=20261025
+          opening_sha256=599a45efb446e91952d13e79bc7fec8de319e332036a54552a3e8e4af91f9cf1
+          reference_signature=0x4c3bbe8701fbbb68
+          fastchess_commit=f618e34540f94f4719ad3817950618dabe441318
+          EOF
+
+      - name: Upload complete screen evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m5-joint-tapered-psqt-v1-${{ github.sha }}
+          path: .qualification/screen/
+          retention-days: 30
