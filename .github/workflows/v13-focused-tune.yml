@@ -1,9 +1,9 @@
-name: V13 focused residual tuning
+name: V13 final disjoint equal-node validation
 
 on:
   push:
     branches:
-      - analysis/v13-focused-tune-20260907
+      - analysis/v13-final-equal-node-20260907
   workflow_dispatch:
 
 permissions:
@@ -11,29 +11,18 @@ permissions:
   actions: read
 
 jobs:
-  tune:
+  validate:
     runs-on: ubuntu-24.04
     timeout-minutes: 18
     strategy:
       fail-fast: false
       matrix:
         include:
-          - {name: s60a40-d4-c400, static_bp: 6000, alpha_bp: 4000, diverse_bp: 0, clamp: 400, denom: 4}
-          - {name: s65a35-d4-c400, static_bp: 6500, alpha_bp: 3500, diverse_bp: 0, clamp: 400, denom: 4}
           - {name: s70a30-d3-c400, static_bp: 7000, alpha_bp: 3000, diverse_bp: 0, clamp: 400, denom: 3}
-          - {name: s70a30-d4-c300, static_bp: 7000, alpha_bp: 3000, diverse_bp: 0, clamp: 300, denom: 4}
-          - {name: s70a30-d4-c400, static_bp: 7000, alpha_bp: 3000, diverse_bp: 0, clamp: 400, denom: 4}
-          - {name: s70a30-d4-c600, static_bp: 7000, alpha_bp: 3000, diverse_bp: 0, clamp: 600, denom: 4}
-          - {name: s70a30-d4-c0, static_bp: 7000, alpha_bp: 3000, diverse_bp: 0, clamp: 0, denom: 4}
-          - {name: s70a30-d5-c400, static_bp: 7000, alpha_bp: 3000, diverse_bp: 0, clamp: 400, denom: 5}
-          - {name: s75a25-d4-c400, static_bp: 7500, alpha_bp: 2500, diverse_bp: 0, clamp: 400, denom: 4}
+          - {name: s70a15d15-d3-c400, static_bp: 7000, alpha_bp: 1500, diverse_bp: 1500, clamp: 400, denom: 3}
           - {name: s80a20-d4-c400, static_bp: 8000, alpha_bp: 2000, diverse_bp: 0, clamp: 400, denom: 4}
           - {name: static-d3-c400, static_bp: 10000, alpha_bp: 0, diverse_bp: 0, clamp: 400, denom: 3}
-          - {name: static-d4-c400, static_bp: 10000, alpha_bp: 0, diverse_bp: 0, clamp: 400, denom: 4}
-          - {name: static-d5-c400, static_bp: 10000, alpha_bp: 0, diverse_bp: 0, clamp: 400, denom: 5}
-          - {name: s70a15d15-d2-c400, static_bp: 7000, alpha_bp: 1500, diverse_bp: 1500, clamp: 400, denom: 2}
-          - {name: s70a15d15-d3-c400, static_bp: 7000, alpha_bp: 1500, diverse_bp: 1500, clamp: 400, denom: 3}
-          - {name: s70a15d15-d2-c600, static_bp: 7000, alpha_bp: 1500, diverse_bp: 1500, clamp: 600, denom: 2}
+          - {name: s70a30-d4-c400, static_bp: 7000, alpha_bp: 3000, diverse_bp: 0, clamp: 400, denom: 4}
     steps:
       - uses: actions/checkout@v4
       - name: Check out exact fixed-node arena implementation
@@ -133,21 +122,21 @@ jobs:
           p.write_text(s)
           PY
           python -m py_compile /tmp/cand/agent.py /tmp/cand/experiments/*.py /tmp/base/agent.py /tmp/base/experiments/*.py
-      - name: Run fresh paired fixed-node arena
+      - name: Run third disjoint paired fixed-node arena
         id: play
         shell: bash
         run: |
           set -euo pipefail
-          OUT="v13-focused-results/${{ matrix.name }}"; mkdir -p "$OUT"
+          OUT="v13-final-equal-node/${{ matrix.name }}"; mkdir -p "$OUT"
           /usr/bin/time -f 'ARENA_WALL_SEC=%e MAX_RSS_KB=%M' \
             python -u arena-src/.v13/v13_arena.py /tmp/cand /tmp/base 20000 20 97000 220 \
-              match/openings/m3-uho-lichess-100-v1.epd 80 \
+              match/openings/m3-uho-lichess-100-v1.epd 40 \
             | tee "$OUT/arena.log"
           cp /tmp/provenance.json "$OUT/provenance.json"
           python - <<'PY'
           import os,re
           from pathlib import Path
-          t=Path('v13-focused-results/${{ matrix.name }}/arena.log').read_text()
+          t=Path('v13-final-equal-node/${{ matrix.name }}/arena.log').read_text()
           m=re.findall(r'^FINAL\s+([0-9.]+)\s+/\s+(\d+)\s+WDL\s+(\d+)\s+(\d+)\s+(\d+)\s*$',t,re.M)
           if len(m)!=1: raise SystemExit(m)
           score,total,w,d,l=m[0]
@@ -158,6 +147,6 @@ jobs:
       - name: Upload scored evidence
         uses: actions/upload-artifact@v4
         with:
-          name: v13-focused-${{ matrix.name }}-S${{ steps.play.outputs.score }}of${{ steps.play.outputs.total }}-W${{ steps.play.outputs.w }}D${{ steps.play.outputs.d }}L${{ steps.play.outputs.l }}-${{ github.sha }}
-          path: v13-focused-results/${{ matrix.name }}
+          name: v13-final-equal-${{ matrix.name }}-S${{ steps.play.outputs.score }}of${{ steps.play.outputs.total }}-W${{ steps.play.outputs.w }}D${{ steps.play.outputs.d }}L${{ steps.play.outputs.l }}-${{ github.sha }}
+          path: v13-final-equal-node/${{ matrix.name }}
           retention-days: 14
