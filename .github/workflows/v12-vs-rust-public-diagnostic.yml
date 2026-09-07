@@ -1,0 +1,192 @@
+name: V12 vs Rust public diagnostic
+
+on:
+  push:
+    branches:
+      - analysis/v12-vs-rust-public-20260907
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostic:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: fast-a
+            start: 0
+            count: 6
+            base_ms: 2500
+            inc_ms: 50
+            nodes: 10000
+          - name: fast-b
+            start: 6
+            count: 6
+            base_ms: 2500
+            inc_ms: 50
+            nodes: 10000
+          - name: fast-c
+            start: 12
+            count: 6
+            base_ms: 2500
+            inc_ms: 50
+            nodes: 10000
+          - name: fast-d
+            start: 18
+            count: 6
+            base_ms: 2500
+            inc_ms: 50
+            nodes: 10000
+          - name: slow-a
+            start: 24
+            count: 3
+            base_ms: 8000
+            inc_ms: 100
+            nodes: 25000
+          - name: slow-b
+            start: 27
+            count: 3
+            base_ms: 8000
+            inc_ms: 100
+            nodes: 25000
+
+    steps:
+      - name: Checkout pinned diagnostic branch
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.98.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python runtime and Stockfish
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install chess==1.11.2 numpy==2.5.2 numba==0.67.0
+          sudo apt-get update -qq
+          sudo apt-get install -y stockfish
+
+      - name: Reconstruct exact uploaded V12 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .analysis/v11_chunks_*.b64 | base64 -d > /tmp/v11-original.zip
+          echo 'fd06e9f5718b9af3be3b13f8d6b67f92018b43ce2f2cb991063d2a281310d0b8  /tmp/v11-original.zip' | sha256sum -c -
+          rm -rf /tmp/v12
+          mkdir -p /tmp/v12
+          unzip -q /tmp/v11-original.zip -d /tmp/v12
+
+          # First make the explicit root-only V11 submission cleanup. This is semantics-preserving
+          # relative to the strongest measured V11 and gives the exact base against which V12 was built.
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('/tmp/v12/experiments/numba_search.py')
+          s = p.read_text()
+          old = '''        # Conservative verified LMR. Only an immediate seventh-rank promotion threat is exempt;\n        # sixth-rank pushes are ordinary quiets again. Checks are still never reduced, and every\n        # reduced alpha improvement is verified at full depth.\n        promotion_threat = _quiet_pawn_relative_rank(board, move) == 6\n        lmr_candidate = (\n            depth >= 3\n            and index >= 3\n            and not checked\n            and not promotion_threat\n            and order_score < 5_040_000\n        )\n        gives_check = _state_in_check(board, -side, eval_stack[ply + 1]) if lmr_candidate else False\n        reduce = lmr_candidate and not gives_check\n        search_depth = depth - 2 if reduce else depth - 1\n        if promotion_threat and depth == 1:\n            # Repair exactly the V10 horizon asymmetry. At depth 1 this quiet push would otherwise\n            # fall directly into qsearch; keep one normal-search ply so the defender may choose ANY\n            # legal reply. Depth >= 2 already contains that defender reply and is not extended.\n            search_depth = depth\n'''
+          new = '''        # Conservative verified LMR. Promotion verification is intentionally ROOT-ONLY:\n        # enabling the seventh-rank extension throughout the recursive tree consumed too much\n        # search budget and regressed strength. Recursive quiet pawn pushes therefore follow the\n        # same proven V11 reduction policy as other quiet moves. Checks are still never reduced,\n        # and every reduced alpha improvement is verified at full depth.\n        lmr_candidate = (\n            depth >= 3\n            and index >= 3\n            and not checked\n            and order_score < 5_040_000\n        )\n        gives_check = _state_in_check(board, -side, eval_stack[ply + 1]) if lmr_candidate else False\n        reduce = lmr_candidate and not gives_check\n        search_depth = depth - 2 if reduce else depth - 1\n'''
+          assert old in s
+          s = s.replace(old, new, 1)
+          old = '''        if alpha >= beta:\n            # A seventh-rank threat already has its dedicated priority/extension and must not occupy\n            # a generic killer slot.\n            if not promotion_threat and order_score < 5_590_000:\n'''
+          new = '''        if alpha >= beta:\n            # Preserve the proven V11 recursive killer policy. Root-only promotion verification\n            # deliberately does not change recursive killer semantics.\n            if order_score < 5_590_000:\n'''
+          assert old in s
+          s = s.replace(old, new, 1)
+          old = '''        if depth == 1 and _quiet_pawn_relative_rank(board, move) == 6:\n            # Root preferred moves live in the 10M ordering band, so classify the rare horizon case\n            # directly rather than inferring it from order_score.\n            child_depth = depth\n'''
+          new = '''        if depth == 1 and _quiet_pawn_relative_rank(board, move) == 6:\n            # Deliberately root-only: verify an immediate quiet seventh-rank push with one complete\n            # defender reply, but do not recursively extend analogous pushes deeper in the tree.\n            # This keeps the useful V10 horizon repair without globally biasing search effort.\n            child_depth = depth\n'''
+          assert old in s
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+          echo '3191c46f19a1c0b159de0fe5146bbc0bd3dcb74755619838084b3f87f299331f  /tmp/v12/experiments/numba_search.py' | sha256sum -c -
+
+          cd /tmp/v12
+          patch -p0 < "$GITHUB_WORKSPACE/.analysis/v11_to_v12_numba_search.patch"
+          echo 'df346b21be42832a0ae97e7faa15953ab460f0387fb0358961651466557ebde8  agent.py' | sha256sum -c -
+          echo '1d3864fe0c0da633feea0e383c9d1d65f688f57cf56887ce78d898d72c0ce10f  experiments/numba_core.py' | sha256sum -c -
+          echo '2551275ca1767610d2546683b75aaae1bee794d400d7c082efcdf7b7ea2be2fd  experiments/numba_search.py' | sha256sum -c -
+          python -m py_compile agent.py experiments/__init__.py experiments/numba_core.py experiments/numba_search.py
+
+      - name: Build pinned Rust UCI engine
+        run: cargo build --release -p chess-uci
+
+      - name: Smoke-test engines
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUST_ENGINE=target/release/chess-uci
+          test -x "$RUST_ENGINE"
+          printf 'uci\nisready\nquit\n' | "$RUST_ENGINE" | tee /tmp/rust-uci.txt
+          grep -q 'uciok' /tmp/rust-uci.txt
+          grep -q 'readyok' /tmp/rust-uci.txt
+          STOCKFISH="$(command -v stockfish || true)"
+          if [ -z "$STOCKFISH" ] && [ -x /usr/games/stockfish ]; then STOCKFISH=/usr/games/stockfish; fi
+          test -x "$STOCKFISH"
+          /usr/bin/time -f 'v12_init_wall_s=%e v12_init_maxrss_kb=%M' -o /tmp/v12-init.txt \
+            python tools/v9_agent_runner.py /tmp/v12 <<'EOF' >/tmp/v12-smoke.json
+          {"fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1","time_left_ms":2000}
+          EOF
+          cat /tmp/v12-init.txt
+          cat /tmp/v12-smoke.json
+          grep -q '"ready": true' /tmp/v12-smoke.json
+          grep -q '"move":' /tmp/v12-smoke.json
+
+      - name: Run paired games and Stockfish diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          STOCKFISH="$(command -v stockfish || true)"
+          if [ -z "$STOCKFISH" ]; then STOCKFISH=/usr/games/stockfish; fi
+          OUT="analysis-results/${{ matrix.name }}"
+          mkdir -p "$OUT"
+          python tools/v9_rust_diagnostic.py \
+            --agent /tmp/v12 \
+            --runner tools/v9_agent_runner.py \
+            --engine target/release/chess-uci \
+            --stockfish "$STOCKFISH" \
+            --openings match/openings/m3-uho-lichess-100-v1.epd \
+            --opening-start ${{ matrix.start }} \
+            --opening-count ${{ matrix.count }} \
+            --base-ms ${{ matrix.base_ms }} \
+            --increment-ms ${{ matrix.inc_ms }} \
+            --analysis-nodes ${{ matrix.nodes }} \
+            --out-dir "$OUT" | tee "$OUT/run.log"
+
+          {
+            echo "rust_sha=44c1e16d3713cdca1ff1bd71f7596ef3b5804037"
+            echo "workflow_sha=$GITHUB_SHA"
+            echo "candidate=Little-Gambit-V12-SUBMISSION-FINAL.zip"
+            echo "uploaded_v12_zip_sha256=250e67e452cd036f66aefa8aaf72dbdaad9c41104938ffc73d8d897ce67c02d1"
+            echo "v12_agent_sha256=df346b21be42832a0ae97e7faa15953ab460f0387fb0358961651466557ebde8"
+            echo "v12_core_sha256=1d3864fe0c0da633feea0e383c9d1d65f688f57cf56887ce78d898d72c0ce10f"
+            echo "v12_search_sha256=2551275ca1767610d2546683b75aaae1bee794d400d7c082efcdf7b7ea2be2fd"
+            echo "shard=${{ matrix.name }}"
+            echo "opening_start=${{ matrix.start }}"
+            echo "opening_count=${{ matrix.count }}"
+            echo "base_ms=${{ matrix.base_ms }}"
+            echo "increment_ms=${{ matrix.inc_ms }}"
+            echo "analysis_nodes=${{ matrix.nodes }}"
+            cat /tmp/v12-init.txt || true
+            python --version
+            rustc --version
+            "$STOCKFISH" <<<'quit' | head -n 1 || true
+            python -m pip show chess numpy numba | grep -E '^(Name|Version):'
+          } > "$OUT/provenance.txt"
+
+      - name: Upload diagnostic shard
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v12-vs-rust-${{ matrix.name }}
+          path: analysis-results/${{ matrix.name }}
+          if-no-files-found: error
+          retention-days: 7
