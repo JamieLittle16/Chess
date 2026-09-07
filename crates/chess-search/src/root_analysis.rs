@@ -137,7 +137,7 @@ mod tests {
         assert_eq!(position, original);
         assert!(candidates.windows(2).all(|pair| pair[0].score >= pair[1].score));
         for (index, candidate) in candidates.iter().enumerate() {
-            assert!(legal.iter().any(|mv| *mv == candidate.mv));
+            assert!(legal.contains(&candidate.mv));
             assert!(!candidates[..index].iter().any(|seen| seen.mv == candidate.mv));
         }
     }
