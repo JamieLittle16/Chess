@@ -208,8 +208,7 @@ fn analyze_side(
     for square in position.pieces(color, PieceKind::Rook) {
         let attacks = rook_attacks(square, occupied);
         result.attacks = result.attacks | attacks;
-        result.values[SAFE_MOBILITY_ROOK] +=
-            (attacks.raw() & safe_target_mask).count_ones() as i32;
+        result.values[SAFE_MOBILITY_ROOK] += (attacks.raw() & safe_target_mask).count_ones() as i32;
         if relative_rank(color, square.rank()) == 6 {
             result.values[ROOK_SEVENTH] += 1;
         }
@@ -252,14 +251,16 @@ fn analyze_side(
         }
     }
 
-    result.values[PAWN_THREATS] =
-        (own_pawn_attacks & position.pieces(color.opposite(), PieceKind::Knight)).count() as i32 * 3
-            + (own_pawn_attacks & position.pieces(color.opposite(), PieceKind::Bishop)).count() as i32
-                * 3
-            + (own_pawn_attacks & position.pieces(color.opposite(), PieceKind::Rook)).count() as i32
-                * 5
-            + (own_pawn_attacks & position.pieces(color.opposite(), PieceKind::Queen)).count() as i32
-                * 9;
+    result.values[PAWN_THREATS] = (own_pawn_attacks
+        & position.pieces(color.opposite(), PieceKind::Knight))
+    .count() as i32
+        * 3
+        + (own_pawn_attacks & position.pieces(color.opposite(), PieceKind::Bishop)).count() as i32
+            * 3
+        + (own_pawn_attacks & position.pieces(color.opposite(), PieceKind::Rook)).count() as i32
+            * 5
+        + (own_pawn_attacks & position.pieces(color.opposite(), PieceKind::Queen)).count() as i32
+            * 9;
 
     result.values[CENTRAL_PAWN_CONTROL] = (own_pawn_attacks.raw() & CENTRAL_16).count_ones() as i32;
     result.values[CENTRAL_OCCUPANCY] = (own_occupied.raw() & CENTRAL_16).count_ones() as i32;
@@ -292,9 +293,7 @@ fn pawn_attack_union(position: &Position, color: Color) -> Bitboard {
 
 #[inline]
 fn is_passed_pawn(square: Square, color: Color, enemy_pawns: Bitboard) -> bool {
-    enemy_pawns.raw()
-        & PASSED_PAWN_MASKS[color.index()][usize::from(square.index())]
-        == 0
+    enemy_pawns.raw() & PASSED_PAWN_MASKS[color.index()][usize::from(square.index())] == 0
 }
 
 const fn generate_passed_pawn_masks() -> [[u64; 64]; 2] {
