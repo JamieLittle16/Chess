@@ -60,6 +60,20 @@ jobs:
             --seed 123
           cmp "$TMP/run-a/nnue-32-v1.nnue" "$TMP/run-b/nnue-32-v1.nnue"
           cmp "$TMP/run-a/training-metadata.json" "$TMP/run-b/training-metadata.json"
-          OUTPUT=$(cargo run --quiet -p chess-eval --example nnue_smoke -- "$TMP/run-a/nnue-32-v1.nnue")
-          printf '%s\n' "$OUTPUT"
-          grep -q '^hidden=32 startpos_score=' <<< "$OUTPUT"
+
+          RUST_OUTPUT=$(cargo run --quiet -p chess-eval --example nnue_smoke -- "$TMP/run-a/nnue-32-v1.nnue")
+          printf '%s\n' "$RUST_OUTPUT"
+          grep -q '^hidden=32 smoke_score=' <<< "$RUST_OUTPUT"
+
+          PY_FEATURES=$(PYTHONPATH=scripts python - <<'PY'
+          import chess
+          from train_nnue_reference import active_features
+
+          board = chess.Board("2k5/5p2/8/3N4/6b1/1P6/8/4K3 w - - 0 1")
+          for label, color in (("white_features", chess.WHITE), ("black_features", chess.BLACK)):
+              features = active_features(board, color)
+              print(label + "=" + ",".join(str(feature) for feature in features))
+          PY
+          )
+          RUST_FEATURES=$(grep '_features=' <<< "$RUST_OUTPUT")
+          test "$RUST_FEATURES" = "$PY_FEATURES"
