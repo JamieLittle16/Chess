@@ -1,0 +1,72 @@
+name: Round51 Stockfish Audit
+
+on:
+  push:
+    branches:
+      - analysis/round51-stockfish
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y stockfish
+      - name: Audit Little Gambit moves
+        run: |
+          python3 - <<'PY'
+          import os,re,subprocess
+          eng='/usr/games/stockfish' if os.path.exists('/usr/games/stockfish') else 'stockfish'
+          start='r1bqk2r/pp1n1ppp/2n1p3/2bpP3/5P2/2NB1N2/PPP3PP/R1BQK2R b KQkq - 1 8'
+          game=[
+            'f7f6','d3b5','a7a6','b5c6','b7c6','c1d2','g7g5','e5f6','g5f4','f6f7','e8f7','d2f4','h7h5','f3e5','d7e5','f4e5',
+            'h8h6','d1f3','f7e8','e1c1','d8h4','h1f1','h6h7','f3d3','h4g5','e5f4','g5f5','d3f5','e6f5','d1e1','h7e7','c1b1',
+            'a6a5','c3a4','c5a7','e1e7','e8e7','f4d2','e7e6','d2a5','c8a6','f1e1','e6d6','a4c3','h5h4','a5b4','c6c5','b4a5',
+            'a8g8','e1g1','d5d4','c3d1','c5c4','a5e1','h4h3','e1g3','g8g3','h2g3','d4d3','g2h3','a7g1','c2d3','c4d3','a3a4',
+            'd6c5','g3g4','f5f4','d1c3','c5d4','g4g5','f4f3','c3d1','d3d2','b1c2','g1e3','b2b3','a6d3','c2b2','f3f2','b3b4',
+            'f2f1q','h3h4','f1d1','a4a5','d1a4','h4h5','d2d1n'
+          ]
+          labels=['8...f6','9...a6','10...bxc6','11...g5','12...gxf4','13...Kxf7','14...h5','15...Nxe5','16...Rh6','17...Ke8','18...Qh4','19...Rh7','20...Qg5+','21...Qf5','22...exf5','23...Re7','24...a5','25...Ba7','26...Kxe7','27...Ke6','28...Ba6','29...Kd6','30...h4','31...c5','32...Rg8','33...d4','34...c4','35...h3','36...Rxg3','37...d3','38...Bxg1','39...cxd3','40...Kc5','41...f4','42...Kd4','43...f3','44...d2','45...Be3','46...Bd3+','47...f2','48...f1=Q','49...Qxd1','50...Qa4','51...d1=N#']
+          p=subprocess.Popen([eng],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1)
+          def c(x): p.stdin.write(x+'\n');p.stdin.flush()
+          def wait(x):
+              while True:
+                  line=p.stdout.readline()
+                  if not line: raise RuntimeError('engine exited')
+                  if line.strip()==x: return
+          c('uci');wait('uciok');c('setoption name Threads value 1');c('setoption name Hash value 128');c('isready');wait('readyok')
+          sr=re.compile(r' score (cp|mate) (-?\d+)')
+          def run(prefix,only=None,nodes=350000):
+              c('setoption name Clear Hash')
+              cmd='position fen '+start
+              if prefix: cmd+=' moves '+' '.join(prefix)
+              c(cmd)
+              g=f'go nodes {nodes}'+((' searchmoves '+only) if only else '')
+              c(g); last=None;best=None;pv=''
+              while True:
+                  line=p.stdout.readline().strip()
+                  if line.startswith('info ') and ' score ' in line:
+                      m=sr.search(line)
+                      if m:
+                          last=(m.group(1),int(m.group(2)))
+                          q=re.search(r' pv (.+)$',line)
+                          if q: pv=q.group(1)
+                  elif line.startswith('bestmove '):
+                      best=line.split()[1];break
+              return last,best,pv
+          prefix=[]; bi=0
+          print('IDX LABEL PLAYED BEST BEST_SCORE PLAY_SCORE PV')
+          for ply,mv in enumerate(game):
+              if ply%2==0:  # black to move at start, so even ply is Little Gambit
+                  best_score,best,pv=run(prefix)
+                  play_score,_,_=run(prefix,mv)
+                  print(bi+1,labels[bi],mv,best,best_score,play_score,pv)
+                  bi+=1
+              prefix.append(mv)
+          c('quit')
+          PY
