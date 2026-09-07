@@ -7,6 +7,10 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+search-trace = ["chess-engine/search-trace"]
+
 [dependencies]
 chess-core = { path = "../chess-core" }
 chess-engine = { path = "../chess-engine" }

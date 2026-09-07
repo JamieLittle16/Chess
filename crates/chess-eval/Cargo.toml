@@ -7,6 +7,12 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+# Offline-only instrumentation. Production search never enables this feature, so the observer and
+# its environment/file machinery are absent from tournament binaries.
+search-trace = []
+
 [dependencies]
 chess-core = { path = "../chess-core" }
 
