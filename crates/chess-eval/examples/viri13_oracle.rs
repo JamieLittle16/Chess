@@ -4,7 +4,10 @@
 //! feature mapping and integer inference against the MIT-licensed Viridithas v13 executable before
 //! any search integration is attempted.
 
-use std::{env, fs, path::Path};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 use chess_core::{Color, PieceKind, Position, Square};
 
@@ -194,7 +197,7 @@ fn feature_index(
     } else {
         square
     };
-    let relative_color = usize::from(piece_color != perspective);
+    let relative_color = if piece_color == perspective { 0 } else { 1 };
     relative_color * 6 * 64 + kind.index() * 64 + usize::from(square.index())
 }
 
@@ -202,7 +205,7 @@ fn main() -> Result<(), String> {
     let mut args = env::args_os().skip(1);
     let network = args
         .next()
-        .map(Path::new)
+        .map(PathBuf::from)
         .ok_or_else(|| "usage: viri13_oracle <gestalt-b840.nnue> '<FEN>'".to_owned())?;
     let fen = args
         .next()
@@ -214,7 +217,7 @@ fn main() -> Result<(), String> {
         .into_string()
         .map_err(|_| "FEN is not valid UTF-8".to_owned())?;
     let position = Position::from_fen(&fen).map_err(|error| format!("invalid FEN: {error}"))?;
-    let network = Network::load(network)?;
+    let network = Network::load(&network)?;
     println!("{}", network.evaluate(&position)?);
     Ok(())
 }
