@@ -1,0 +1,401 @@
+name: V14-A main history confirmation
+
+on:
+  push:
+    branches: [analysis/v14-main-history-confirm-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fresh-fixed-node:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Reconstruct immutable control and candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/reconstruct_v13_final.sh /tmp/v13-control
+          cp -a /tmp/v13-control /tmp/v14-a
+          python scripts/patch_v14_main_history.py /tmp/v14-a/experiments/numba_search.py
+          python -m py_compile /tmp/v14-a/agent.py /tmp/v14-a/experiments/*.py
+          cmp /tmp/v13-control/agent.py /tmp/v14-a/agent.py
+          cmp /tmp/v13-control/experiments/numba_core.py /tmp/v14-a/experiments/numba_core.py
+          cmp /tmp/v13-control/experiments/v13_residual.i16 /tmp/v14-a/experiments/v13_residual.i16
+
+      - name: Fresh paired fixed-node replication
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p confirmation/fixed
+          cat >/tmp/v14_fixed_worker.py <<'PY'
+          import json
+          import sys
+          import chess
+          import numpy as np
+          from experiments.numba_core import encode_position, move_to_uci
+          from experiments.numba_search import iterative_search_stateful, position_key
+
+          def key_for_fen(fen):
+              board = chess.Board(fen)
+              encoded = encode_position(board)
+              return int(position_key(encoded.board, encoded.side, encoded.castling, encoded.ep_square))
+
+          for line in sys.stdin:
+              query = json.loads(line)
+              board = chess.Board(query['fen'])
+              encoded = encode_position(board)
+              prior = query.get('prior', [])
+              keep = min(board.halfmove_clock, len(prior))
+              if keep:
+                  history = np.asarray([key_for_fen(f) for f in prior[-keep:]], dtype=np.uint64)
+              else:
+                  history = np.empty(0, dtype=np.uint64)
+              out = iterative_search_stateful(
+                  encoded.board, encoded.side, encoded.castling, encoded.ep_square,
+                  board.halfmove_clock, history, len(history), int(query['nodes'])
+              )
+              print(json.dumps({
+                  'uci': move_to_uci(int(out[0])), 'score': int(out[1]),
+                  'depth': int(out[2]), 'nodes': int(out[3]),
+              }), flush=True)
+          PY
+
+          python - <<'PY'
+          import json
+          import math
+          import os
+          import subprocess
+          import sys
+          from collections import Counter
+          import chess
+
+          all_openings = [
+              x.strip() for x in open('match/openings/m3-uho-lichess-100-v1.epd')
+              if x.strip() and not x.startswith('#')
+          ]
+          openings = all_openings[32:64]
+          assert len(openings) == 32
+          NODES = 12_000
+          MAX_PLIES = 160
+
+          def start(path):
+              env = os.environ.copy()
+              env['PYTHONPATH'] = path
+              return subprocess.Popen(
+                  [sys.executable, '/tmp/v14_fixed_worker.py'],
+                  stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                  text=True, bufsize=1, env=env,
+              )
+
+          def ask(proc, board, prior):
+              proc.stdin.write(json.dumps({
+                  'fen': board.fen(), 'prior': prior, 'nodes': NODES,
+              }) + '\n')
+              proc.stdin.flush()
+              reply = json.loads(proc.stdout.readline())
+              move = chess.Move.from_uci(reply['uci'])
+              assert move in board.legal_moves, (board.fen(), reply)
+              return move
+
+          control = start('/tmp/v13-control')
+          candidate = start('/tmp/v14-a')
+
+          def play(fen, candidate_white):
+              board = chess.Board(fen)
+              prior = []
+              for _ in range(MAX_PLIES):
+                  use_candidate = board.turn == candidate_white
+                  move = ask(candidate if use_candidate else control, board, prior)
+                  prior.append(board.fen())
+                  board.push(move)
+                  if board.is_game_over(claim_draw=True):
+                      result = board.result(claim_draw=True)
+                      if result == '1/2-1/2':
+                          return 0.5, result, board.ply()
+                      won = (result == '1-0') == candidate_white
+                      return (1.0 if won else 0.0), result, board.ply()
+              return 0.5, 'max-ply-draw', board.ply()
+
+          rows = []
+          pair_scores = []
+          try:
+              warm = chess.Board(openings[0])
+              ask(control, warm, [])
+              ask(candidate, warm, [])
+              for opening_index, fen in enumerate(openings, start=32):
+                  pair = 0.0
+                  for candidate_white in (True, False):
+                      score, result, plies = play(fen, candidate_white)
+                      pair += score
+                      row = {
+                          'opening': opening_index,
+                          'candidate_white': candidate_white,
+                          'candidate_score': score,
+                          'result': result,
+                          'plies': plies,
+                      }
+                      rows.append(row)
+                      print(row, flush=True)
+                  pair_scores.append(pair)
+          finally:
+              for proc in (control, candidate):
+                  proc.terminate()
+                  proc.wait()
+
+          total = sum(row['candidate_score'] for row in rows)
+          games = len(rows)
+          fraction = total / games
+          elo = None
+          if 0.0 < fraction < 1.0:
+              elo = 400.0 * math.log10(fraction / (1.0 - fraction))
+          pair_hist = Counter(str(score) for score in pair_scores)
+          summary = {
+              'candidate': 'V14-A-main-quiet-history',
+              'control': 'exact-final-V13',
+              'book_slice': [32, 64],
+              'nodes_per_move': NODES,
+              'games': games,
+              'score': total,
+              'score_fraction': fraction,
+              'naive_elo_from_score': elo,
+              'pair_score_histogram': dict(sorted(pair_hist.items())),
+              'note': 'Fresh-book replication of the discovery experiment; still not merge evidence by itself.',
+              'games_detail': rows,
+          }
+          with open('confirmation/fixed/summary.json', 'w') as handle:
+              json.dump(summary, handle, indent=2)
+          print(json.dumps(summary, indent=2))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v14-main-history-fresh-fixed-${{ github.sha }}
+          path: confirmation/fixed/
+          retention-days: 14
+
+  timed-production-ab:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Reconstruct immutable control and candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/reconstruct_v13_final.sh /tmp/v13-control
+          cp -a /tmp/v13-control /tmp/v14-a
+          python scripts/patch_v14_main_history.py /tmp/v14-a/experiments/numba_search.py
+          python -m py_compile tools/v14_agent_runner.py /tmp/v14-a/agent.py /tmp/v14-a/experiments/*.py
+          cmp /tmp/v13-control/agent.py /tmp/v14-a/agent.py
+          cmp /tmp/v13-control/experiments/numba_core.py /tmp/v14-a/experiments/numba_core.py
+          cmp /tmp/v13-control/experiments/v13_residual.i16 /tmp/v14-a/experiments/v13_residual.i16
+
+      - name: Timed paired production A/B on disjoint openings
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p confirmation/timed
+          python - <<'PY'
+          import json
+          import math
+          import queue
+          import subprocess
+          import sys
+          import threading
+          import time
+          from collections import Counter, deque
+          import chess
+
+          BASE_MS = 2500
+          INCREMENT_MS = 50
+          MAX_PLIES = 180
+          WATCHDOG_GRACE_MS = 1200
+
+          class AgentProcess:
+              def __init__(self, directory):
+                  self.proc = subprocess.Popen(
+                      [sys.executable, 'tools/v14_agent_runner.py', directory],
+                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                      text=True, bufsize=1,
+                  )
+                  self.lines = queue.Queue()
+                  self.stderr = deque(maxlen=80)
+                  threading.Thread(target=self._read_out, daemon=True).start()
+                  threading.Thread(target=self._read_err, daemon=True).start()
+                  ready = self._line(95.0)
+                  payload = json.loads(ready)
+                  assert payload.get('ready') is True, payload
+
+              def _read_out(self):
+                  assert self.proc.stdout is not None
+                  for line in self.proc.stdout:
+                      self.lines.put(line.rstrip('\n'))
+                  self.lines.put(None)
+
+              def _read_err(self):
+                  assert self.proc.stderr is not None
+                  for line in self.proc.stderr:
+                      self.stderr.append(line.rstrip('\n'))
+
+              def _line(self, timeout):
+                  try:
+                      line = self.lines.get(timeout=timeout)
+                  except queue.Empty as exc:
+                      raise RuntimeError('protocol timeout') from exc
+                  if line is None:
+                      raise RuntimeError('protocol closed: ' + '\n'.join(self.stderr))
+                  return line
+
+              def reset(self):
+                  assert self.proc.stdin is not None
+                  self.proc.stdin.write(json.dumps({'reset': True}) + '\n')
+                  self.proc.stdin.flush()
+                  payload = json.loads(self._line(5.0))
+                  assert payload.get('reset') is True, payload
+
+              def move(self, board, clock_ms):
+                  assert self.proc.stdin is not None
+                  self.proc.stdin.write(json.dumps({
+                      'fen': board.fen(), 'time_left_ms': max(0, int(clock_ms)),
+                  }) + '\n')
+                  self.proc.stdin.flush()
+                  payload = json.loads(self._line((max(0, clock_ms) + WATCHDOG_GRACE_MS) / 1000.0))
+                  uci = payload.get('move')
+                  assert isinstance(uci, str), payload
+                  move = chess.Move.from_uci(uci)
+                  assert move in board.legal_moves, (board.fen(), payload)
+                  return move
+
+              def stop(self):
+                  if self.proc.poll() is None:
+                      self.proc.kill()
+                  self.proc.wait(timeout=5)
+
+          all_openings = [
+              x.strip() for x in open('match/openings/m3-uho-lichess-100-v1.epd')
+              if x.strip() and not x.startswith('#')
+          ]
+          openings = all_openings[64:80]
+          assert len(openings) == 16
+          control = AgentProcess('/tmp/v13-control')
+          candidate = AgentProcess('/tmp/v14-a')
+
+          def play(fen, candidate_white):
+              board = chess.Board(fen)
+              clocks = {chess.WHITE: float(BASE_MS), chess.BLACK: float(BASE_MS)}
+              control.reset()
+              candidate.reset()
+              timings = []
+              for _ in range(MAX_PLIES):
+                  outcome = board.outcome(claim_draw=True)
+                  if outcome is not None:
+                      if outcome.winner is None:
+                          return 0.5, board.result(claim_draw=True), board.ply(), clocks, timings
+                      won = outcome.winner == candidate_white
+                      return (1.0 if won else 0.0), board.result(claim_draw=True), board.ply(), clocks, timings
+
+                  mover = board.turn
+                  use_candidate = mover == candidate_white
+                  engine = candidate if use_candidate else control
+                  before = clocks[mover]
+                  started = time.monotonic()
+                  try:
+                      move = engine.move(board, before)
+                  except Exception as exc:
+                      elapsed = (time.monotonic() - started) * 1000.0
+                      clocks[mover] -= elapsed
+                      return (0.0 if use_candidate else 1.0), f'engine-failure:{type(exc).__name__}', board.ply(), clocks, timings
+                  elapsed = (time.monotonic() - started) * 1000.0
+                  clocks[mover] -= elapsed
+                  if clocks[mover] < 0.0:
+                      return (0.0 if use_candidate else 1.0), 'flag', board.ply(), clocks, timings
+                  timings.append({
+                      'ply': board.ply() + 1,
+                      'candidate': use_candidate,
+                      'move': move.uci(),
+                      'elapsed_ms': round(elapsed, 3),
+                      'clock_before_ms': round(before, 3),
+                      'clock_after_ms': round(clocks[mover], 3),
+                  })
+                  board.push(move)
+                  clocks[mover] += INCREMENT_MS
+              return 0.5, 'max-ply-draw', board.ply(), clocks, timings
+
+          rows = []
+          pair_scores = []
+          try:
+              for opening_index, fen in enumerate(openings, start=64):
+                  pair = 0.0
+                  for candidate_white in (True, False):
+                      score, result, plies, clocks, timings = play(fen, candidate_white)
+                      pair += score
+                      row = {
+                          'opening': opening_index,
+                          'candidate_white': candidate_white,
+                          'candidate_score': score,
+                          'result': result,
+                          'plies': plies,
+                          'white_clock_ms': round(clocks[chess.WHITE], 3),
+                          'black_clock_ms': round(clocks[chess.BLACK], 3),
+                          'candidate_move_ms': [t['elapsed_ms'] for t in timings if t['candidate']],
+                          'control_move_ms': [t['elapsed_ms'] for t in timings if not t['candidate']],
+                      }
+                      rows.append(row)
+                      print({k: v for k, v in row.items() if not k.endswith('_move_ms')}, flush=True)
+                  pair_scores.append(pair)
+          finally:
+              control.stop()
+              candidate.stop()
+
+          total = sum(row['candidate_score'] for row in rows)
+          games = len(rows)
+          fraction = total / games
+          elo = None
+          if 0.0 < fraction < 1.0:
+              elo = 400.0 * math.log10(fraction / (1.0 - fraction))
+          terminations = Counter(row['result'] for row in rows)
+          pair_hist = Counter(str(score) for score in pair_scores)
+          candidate_times = [x for row in rows for x in row['candidate_move_ms']]
+          control_times = [x for row in rows for x in row['control_move_ms']]
+          summary = {
+              'candidate': 'V14-A-main-quiet-history',
+              'control': 'exact-final-V13',
+              'book_slice': [64, 80],
+              'time_control_ms': [BASE_MS, INCREMENT_MS],
+              'games': games,
+              'score': total,
+              'score_fraction': fraction,
+              'naive_elo_from_score': elo,
+              'pair_score_histogram': dict(sorted(pair_hist.items())),
+              'terminations': dict(sorted(terminations.items())),
+              'candidate_mean_move_ms': sum(candidate_times) / max(1, len(candidate_times)),
+              'control_mean_move_ms': sum(control_times) / max(1, len(control_times)),
+              'note': 'Production get_move A/B on a second disjoint fresh slice; no automatic merge threshold.',
+              'games_detail': rows,
+          }
+          with open('confirmation/timed/summary.json', 'w') as handle:
+              json.dump(summary, handle, indent=2)
+          print(json.dumps({k: v for k, v in summary.items() if k != 'games_detail'}, indent=2))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v14-main-history-timed-${{ github.sha }}
+          path: confirmation/timed/
+          retention-days: 14
