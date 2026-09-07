@@ -54,18 +54,19 @@ def deterministic_split(group: str, *, salt: str, validation: int, holdout: int)
 
 def canonical_root_group(board: chess.Board) -> str:
     """Stable split identity shared by PGN and EPD representations of one opening root."""
-    # Ignore halfmove/fullmove counters but preserve the exact en-passant field rather than
-    # python-chess's default legal-only FEN rendering. These four fields define the chess state from
-    # which every sampled trajectory descends.
     fields = board.fen(en_passant="fen").split()
     return "root:" + " ".join(fields[:4])
 
 
 def pgn_positions(
     path: Path,
+    source_sha256: str,
     min_ply: int,
     max_ply: int,
 ) -> Iterator[tuple[str, str, chess.Board]]:
+    # `source_sha256` remains in the helper API for callers/tests from NNUE-1. Split identity no
+    # longer depends on it: canonical root state is the stronger cross-source grouping key.
+    _ = source_sha256
     with path.open(encoding="utf-8", errors="replace") as handle:
         game_index = 0
         while True:
@@ -75,7 +76,6 @@ def pgn_positions(
             game_index += 1
             board = game.board()
             group = canonical_root_group(board)
-            # Include the game root as ply zero only when explicitly requested.
             if min_ply <= 0 <= max_ply:
                 yield group, f"game:{game_index}:root", board.copy(stack=False)
             for node in game.mainline():
@@ -85,13 +85,16 @@ def pgn_positions(
                     yield group, f"game:{game_index}:ply:{ply}", board.copy(stack=False)
 
 
-def epd_positions(path: Path) -> Iterator[tuple[str, str, chess.Board]]:
+def epd_positions(
+    path: Path,
+    source_sha256: str,
+) -> Iterator[tuple[str, str, chess.Board]]:
+    _ = source_sha256
     with path.open(encoding="utf-8", errors="replace") as handle:
         for line_no, line in enumerate(handle, start=1):
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
                 continue
-            # The first four EPD fields are exactly the board/turn/castling/en-passant FEN prefix.
             fields = stripped.split()
             if len(fields) < 4:
                 raise ValueError(f"{path}:{line_no}: expected at least four EPD/FEN fields")
@@ -119,10 +122,10 @@ def main() -> int:
     ]
 
     def all_positions() -> Iterator[tuple[str, str, chess.Board]]:
-        for path, _source_sha256 in pgn_sources:
-            yield from pgn_positions(path, args.min_ply, args.max_ply)
-        for path, _source_sha256 in epd_sources:
-            yield from epd_positions(path)
+        for path, source_sha256 in pgn_sources:
+            yield from pgn_positions(path, source_sha256, args.min_ply, args.max_ply)
+        for path, source_sha256 in epd_sources:
+            yield from epd_positions(path, source_sha256)
 
     output_path = args.output_dir / "teacher.jsonl"
     split_counts: Counter[str] = Counter()
