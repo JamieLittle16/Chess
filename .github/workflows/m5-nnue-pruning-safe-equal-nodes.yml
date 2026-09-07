@@ -29,20 +29,24 @@ jobs:
           path = Path('crates/chess-search/src/lib.rs')
           text = path.read_text(encoding='utf-8')
           old_import = 'use chess_eval::evaluate;'
-          old_static = '''            Some(evaluate(position))
-          } else {
-              None
-          };'''
           new_import = 'use chess_eval::{evaluate, evaluate_classical};'
-          new_static = '''            Some(evaluate_classical(position))
-          } else {
-              None
-          };'''
+          marker = 'let pruning_static_eval = if pruning_eligible {'
+          next_marker = 'if let Some(static_eval) = pruning_static_eval {'
           if text.count(old_import) != 1:
               raise SystemExit('expected exactly one chess_eval::evaluate import')
-          if text.count(old_static) != 1:
-              raise SystemExit('expected exactly one RFP static-eval site')
-          text = text.replace(old_import, new_import, 1).replace(old_static, new_static, 1)
+          if text.count(marker) != 1 or text.count(next_marker) != 1:
+              raise SystemExit('expected exactly one RFP static-eval block')
+          start = text.index(marker)
+          end = text.index(next_marker, start)
+          block = text[start:end]
+          old_call = 'Some(evaluate(position))'
+          if block.count(old_call) != 1:
+              raise SystemExit('expected exactly one learned eval call inside RFP block')
+          block = block.replace(old_call, 'Some(evaluate_classical(position))', 1)
+          text = text.replace(old_import, new_import, 1)
+          text = text[:start] + block + text[end:]
+          if text.count('Some(evaluate_classical(position))') != 1:
+              raise SystemExit('pruning patch did not produce exactly one classical site')
           path.write_text(text, encoding='utf-8')
           PY
           cargo fmt --check
