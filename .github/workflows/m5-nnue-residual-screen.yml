@@ -1,0 +1,116 @@
+name: M5 residual NNUE 100-game screen
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  screen:
+    if: github.head_ref == 'm5/nnue-search-ab-v1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Build one shared release engine binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release -p chess-uci
+          test -x target/release/chess-uci
+          sha256sum target/release/chess-uci | tee engine.sha256
+      - name: Download frozen validation-selected residual model
+        uses: actions/download-artifact@v4
+        with:
+          name: m5-nnue-residual-v1-0da545630ea1408f61e8c10d03252bdd8c11eeca
+          path: .qualification/residual
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34147825482
+      - name: Verify exact screened model
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODEL=$(find "$PWD/.qualification/residual" -type f -name 'nnue-residual-32-v1.nnue' -print -quit)
+          test -n "$MODEL"
+          echo "7e156b6b7d18bdbfd61f98c9257b493918d9d19bfe94bbcadef401fc6835bc5b  $MODEL" | sha256sum --check --strict
+          echo "RESIDUAL_MODEL=$MODEL" >> "$GITHUB_ENV"
+      - name: Build pinned Fastchess 1.8.2-alpha
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = 'f618e34540f94f4719ad3817950618dabe441318'
+          make -C .qualification/fastchess-src -j2
+          test -x .qualification/fastchess-src/fastchess
+          .qualification/fastchess-src/fastchess --version
+      - name: Create same-binary candidate and reference launchers
+        shell: bash
+        run: |
+          set -euo pipefail
+          ENGINE="$PWD/target/release/chess-uci"
+          MODEL="$RESIDUAL_MODEL"
+          mkdir -p .qualification/launchers
+          cat > .qualification/launchers/candidate.sh <<EOF
+          #!/usr/bin/env bash
+          export CHESS_EXPERIMENTAL_RESIDUAL_NNUE='$MODEL'
+          exec '$ENGINE'
+          EOF
+          cat > .qualification/launchers/reference.sh <<EOF
+          #!/usr/bin/env bash
+          unset CHESS_EXPERIMENTAL_RESIDUAL_NNUE
+          exec '$ENGINE'
+          EOF
+          chmod +x .qualification/launchers/candidate.sh .qualification/launchers/reference.sh
+          sha256sum .qualification/launchers/candidate.sh .qualification/launchers/reference.sh | tee launchers.sha256
+      - name: Run frozen paired 100-game causal screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/match_harness.py \
+            --candidate .qualification/launchers/candidate.sh \
+            --reference .qualification/launchers/reference.sh \
+            --candidate-name residual-33-over-16 \
+            --reference-name classical \
+            --candidate-option Hash=32 \
+            --reference-option Hash=32 \
+            --fastchess .qualification/fastchess-src/fastchess \
+            --openings match/openings/m3-uho-lichess-100-v1.epd \
+            --protocol match/protocols/m5-nnue-residual-screen-v1.json \
+            --output-dir .qualification/screen
+      - name: Record immutable experiment identities
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/screen
+          cp engine.sha256 .qualification/screen/engine.sha256 || true
+          cp launchers.sha256 .qualification/screen/launchers.sha256 || true
+          cat > .qualification/screen/nnue-evidence.txt <<EOF
+          model_sha256=7e156b6b7d18bdbfd61f98c9257b493918d9d19bfe94bbcadef401fc6835bc5b
+          residual_scale=33/16
+          residual_selected_epoch=2
+          residual_validation_rmse_cp=358.894
+          classical_validation_rmse_cp=406.555
+          residual_holdout_rmse_cp=419.669
+          classical_holdout_rmse_cp=456.279
+          fastchess_commit=f618e34540f94f4719ad3817950618dabe441318
+          EOF
+      - name: Upload complete screen evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m5-nnue-residual-screen-${{ github.sha }}
+          path: .qualification/screen/
+          retention-days: 30
