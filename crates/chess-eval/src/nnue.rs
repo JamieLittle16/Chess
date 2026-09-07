@@ -5,6 +5,8 @@
 //! rebuild from `Position`. Neural weights and accumulators are deliberately deferred until this
 //! representation is trustworthy.
 
+pub mod network;
+
 use chess_core::{ChessMove, Color, MoveKind, Piece, PieceKind, Position, Square};
 
 /// Stable identifier for the first sparse learned-evaluation feature mapping.
