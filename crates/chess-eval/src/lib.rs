@@ -5,6 +5,8 @@
 //! copied from another engine. Runtime evaluation remains allocation-free: iterate the existing
 //! piece bitboards, perform table lookups, and interpolate one middle-game/end-game score pair.
 
+pub mod nnue;
+
 use chess_core::{Color, PieceKind, Position};
 
 /// Conventional centipawn-like material values retained from the material-only reference.
