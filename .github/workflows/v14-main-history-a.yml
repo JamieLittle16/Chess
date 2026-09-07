@@ -1,0 +1,329 @@
+name: V14-A main quiet history
+
+on:
+  push:
+    branches: [analysis/v14-main-history-a-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Reconstruct exact final V13 control and V14-A candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum -c -
+          rm -rf /tmp/v13-control /tmp/v14-a
+          mkdir -p /tmp/v13-control /tmp/v14-a
+          unzip -q /tmp/v13.zip -d /tmp/v13-control
+          unzip -q /tmp/v13.zip -d /tmp/v14-a
+
+          for DIR in /tmp/v13-control /tmp/v14-a; do
+            patch "$DIR/experiments/numba_search.py" < .analysis/v13_jit_refactor.patch
+            DIR="$DIR" python - <<'PY'
+          import os
+          from pathlib import Path
+          p = Path(os.environ['DIR']) / 'experiments/numba_search.py'
+          s = p.read_text()
+          old = '    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          new = '    correction = correction // 6\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          assert s.count(old) == 1, s.count(old)
+          p.write_text(s.replace(old, new, 1))
+          PY
+            python scripts/patch_v13_legality_context.py "$DIR/experiments/numba_core.py"
+            python scripts/patch_v13_qsearch_tactical.py \
+              "$DIR/experiments/numba_core.py" "$DIR/experiments/numba_search.py"
+          done
+
+          echo '0306e8145a453d91b9b5ac92e9980931510d9e18f8ba598a7548d08b85165c35  /tmp/v13-control/experiments/numba_core.py' | sha256sum -c -
+          echo '401f6580028a72361286bd99bee1f0022c74e6c8a65da8acd47448835a1ff360  /tmp/v13-control/experiments/numba_search.py' | sha256sum -c -
+          echo '7d0fc5f7a186e79317cf12a2ff285d7716c651fbd045c53d65a3cc6eb1b15319  /tmp/v13-control/experiments/v13_residual.i16' | sha256sum -c -
+
+          python scripts/patch_v14_main_history.py /tmp/v14-a/experiments/numba_search.py
+          python -m py_compile /tmp/v13-control/agent.py /tmp/v13-control/experiments/*.py \
+            /tmp/v14-a/agent.py /tmp/v14-a/experiments/*.py
+
+          # This experiment claims to be search-only. The chess core and trained residual must stay exact.
+          cmp /tmp/v13-control/experiments/numba_core.py /tmp/v14-a/experiments/numba_core.py
+          cmp /tmp/v13-control/experiments/v13_residual.i16 /tmp/v14-a/experiments/v13_residual.i16
+          grep -q 'QUIET_HISTORY_MAX = 16_384' /tmp/v14-a/experiments/numba_search.py
+          grep -q 'correction = correction // 6' /tmp/v14-a/experiments/numba_search.py
+
+      - name: Prove recursive search call arity after patch
+        shell: bash
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          tree = ast.parse(Path('/tmp/v14-a/experiments/numba_search.py').read_text())
+          defs = {
+              n.name: len(n.args.args)
+              for n in tree.body
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+          }
+          for name in ('_root', '_negamax'):
+              calls = [
+                  n for n in ast.walk(tree)
+                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == name
+              ]
+              arities = [len(call.args) for call in calls]
+              print(name, 'signature', defs[name], 'calls', arities)
+              assert calls
+              assert all(arity == defs[name] for arity in arities), (name, defs[name], arities)
+          PY
+
+      - name: Candidate competition API smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=/tmp/v14-a python - <<'PY'
+          import chess
+          import agent
+          cases = [
+              chess.STARTING_FEN,
+              'r1bq1rk1/pp2bppp/2n1pn2/2pp4/3P4/2PBPN2/PP3PPP/R1BQ1RK1 w - - 2 9',
+              'k3r3/8/8/8/8/8/4R3/4K3 w - - 0 1',
+          ]
+          for fen in cases:
+              board = chess.Board(fen)
+              move = chess.Move.from_uci(agent.get_move(fen, 120000))
+              assert move in board.legal_moves, (fen, move)
+              print('legal', move.uci())
+          PY
+
+      - name: Determinism and fixed-node throughput guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/v14_worker.py <<'PY'
+          import json
+          import sys
+          import time
+          import chess
+          import numpy as np
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful
+
+          for line in sys.stdin:
+              query = json.loads(line)
+              board = chess.Board(query['fen'])
+              encoded = encode_position(board)
+              history = np.empty(0, dtype=np.uint64)
+              start = time.perf_counter()
+              out = iterative_search_stateful(
+                  encoded.board, encoded.side, encoded.castling, encoded.ep_square,
+                  board.halfmove_clock, history, 0, int(query['nodes'])
+              )
+              elapsed = time.perf_counter() - start
+              print(json.dumps({
+                  'move': int(out[0]), 'score': int(out[1]), 'depth': int(out[2]),
+                  'nodes': int(out[3]), 'seconds': elapsed,
+              }), flush=True)
+          PY
+          python - <<'PY'
+          import json
+          import os
+          import statistics
+          import subprocess
+          import sys
+
+          roots = [x.strip() for x in open('match/openings/m3-uho-lichess-100-v1.epd') if x.strip()][:24]
+
+          def start(path):
+              env = os.environ.copy()
+              env['PYTHONPATH'] = path
+              return subprocess.Popen(
+                  [sys.executable, '/tmp/v14_worker.py'], stdin=subprocess.PIPE,
+                  stdout=subprocess.PIPE, text=True, bufsize=1, env=env,
+              )
+
+          def ask(proc, fen, nodes):
+              proc.stdin.write(json.dumps({'fen': fen, 'nodes': nodes}) + '\n')
+              proc.stdin.flush()
+              return json.loads(proc.stdout.readline())
+
+          base = start('/tmp/v13-control')
+          cand1 = start('/tmp/v14-a')
+          cand2 = start('/tmp/v14-a')
+          try:
+              for p in (base, cand1, cand2):
+                  ask(p, roots[0], 500)
+
+              base_n = base_t = cand_n = cand_t = 0.0
+              cand_sig1 = []
+              cand_sig2 = []
+              for fen in roots:
+                  b = ask(base, fen, 40000)
+                  c1 = ask(cand1, fen, 40000)
+                  c2 = ask(cand2, fen, 40000)
+                  sig1 = (c1['move'], c1['score'], c1['depth'], c1['nodes'])
+                  sig2 = (c2['move'], c2['score'], c2['depth'], c2['nodes'])
+                  assert sig1 == sig2, (fen, sig1, sig2)
+                  cand_sig1.append(sig1)
+                  cand_sig2.append(sig2)
+                  base_n += b['nodes']; base_t += b['seconds']
+                  cand_n += c1['nodes']; cand_t += c1['seconds']
+
+              base_nps = base_n / base_t
+              cand_nps = cand_n / cand_t
+              ratio = cand_nps / base_nps
+              changed = sum(
+                  1 for fen, sig in zip(roots, cand_sig1)
+                  if sig[0] != ask(base, fen, 40000)['move']
+              )
+              print('deterministic_positions', len(roots))
+              print('base_nps', base_nps, 'candidate_nps', cand_nps, 'ratio', ratio)
+              print('candidate_changed_root_moves_reprobe', changed)
+              assert ratio >= 0.90, ratio
+          finally:
+              for p in (base, cand1, cand2):
+                  p.terminate()
+                  p.wait()
+          PY
+
+      - name: Paired fixed-node discovery games
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p v14-a-results
+          cat >/tmp/v14_game_worker.py <<'PY'
+          import json
+          import sys
+          import chess
+          import numpy as np
+          from experiments.numba_core import encode_position, move_to_uci
+          from experiments.numba_search import iterative_search_stateful, position_key
+
+          def key_for_fen(fen):
+              b = chess.Board(fen)
+              e = encode_position(b)
+              return int(position_key(e.board, e.side, e.castling, e.ep_square))
+
+          for line in sys.stdin:
+              q = json.loads(line)
+              board = chess.Board(q['fen'])
+              encoded = encode_position(board)
+              prior = q.get('prior', [])
+              keep = min(board.halfmove_clock, len(prior))
+              if keep:
+                  history = np.asarray([key_for_fen(f) for f in prior[-keep:]], dtype=np.uint64)
+              else:
+                  history = np.empty(0, dtype=np.uint64)
+              out = iterative_search_stateful(
+                  encoded.board, encoded.side, encoded.castling, encoded.ep_square,
+                  board.halfmove_clock, history, len(history), int(q['nodes'])
+              )
+              print(json.dumps({
+                  'uci': move_to_uci(int(out[0])), 'score': int(out[1]),
+                  'depth': int(out[2]), 'nodes': int(out[3]),
+              }), flush=True)
+          PY
+          python - <<'PY'
+          import json
+          import math
+          import os
+          import subprocess
+          import sys
+          import chess
+
+          openings = [x.strip() for x in open('match/openings/m3-uho-lichess-100-v1.epd') if x.strip()][:16]
+          NODES = 12000
+          MAX_PLIES = 120
+
+          def start(path):
+              env = os.environ.copy(); env['PYTHONPATH'] = path
+              return subprocess.Popen(
+                  [sys.executable, '/tmp/v14_game_worker.py'], stdin=subprocess.PIPE,
+                  stdout=subprocess.PIPE, text=True, bufsize=1, env=env,
+              )
+
+          def ask(proc, board, prior):
+              proc.stdin.write(json.dumps({'fen': board.fen(), 'prior': prior, 'nodes': NODES}) + '\n')
+              proc.stdin.flush()
+              reply = json.loads(proc.stdout.readline())
+              move = chess.Move.from_uci(reply['uci'])
+              assert move in board.legal_moves, (board.fen(), reply)
+              return move
+
+          base = start('/tmp/v13-control')
+          cand = start('/tmp/v14-a')
+
+          def play(fen, candidate_white):
+              board = chess.Board(fen)
+              prior = []
+              for _ in range(MAX_PLIES):
+                  use_candidate = board.turn == candidate_white
+                  move = ask(cand if use_candidate else base, board, prior)
+                  prior.append(board.fen())
+                  board.push(move)
+                  if board.is_game_over(claim_draw=True):
+                      result = board.result(claim_draw=True)
+                      if result == '1/2-1/2':
+                          return 0.5, result
+                      candidate_won = (result == '1-0') == candidate_white
+                      return (1.0 if candidate_won else 0.0), result
+              return 0.5, 'max-ply-draw'
+
+          scores = []
+          details = []
+          try:
+              # Warm both JITs outside the scored games.
+              warm = chess.Board(openings[0])
+              ask(base, warm, [])
+              ask(cand, warm, [])
+              for index, fen in enumerate(openings):
+                  for candidate_white in (True, False):
+                      score, result = play(fen, candidate_white)
+                      scores.append(score)
+                      row = {
+                          'opening': index, 'candidate_white': candidate_white,
+                          'candidate_score': score, 'result': result,
+                      }
+                      details.append(row)
+                      print(row, flush=True)
+          finally:
+              for proc in (base, cand):
+                  proc.terminate(); proc.wait()
+
+          total = sum(scores)
+          games = len(scores)
+          pct = total / games
+          elo = None
+          if 0.0 < pct < 1.0:
+              elo = 400.0 * math.log10(pct / (1.0 - pct))
+          summary = {
+              'candidate': 'V14-A-main-quiet-history',
+              'control': 'exact-final-V13',
+              'nodes_per_move': NODES,
+              'games': games,
+              'score': total,
+              'score_fraction': pct,
+              'naive_elo_from_score': elo,
+              'note': 'Discovery only; not acceptance evidence. Requires fresh-book replication/SPRT.',
+              'games_detail': details,
+          }
+          print(json.dumps(summary, indent=2))
+          with open('v14-a-results/main-history-screen.json', 'w') as handle:
+              json.dump(summary, handle, indent=2)
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v14-a-main-history-results-${{ github.sha }}
+          path: v14-a-results/
+          retention-days: 14
