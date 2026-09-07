@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "protocol_id": "m4-qsearch-early-exit-v1-over-static-legality-screening",
+  "runner": "fastchess",
+  "games": 100,
+  "time_control": "1+0.01",
+  "concurrency": 1,
+  "seed": 20261015,
+  "max_moves": 300,
+  "opening_format": "epd",
+  "openings_required": true,
+  "opening_suite_id": "m3-uho-lichess-100-v1",
+  "opening_sha256": "599a45efb446e91952d13e79bc7fec8de319e332036a54552a3e8e4af91f9cf1",
+  "paired_colour_reversal": true,
+  "ponder": false,
+  "tablebases": false,
+  "evaluation_adjudication": false,
+  "notes": "Fresh marginal 100-game screen of the exact qsearch early-exit v1 source over accepted mutation-free legality production main@afbe9c8d9050664dbc1780b0aa1e11cae6c364b1. The qsearch source must hash exactly to 1c7331d8240ff743ab053ce22a8ae49ac07f9c6d0b4592fc12614c3b7708c17b after materialization."
+}
