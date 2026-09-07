@@ -1,0 +1,148 @@
+name: M5 search-leaf residual v1
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  train:
+    if: github.head_ref == 'm5/search-leaf-residual-v1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install pinned training dependencies
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy scipy scikit-learn
+
+      - name: Verify exact baseline and build Rust eval oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo run --quiet --release -p chess-bench | tee production-bench.txt
+          grep -Fx 'signature 0x4c3bbe8701fbbb68' production-bench.txt
+          cargo build --release -p chess-eval --example eval_fens
+          test -x target/release/examples/eval_fens
+          mkdir -p .qualification/search-leaf-residual
+          sha256sum target/release/examples/eval_fens | tee .qualification/search-leaf-residual/baseline-eval-oracle.sha256
+
+      - name: Download certified immutable search-leaf corpus
+        uses: actions/download-artifact@v4
+        with:
+          name: m5-search-leaf-corpus-d9d4d28c7b1efaf170615a9ff832210c0aad7d94
+          path: .qualification/corpus
+          repository: JamieLittle16/Chess
+          run-id: '34164068488'
+          github-token: ${{ github.token }}
+
+      - name: Verify certified corpus identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f .qualification/corpus/corpus-a.tsv
+          echo '153b51baa53e184c007696a55107f52ccd26590c31f1916cad558090bff17798  .qualification/corpus/corpus-a.tsv' | sha256sum --check --strict
+          test "$(wc -l < .qualification/corpus/corpus-a.tsv)" -eq 28301
+          test "$(cut -f1 .qualification/corpus/corpus-a.tsv | sort -u | wc -l)" -eq 32
+
+      - name: Fetch immutable Stockfish 19
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/stockfish
+          curl --fail --location --retry 3 --output .qualification/stockfish.tar.gz \
+            https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  .qualification/stockfish.tar.gz' | sha256sum --check --strict
+          tar -xzf .qualification/stockfish.tar.gz -C .qualification/stockfish
+          STOCKFISH_BIN=$(find "$PWD/.qualification/stockfish" -type f -name 'stockfish*' -perm -111 -print -quit)
+          test -n "$STOCKFISH_BIN"
+          echo "STOCKFISH_BIN=$STOCKFISH_BIN" >> "$GITHUB_ENV"
+          "$STOCKFISH_BIN" bench 1 1 10 default depth >/dev/null
+          sha256sum "$STOCKFISH_BIN" | tee .qualification/search-leaf-residual/stockfish.sha256
+
+      - name: Label held-out-root search leaves with Stockfish static eval
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/generate_search_leaf_static_teacher.py \
+            --stockfish "$STOCKFISH_BIN" \
+            --corpus .qualification/corpus/corpus-a.tsv \
+            --output teacher-search-leaf/teacher.jsonl \
+            --split-salt 'Chess/rust-search-leaf-static-residual-v1' \
+            --validation-permille 125 --holdout-permille 125 \
+            | tee .qualification/search-leaf-residual/teacher.stdout.txt
+          cp teacher-search-leaf/teacher.manifest.json .qualification/search-leaf-residual/teacher-manifest.json
+          cp teacher-search-leaf/teacher.jsonl .qualification/search-leaf-residual/teacher.jsonl
+
+      - name: Fit residual against exact Rust classical scores
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/train_rust_linear_residual.py \
+            --teacher teacher-search-leaf/teacher.jsonl \
+            --baseline-engine "$PWD/target/release/examples/eval_fens" \
+            --output-dir model-search-leaf \
+            --alphas 10,30,100,300,1000,3000,10000 \
+            | tee .qualification/search-leaf-residual/train.stdout.txt
+          cp model-search-leaf/report.json .qualification/search-leaf-residual/report.json
+          cp model-search-leaf/model.json .qualification/search-leaf-residual/model.json
+          cp model-search-leaf/weights.i16 .qualification/search-leaf-residual/weights.i16
+          sha256sum model-search-leaf/* | tee .qualification/search-leaf-residual/model-SHA256SUMS
+
+      - name: Require held-out improvement before preserving model as a lead
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          report=json.loads(Path('model-search-leaf/report.json').read_text())
+          baseline=report['baseline']
+          quant=report['quantized']['metrics']
+          for split in ('validation','holdout'):
+              b=float(baseline[split]['mse'])
+              q=float(quant[split]['mse'])
+              print(split, {'baseline_mse':b,'residual_mse':q,'ratio':q/b})
+              if not q < b:
+                  raise SystemExit(f'{split}: residual failed to improve exact Rust baseline')
+          PY
+
+      - name: Record immutable experiment identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > .qualification/search-leaf-residual/evidence.txt <<EOF
+          experiment=rust-search-leaf-static-residual-v1
+          production_source=169fb5d424d90ebc45577ecaabe2a8fa0b4c1c10
+          certified_corpus_run=34164068488
+          certified_corpus_sha256=153b51baa53e184c007696a55107f52ccd26590c31f1916cad558090bff17798
+          certified_records=28301
+          certified_groups=32
+          teacher=Stockfish19-static-eval
+          split_unit=search-leaf-root-group
+          validation_permille=125
+          holdout_permille=125
+          EOF
+
+      - name: Upload training evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m5-search-leaf-residual-v1-${{ github.sha }}
+          path: .qualification/search-leaf-residual/
+          retention-days: 30
