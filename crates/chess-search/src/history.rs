@@ -27,8 +27,7 @@ impl HistoryTables {
     #[inline]
     pub(super) fn quiet_score(&self, color: Color, mv: ChessMove) -> i32 {
         i32::from(
-            self.quiet[color.index()][usize::from(mv.from().index())]
-                [usize::from(mv.to().index())],
+            self.quiet[color.index()][usize::from(mv.from().index())][usize::from(mv.to().index())],
         )
     }
 
