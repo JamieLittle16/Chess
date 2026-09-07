@@ -136,8 +136,8 @@ text = replace_once(
     fn endgame_king_is_rewarded_for_centralisation() {''',
     '''    #[test]
     fn severely_confined_knight_is_penalized_without_global_mobility_scoring() {
-        let free = Position::from_fen("7k/8/8/8/3N4/8/8/7K w - - 0 1").expect("valid FEN");
-        let confined = Position::from_fen("7k/8/8/2p1p3/3N4/2P1P3/8/7K w - - 0 1")
+        let free = Position::from_fen("7k/8/8/8/8/8/8/N6K w - - 0 1").expect("valid FEN");
+        let confined = Position::from_fen("7k/8/8/8/8/1P6/2P5/N6K w - - 0 1")
             .expect("valid FEN");
         assert!(
             minor_confinement(&free, Color::White).0
