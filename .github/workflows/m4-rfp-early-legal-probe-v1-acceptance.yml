@@ -1,0 +1,103 @@
+name: M4 RFP early legal probe v1 acceptance
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    if: github.head_ref == 'm4/rfp-early-legal-probe-v1-screening'
+    name: RFP early legal probe v1 exact-source acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - name: Materialize and verify exact screened source
+        run: |
+          set -euo pipefail
+          python3 tools/apply_rfp_early_legal_probe_v1.py
+          cargo fmt --all
+          echo '7eb040275a6dec56e95effff13880d0353afe9adee49806956bfbc6d6b5c1da0  crates/chess-core/src/movegen.rs' | sha256sum --check --strict
+          echo 'e07ad84047557eb6444e5f4460c6195443c959fbd1b0303f639016237a1a36a5  crates/chess-core/src/lib.rs' | sha256sum --check --strict
+          echo '5e6369536ce2b2d6e123e0ed400224e9ce21aaae5492f8caba9cdc3139919557  crates/chess-search/src/lib.rs' | sha256sum --check --strict
+          git diff --check
+      - name: Verify semantic identity and correctness
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --all-features
+          cargo test -p chess-search --test draw_strategy
+          cargo run --release --quiet -p chess-bench
+      - name: Build exact candidate
+        run: |
+          set -euo pipefail
+          CANDIDATE_TARGET="$PWD/.qualification/candidate-target"
+          CARGO_TARGET_DIR="$CANDIDATE_TARGET" cargo build --release -p chess-uci
+          echo "CANDIDATE_BIN=$CANDIDATE_TARGET/release/chess-uci" >> "$GITHUB_ENV"
+      - name: Build accepted production reference
+        run: |
+          set -euo pipefail
+          REFERENCE_SHA=ee22e91f5b3a391bbde23f054ac4c6278fecb32a
+          git fetch --depth=1 origin "$REFERENCE_SHA"
+          git worktree add --detach .qualification/reference "$REFERENCE_SHA"
+          REFERENCE_TARGET="$PWD/.qualification/reference-target"
+          (cd .qualification/reference && CARGO_TARGET_DIR="$REFERENCE_TARGET" cargo build --release -p chess-uci)
+          echo "REFERENCE_BIN=$REFERENCE_TARGET/release/chess-uci" >> "$GITHUB_ENV"
+      - name: Fetch pinned Fastchess
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/fastchess
+          curl --fail --location --retry 3 --output .qualification/fastchess.tar https://github.com/Disservin/fastchess/releases/download/v1.8.2-alpha/fastchess-linux-x86-64.tar
+          echo '1003f920bebe841acdab5e6d7871e93171a4586857b3ec91c21ef5777f26ff96  .qualification/fastchess.tar' | sha256sum --check --strict
+          tar -xf .qualification/fastchess.tar -C .qualification/fastchess
+          FASTCHESS_BIN=$(find "$PWD/.qualification/fastchess" -type f -name fastchess -perm -111 -print -quit)
+          test -n "$FASTCHESS_BIN"
+          echo "FASTCHESS_BIN=$FASTCHESS_BIN" >> "$GITHUB_ENV"
+      - name: Record identities
+        run: |
+          set -euo pipefail
+          "$FASTCHESS_BIN" -version
+          sha256sum "$CANDIDATE_BIN" "$REFERENCE_BIN" "$FASTCHESS_BIN" match/openings/m3-uho-lichess-100-v1.epd
+      - name: Run fresh-seed 200-game acceptance
+        run: |
+          set -euo pipefail
+          SHORT_SHA=${GITHUB_SHA:0:12}
+          python3 scripts/match_harness.py \
+            --protocol match/protocols/m4-rfp-early-legal-probe-v1-acceptance.json \
+            --candidate "$CANDIDATE_BIN" \
+            --candidate-name "Chess-M4-rfp-legal-probe-v1-accept@$SHORT_SHA" \
+            --candidate-option Hash=32 \
+            --reference "$REFERENCE_BIN" \
+            --reference-name 'Chess-LQF-prod@ee22e91f5b3a' \
+            --reference-option Hash=32 \
+            --fastchess "$FASTCHESS_BIN" \
+            --openings match/openings/m3-uho-lichess-100-v1.epd \
+            --output-dir acceptance-results
+      - name: Retain acceptance evidence
+        if: always()
+        run: |
+          mkdir -p acceptance-results/exact-source/crates/chess-core/src
+          mkdir -p acceptance-results/exact-source/crates/chess-search/src
+          cp crates/chess-core/src/movegen.rs acceptance-results/exact-source/crates/chess-core/src/movegen.rs
+          cp crates/chess-core/src/lib.rs acceptance-results/exact-source/crates/chess-core/src/lib.rs
+          cp crates/chess-search/src/lib.rs acceptance-results/exact-source/crates/chess-search/src/lib.rs
+          sha256sum crates/chess-core/src/movegen.rs crates/chess-core/src/lib.rs crates/chess-search/src/lib.rs > acceptance-results/exact-source/source.sha256
+      - name: Upload acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m4-rfp-early-legal-probe-v1-acceptance-${{ github.sha }}
+          path: acceptance-results/
+          if-no-files-found: warn
+          retention-days: 30
