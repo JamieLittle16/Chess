@@ -130,7 +130,8 @@ impl Searcher {
             let undo = position.make_move(mv);
             let gives_check = position.is_in_check(position.side_to_move());
 
-            let delta_prune = !in_check && capture && !promotion && !gives_check && optimistic <= alpha;
+            let delta_prune =
+                !in_check && capture && !promotion && !gives_check && optimistic <= alpha;
             let bad_capture_prune = !in_check
                 && capture
                 && !promotion
@@ -209,7 +210,10 @@ mod tests {
 
         let result = search(&root, 1);
         assert_ne!(result.best_move, Some(poisoned));
-        assert!(result.score >= 250, "quiet queen moves retain the material edge");
+        assert!(
+            result.score >= 250,
+            "quiet queen moves retain the material edge"
+        );
     }
 
     #[test]
@@ -241,7 +245,10 @@ mod tests {
             .quiescence(&mut position, &[], -INFINITY, INFINITY, 0, 0, &NeverStop)
             .expect("uncontrolled quiescence completes");
         assert!(score > -INFINITY);
-        assert!(searcher.nodes > 1, "at least one legal evasion was searched");
+        assert!(
+            searcher.nodes > 1,
+            "at least one legal evasion was searched"
+        );
         assert_eq!(position, original);
     }
 
