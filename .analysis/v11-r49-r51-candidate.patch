@@ -28,7 +28,7 @@
      if piece == KNIGHT:
          return 36 - 4 * distance
      if piece == BISHOP:
-@@ -807,6 +810,126 @@
+@@ -807,6 +810,123 @@
      )
  
  
@@ -152,7 +152,7 @@
  @njit(cache=False, inline="always")
  def _search_budget_exhausted(
      nodes: np.ndarray,
-@@ -872,13 +995,24 @@
+@@ -872,13 +992,24 @@
  
      pseudo = pseudo_stack[ply]
      moves = move_stack[ply]
