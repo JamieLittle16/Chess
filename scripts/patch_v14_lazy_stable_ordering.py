@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Replace eager stable insertion sorting with equivalent lazy stable prefix selection.
 
-The patch preserves V13's exact score function and stable tie order.  It only delays ordering work
+The patch preserves V13's exact score function and stable tie order. It only delays ordering work
 until a move is actually about to be searched, so beta cutoffs can avoid sorting the unused suffix.
 Every fixed-node search signature must remain identical to qualified V13.
 """
@@ -42,7 +42,7 @@ def _order_moves(
     preferred: int,
     scores: np.ndarray,
 ) -> None:
-    """Score legal moves; stable ordering is materialised lazily as the search consumes it."""
+    """Score legal moves; stable ordering is materialised lazily as search consumes it."""
     for index in range(count):
         scores[index] = _move_order_score(board, int(moves[index]), preferred)
 
@@ -89,42 +89,63 @@ OLD_KILLER_SORT = '''    for index in range(1, count):
         scores[cursor + 1] = score
 '''
 
+QSEARCH_LOOP = '''    for index in range(count):
+        move = int(moves[index])
+        child_halfmove = _next_halfmove_clock(board, move, halfmove_clock)
+'''
+QSEARCH_LAZY = '''    for index in range(count):
+        _pick_next_scored_move(moves, score_stack[ply], index, count)
+        move = int(moves[index])
+        child_halfmove = _next_halfmove_clock(board, move, halfmove_clock)
+'''
+
+NEGAMAX_LOOP = '''    for index in range(count):
+        move = int(moves[index])
+        order_score = int(score_stack[ply, index])
+'''
+NEGAMAX_LAZY = '''    for index in range(count):
+        _pick_next_scored_move(moves, score_stack[ply], index, count)
+        move = int(moves[index])
+        order_score = int(score_stack[ply, index])
+'''
+
+ROOT_LOOP = '''    for index in range(count):
+        if nodes[0] >= max_nodes:
+            return best_move, best_score, True
+        if hard_deadline_ticks > 0 and (int(nodes[0]) & _TIME_CHECK_MASK) == 0:
+            if int(_CPU_CLOCK()) >= hard_deadline_ticks:
+                return best_move, best_score, True
+        move = int(moves[index])
+'''
+ROOT_LAZY = '''    for index in range(count):
+        if nodes[0] >= max_nodes:
+            return best_move, best_score, True
+        if hard_deadline_ticks > 0 and (int(nodes[0]) & _TIME_CHECK_MASK) == 0:
+            if int(_CPU_CLOCK()) >= hard_deadline_ticks:
+                return best_move, best_score, True
+        _pick_next_scored_move(moves, score_stack[0], index, count)
+        move = int(moves[index])
+'''
+
+
+def replace_one(source: str, old: str, new: str, label: str) -> str:
+    count = source.count(old)
+    if count != 1:
+        raise SystemExit(f"{label}: expected one occurrence, found {count}")
+    return source.replace(old, new, 1)
+
 
 def patch(path: Path) -> None:
     source = path.read_text()
     if "def _pick_next_scored_move(" in source:
         raise SystemExit("source already contains lazy stable ordering")
-    if source.count(OLD_ORDER) != 1:
-        raise SystemExit(f"ordinary order body count={source.count(OLD_ORDER)}")
-    source = source.replace(OLD_ORDER, NEW_ORDER, 1)
 
+    source = replace_one(source, OLD_ORDER, NEW_ORDER, "ordinary ordering")
     # After replacing _order_moves, exactly one identical insertion-sort body remains: killers.
-    if source.count(OLD_KILLER_SORT) != 1:
-        raise SystemExit(f"killer sort body count={source.count(OLD_KILLER_SORT)}")
-    source = source.replace(OLD_KILLER_SORT, "", 1)
-
-    # qsearch, recursive negamax, and root each consume one ordered buffer.
-    loop_marker = "    for index in range(count):\n        move = int(moves[index])\n"
-    loop_replacement = (
-        "    for index in range(count):\n"
-        "        _pick_next_scored_move(moves, score_stack[ply], index, count)\n"
-        "        move = int(moves[index])\n"
-    )
-    # qsearch + negamax use score_stack[ply]. Root is handled separately below.
-    if source.count(loop_marker) != 2:
-        raise SystemExit(f"qsearch/negamax loop count={source.count(loop_marker)}")
-    source = source.replace(loop_marker, loop_replacement, 2)
-
-    root_marker = "    for index in range(count):\n        move = int(moves[index])\n        immediate_promotion = _is_immediate_promotion_threat(board, move)\n"
-    root_replacement = (
-        "    for index in range(count):\n"
-        "        _pick_next_scored_move(moves, score_stack[0], index, count)\n"
-        "        move = int(moves[index])\n"
-        "        immediate_promotion = _is_immediate_promotion_threat(board, move)\n"
-    )
-    if source.count(root_marker) != 1:
-        raise SystemExit(f"root loop count={source.count(root_marker)}")
-    source = source.replace(root_marker, root_replacement, 1)
+    source = replace_one(source, OLD_KILLER_SORT, "", "killer ordering")
+    source = replace_one(source, QSEARCH_LOOP, QSEARCH_LAZY, "qsearch loop")
+    source = replace_one(source, NEGAMAX_LOOP, NEGAMAX_LAZY, "negamax loop")
+    source = replace_one(source, ROOT_LOOP, ROOT_LAZY, "root loop")
 
     if source.count("def _order_moves_with_killers(") != 1:
         raise SystemExit("killer ordering function missing")
