@@ -1,0 +1,143 @@
+name: M5 joint classical evaluator v2 screen
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  screen:
+    if: github.head_ref == 'm5/joint-classical-eval-v2-screen'
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [cp, wdl]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - name: Strict correctness gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace --release
+      - name: Verify accepted reference search identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset CHESS_EXPERIMENTAL_CLASSICAL_V2
+          cargo run --quiet --release -p chess-bench | tee reference-bench.txt
+          grep -Fx 'signature 0x4c3bbe8701fbbb68' reference-bench.txt
+      - name: Build one shared release engine binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release -p chess-uci
+          test -x target/release/chess-uci
+          sha256sum target/release/chess-uci | tee engine.sha256
+      - name: Record candidate deterministic drift
+        shell: bash
+        env:
+          CHESS_EXPERIMENTAL_CLASSICAL_V2: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          cargo run --quiet --release -p chess-bench | tee candidate-bench.txt
+      - name: Build pinned Fastchess 1.8.2-alpha
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = 'f618e34540f94f4719ad3817950618dabe441318'
+          make -C .qualification/fastchess-src -j2
+          test -x .qualification/fastchess-src/fastchess
+          .qualification/fastchess-src/fastchess --version
+      - name: Create same-binary candidate and reference launchers
+        shell: bash
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          ENGINE="$PWD/target/release/chess-uci"
+          mkdir -p .qualification/launchers
+          cat > .qualification/launchers/candidate.sh <<EOF
+          #!/usr/bin/env bash
+          export CHESS_EXPERIMENTAL_CLASSICAL_V2='$VARIANT'
+          exec '$ENGINE'
+          EOF
+          cat > .qualification/launchers/reference.sh <<EOF
+          #!/usr/bin/env bash
+          unset CHESS_EXPERIMENTAL_CLASSICAL_V2
+          exec '$ENGINE'
+          EOF
+          chmod +x .qualification/launchers/candidate.sh .qualification/launchers/reference.sh
+          sha256sum .qualification/launchers/candidate.sh .qualification/launchers/reference.sh | tee launchers.sha256
+      - name: Select frozen protocol
+        shell: bash
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          if [ "$VARIANT" = cp ]; then
+            echo 'PROTOCOL=match/protocols/m5-joint-classical-v2-screen.json' >> "$GITHUB_ENV"
+          else
+            echo 'PROTOCOL=match/protocols/m5-joint-classical-v2-wdl-screen.json' >> "$GITHUB_ENV"
+          fi
+      - name: Run frozen paired 100-game screen
+        shell: bash
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          python scripts/match_harness.py \
+            --candidate .qualification/launchers/candidate.sh \
+            --reference .qualification/launchers/reference.sh \
+            --candidate-name "joint-classical-v2-$VARIANT" \
+            --reference-name classical \
+            --candidate-option Hash=32 \
+            --reference-option Hash=32 \
+            --fastchess .qualification/fastchess-src/fastchess \
+            --openings match/openings/m3-uho-lichess-100-v1.epd \
+            --protocol "$PROTOCOL" \
+            --output-dir ".qualification/screen-$VARIANT"
+      - name: Record immutable experiment identities
+        if: always()
+        shell: bash
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          OUT=".qualification/screen-$VARIANT"
+          mkdir -p "$OUT"
+          cp engine.sha256 "$OUT/engine.sha256" || true
+          cp launchers.sha256 "$OUT/launchers.sha256" || true
+          cp reference-bench.txt "$OUT/reference-bench.txt" || true
+          cp candidate-bench.txt "$OUT/candidate-bench.txt" || true
+          cat > "$OUT/evidence.txt" <<EOF
+          experiment=joint-classical-v2
+          variant=$VARIANT
+          base_main=2a6172aaf460cc6c8c7811c4dc0c9e2ceed6205b
+          reference_signature=0x4c3bbe8701fbbb68
+          teacher_records=2500
+          teacher_train=2029
+          teacher_validation=228
+          teacher_holdout=243
+          teacher_corpus_sha256=0fe794272d2a8198f82dd81894b3248ad2dfcc8be75595c155db4753556ea2da
+          fastchess_commit=f618e34540f94f4719ad3817950618dabe441318
+          EOF
+      - name: Upload complete screen evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m5-joint-classical-v2-${{ matrix.variant }}-${{ github.sha }}
+          path: .qualification/screen-${{ matrix.variant }}/
+          retention-days: 30
