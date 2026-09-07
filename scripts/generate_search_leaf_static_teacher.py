@@ -15,16 +15,41 @@ import chess
 FINAL_RE = re.compile(r"Final evaluation\s+([+-]?\d+(?:\.\d+)?)\s+\(white side\)")
 
 
-def deterministic_split(group: str, salt: str, validation: int, holdout: int) -> str:
-    if validation < 0 or holdout < 0 or validation + holdout >= 1000:
-        raise ValueError("validation + holdout permille must be in [0, 999]")
-    digest = hashlib.sha256((salt + "\0" + group).encode()).digest()
-    bucket = int.from_bytes(digest[:8], "big") % 1000
-    if bucket < holdout:
-        return "holdout"
-    if bucket < holdout + validation:
-        return "validation"
-    return "train"
+def deterministic_group_splits(
+    groups: set[str], salt: str, validation_permille: int, holdout_permille: int
+) -> dict[str, str]:
+    """Assign exact whole-group split counts by salted hash rank.
+
+    A permille bucket is appropriate for large corpora, but this corpus deliberately has only 32
+    independent roots. Independent buckets can therefore produce an empty validation/holdout set.
+    Ranking the salted hashes preserves deterministic randomisation while guaranteeing the intended
+    cardinalities and keeping every root wholly inside one split.
+    """
+    if validation_permille < 0 or holdout_permille < 0:
+        raise ValueError("split permille values must be non-negative")
+    if validation_permille + holdout_permille >= 1000:
+        raise ValueError("validation + holdout permille must be below 1000")
+    count = len(groups)
+    if count < 3:
+        raise ValueError("at least three groups are required for train/validation/holdout")
+
+    validation_count = max(1, round(count * validation_permille / 1000))
+    holdout_count = max(1, round(count * holdout_permille / 1000))
+    if validation_count + holdout_count >= count:
+        raise ValueError("requested split counts leave no training groups")
+
+    ranked = sorted(
+        groups,
+        key=lambda group: (hashlib.sha256((salt + "\0" + group).encode()).digest(), group),
+    )
+    result: dict[str, str] = {}
+    for group in ranked[:holdout_count]:
+        result[group] = "holdout"
+    for group in ranked[holdout_count : holdout_count + validation_count]:
+        result[group] = "validation"
+    for group in ranked[holdout_count + validation_count :]:
+        result[group] = "train"
+    return result
 
 
 def wait_for(proc: subprocess.Popen[str], token: str) -> None:
@@ -86,6 +111,11 @@ def main() -> int:
     if not rows:
         raise ValueError("search-leaf corpus is empty")
 
+    group_split = deterministic_group_splits(
+        groups, args.split_salt, args.validation_permille, args.holdout_permille
+    )
+    expected_group_split_counts = Counter(group_split.values())
+
     proc = subprocess.Popen(
         [str(args.stockfish)],
         stdin=subprocess.PIPE,
@@ -104,21 +134,12 @@ def main() -> int:
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     split_counts: Counter[str] = Counter()
-    group_split: dict[str, str] = {}
     skipped_check = 0
     written = 0
     with args.output.open("w", encoding="utf-8") as out:
         for index, (group, fen) in enumerate(rows):
             board = chess.Board(fen)
-            split = group_split.setdefault(
-                group,
-                deterministic_split(
-                    group,
-                    args.split_salt,
-                    args.validation_permille,
-                    args.holdout_permille,
-                ),
-            )
+            split = group_split[group]
             if board.is_check():
                 skipped_check += 1
                 continue
@@ -149,20 +170,20 @@ def main() -> int:
         stderr = proc.stderr.read() if proc.stderr is not None else ""
         raise RuntimeError(f"Stockfish exited {proc.returncode}: {stderr[-2000:]}")
 
-    group_split_counts = Counter(group_split.values())
-    if not split_counts["train"] or not split_counts["validation"] or not split_counts["holdout"]:
+    if not all(split_counts[name] for name in ("train", "validation", "holdout")):
         raise ValueError(f"all three splits must contain positions: {dict(split_counts)}")
     manifest = {
         "schema_version": 1,
         "teacher": "Stockfish 19 static eval",
         "corpus_sha256": hashlib.sha256(args.corpus.read_bytes()).hexdigest(),
         "groups": len(groups),
-        "group_split_counts": dict(sorted(group_split_counts.items())),
+        "group_split_counts": dict(sorted(expected_group_split_counts.items())),
         "records_input": len(rows),
         "records_written": written,
         "skipped_in_check": skipped_check,
         "split_counts": dict(sorted(split_counts.items())),
         "split_salt": args.split_salt,
+        "split_method": "salted hash rank with exact whole-group cardinalities",
         "assignment_unit": "certified search-leaf root group",
         "output_sha256": hashlib.sha256(args.output.read_bytes()).hexdigest(),
     }
