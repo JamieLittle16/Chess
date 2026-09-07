@@ -1,0 +1,178 @@
+name: M5 NNUE teacher and cost ladder
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  teacher:
+    if: github.head_ref == 'm5/nnue-cost-teacher-ladder-v1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install pinned analysis dependency
+        run: python -m pip install --disable-pip-version-check -r tools/requirements-analysis.txt
+      - name: Download immutable accepted 200-game source
+        uses: actions/download-artifact@v4
+        with:
+          name: m4-static-legality-v1-acceptance-1f44bb9d867c5c8166e1590324c41b66a44ea924
+          path: .qualification/frozen-games
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34136520700
+      - name: Verify frozen game source
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '429c8c40f79782de1355ffa14c3c6a07d440b348fb4e0937af76150781e3df8e  .qualification/frozen-games/games.pgn' | sha256sum --check --strict
+      - name: Fetch pinned Stockfish 19
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/stockfish
+          curl --fail --location --retry 3 \
+            --output .qualification/stockfish.tar.gz \
+            https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  .qualification/stockfish.tar.gz' | sha256sum --check --strict
+          tar -xzf .qualification/stockfish.tar.gz -C .qualification/stockfish
+          STOCKFISH_BIN=$(find "$PWD/.qualification/stockfish" -type f -name 'stockfish*' -perm -111 -print -quit)
+          test -n "$STOCKFISH_BIN"
+          echo "STOCKFISH_BIN=$STOCKFISH_BIN" >> "$GITHUB_ENV"
+          "$STOCKFISH_BIN" bench 1 1 4 default depth >/dev/null
+      - name: Label reached game positions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/generate_nnue_teacher_data.py \
+            --stockfish "$STOCKFISH_BIN" \
+            --pgn .qualification/frozen-games/games.pgn \
+            --nodes 12000 \
+            --threads 1 \
+            --hash-mb 64 \
+            --stride 4 \
+            --min-ply 8 \
+            --max-ply 180 \
+            --max-positions 2400 \
+            --validation-permille 100 \
+            --holdout-permille 100 \
+            --split-salt 'Chess/m5-accepted-games-teacher-v1' \
+            --output-dir teacher-games
+      - name: Label all frozen UHO roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/generate_nnue_teacher_data.py \
+            --stockfish "$STOCKFISH_BIN" \
+            --epd match/openings/m3-uho-lichess-100-v1.epd \
+            --nodes 25000 \
+            --threads 1 \
+            --hash-mb 64 \
+            --stride 1 \
+            --min-ply 0 \
+            --max-ply 0 \
+            --max-positions 100 \
+            --validation-permille 100 \
+            --holdout-permille 100 \
+            --split-salt 'Chess/m5-uho-root-teacher-v1' \
+            --output-dir teacher-roots
+      - name: Freeze combined teacher corpus and provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir teacher-combined
+          cat teacher-games/teacher.jsonl teacher-roots/teacher.jsonl > teacher-combined/teacher.jsonl
+          cp teacher-games/manifest.json teacher-combined/games-manifest.json
+          cp teacher-roots/manifest.json teacher-combined/roots-manifest.json
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          path = Path('teacher-combined/teacher.jsonl')
+          digest = hashlib.sha256(path.read_bytes()).hexdigest()
+          lines = sum(1 for line in path.open(encoding='utf-8') if line.strip())
+          manifest = {
+              'schema_version': 1,
+              'corpus_id': 'm5-accepted-games-plus-uho-roots-v1',
+              'records': lines,
+              'teacher_jsonl_sha256': digest,
+              'accepted_game_artifact_id': 10024462155,
+              'accepted_game_artifact_digest': 'sha256:f23caeaf467b02fff29969741dba947a89e0cf60b03cf8fc93ded0a7004d73cb',
+              'accepted_games_pgn_sha256': '429c8c40f79782de1355ffa14c3c6a07d440b348fb4e0937af76150781e3df8e',
+              'stockfish_archive_sha256': '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f',
+          }
+          Path('teacher-combined/corpus-manifest.json').write_text(
+              json.dumps(manifest, indent=2, sort_keys=True) + '\n', encoding='utf-8'
+          )
+          print(json.dumps(manifest, indent=2, sort_keys=True))
+          PY
+      - name: Upload frozen teacher corpus
+        uses: actions/upload-artifact@v4
+        with:
+          name: m5-nnue-teacher-v1-${{ github.sha }}
+          path: teacher-combined/
+          retention-days: 30
+
+  train:
+    needs: teacher
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        hidden: [32, 64, 128]
+    name: train-${{ matrix.hidden }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - name: Install pinned analysis dependency
+        run: python -m pip install --disable-pip-version-check -r tools/requirements-analysis.txt
+      - name: Download frozen teacher corpus
+        uses: actions/download-artifact@v4
+        with:
+          name: m5-nnue-teacher-v1-${{ github.sha }}
+          path: teacher-combined
+      - name: Train deterministic reference model
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/train_nnue_reference.py \
+            --teacher teacher-combined/teacher.jsonl \
+            --output-dir "nnue-${{ matrix.hidden }}" \
+            --hidden "${{ matrix.hidden }}" \
+            --epochs 4 \
+            --learning-rate 0.00015 \
+            --seed 20260907 \
+            --target-clip-cp 1800
+          cat "nnue-${{ matrix.hidden }}/training-metadata.json"
+          cat "nnue-${{ matrix.hidden }}/export-manifest.json"
+      - name: Measure full-refresh and incremental cost
+        shell: bash
+        run: |
+          set -euo pipefail
+          NETWORK="nnue-${{ matrix.hidden }}/nnue-${{ matrix.hidden }}-v1.nnue"
+          cargo run --release --quiet -p chess-eval --example nnue_smoke -- "$NETWORK" \
+            > "nnue-${{ matrix.hidden }}/smoke.txt"
+          cargo run --release --quiet -p chess-eval --example nnue_cost -- "$NETWORK" 160 \
+            | tee "nnue-${{ matrix.hidden }}/cost.json"
+      - name: Upload trained width
+        uses: actions/upload-artifact@v4
+        with:
+          name: m5-nnue-width-${{ matrix.hidden }}-${{ github.sha }}
+          path: nnue-${{ matrix.hidden }}/
+          retention-days: 30
