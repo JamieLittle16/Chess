@@ -1,0 +1,148 @@
+name: V11 R49-R51 qualification
+
+on:
+  push:
+    branches:
+      - analysis/v11-fixed-vs-rust-public-20260907
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install competition runtime
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Materialize repaired control and candidate
+        run: |
+          set -euxo pipefail
+          cat .analysis/v11_chunks_*.b64 | base64 -d > /tmp/v11-original.zip
+          echo 'fd06e9f5718b9af3be3b13f8d6b67f92018b43ce2f2cb991063d2a281310d0b8  /tmp/v11-original.zip' | sha256sum -c -
+          rm -rf /tmp/control /tmp/candidate
+          mkdir -p /tmp/control
+          unzip -q /tmp/v11-original.zip -d /tmp/control
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/control/experiments/numba_search.py')
+          s=p.read_text()
+          old='''        move = int(moves[index])\n        order_score = int(score_stack[ply, index])\n        child_halfmove = _next_halfmove_clock(board, move, halfmove_clock)\n        _advance_eval_state_into(board, side, move, eval_stack[ply], eval_stack[ply + 1])\n        child_castling, child_ep, captured_piece, captured_square = make_move_inplace(\n            board, side, castling, ep_square, move\n        )\n'''
+          new='''        move = int(moves[index])\n        order_score = int(score_stack[ply, index])\n        child_halfmove = _next_halfmove_clock(board, move, halfmove_clock)\n        # Must classify before make_move_inplace clears the source pawn.\n        promotion_threat = _quiet_pawn_relative_rank(board, move) == 6\n        _advance_eval_state_into(board, side, move, eval_stack[ply], eval_stack[ply + 1])\n        child_castling, child_ep, captured_piece, captured_square = make_move_inplace(\n            board, side, castling, ep_square, move\n        )\n'''
+          if old not in s: raise SystemExit('repair insertion point missing')
+          s=s.replace(old,new,1)
+          old2='''        promotion_threat = _quiet_pawn_relative_rank(board, move) == 6\n        lmr_candidate = (\n'''
+          if old2 not in s: raise SystemExit('post-mutation classifier missing')
+          s=s.replace(old2,'''        lmr_candidate = (\n''',1)
+          p.write_text(s)
+          PY
+          cp -a /tmp/control /tmp/candidate
+          cd /tmp/candidate
+          patch -p1 --batch < "$GITHUB_WORKSPACE/.analysis/v11-r49-r51-candidate.patch"
+          python -m py_compile agent.py experiments/*.py
+          cd /tmp/control
+          python -m py_compile agent.py experiments/*.py
+      - name: Write fixed-node probe
+        run: |
+          cat > /tmp/probe.py <<'PY'
+          import json, random, sys, time
+          from pathlib import Path
+          import chess, numpy as np
+          root=Path(sys.argv[1]).resolve(); sys.path.insert(0,str(root))
+          from experiments.numba_core import encode_position, generate_legal_moves, move_to_uci, MAX_MOVES
+          import experiments.numba_search as s
+
+          R50='r1bqk2r/pp3ppp/2nbpn2/2pp4/3P1B2/P1P1P3/1P1N1PPP/R2QKBNR w KQkq - 1 7'
+          R51='r1bqk2r/pp1n1ppp/2n1p3/2bpP3/5P2/2NB1N2/PPP3PP/R1BQK2R b KQkq - 1 8'
+          cases={
+            'r50_pre_ned4':(R50,['d4c5','e6e5','c5d6','e5f4','e3f4','c8f5','b2b4','a7a6','d1e2','e8f8','b4b5','a6b5','e2b5','d8d6','b5b7','a8b8','b7a6','d6c5','g1e2','f6g4','d2f3','c5f2','e1d1','b8b2']),
+            'r51_pre_g5':(R51,['f7f6','d3b5','a7a6','b5c6','b7c6','c1d2']),
+            'r51_pre_h5':(R51,['f7f6','d3b5','a7a6','b5c6','b7c6','c1d2','g7g5','e5f6','g5f4','f6f7','e8f7','d2f4']),
+            'r51_pre_rh6':(R51,['f7f6','d3b5','a7a6','b5c6','b7c6','c1d2','g7g5','e5f6','g5f4','f6f7','e8f7','d2f4','h7h5','f3e5','d7e5','f4e5']),
+          }
+          def board_after(fen,moves):
+            b=chess.Board(fen)
+            for u in moves: b.push_uci(u)
+            return b
+
+          # Candidate-only exact check-classification differential, including the R50 discovered net.
+          if hasattr(s,'_qsearch_legal_moves_with_checks'):
+            rng=random.Random(51151); boards=[]
+            for fen,moves in cases.values():
+              b=board_after(fen,moves); boards.append(b.copy(stack=False))
+            b=chess.Board()
+            for _ in range(180):
+              if b.is_game_over(): b=chess.Board()
+              boards.append(b.copy(stack=False)); b.push(rng.choice(list(b.legal_moves)))
+            checked=quiet_checks=0
+            for b in boards:
+              enc=encode_position(b)
+              pseudo=np.empty(MAX_MOVES,dtype=np.int32); legal=np.empty(MAX_MOVES,dtype=np.int32)
+              own=b.king(b.turn); enemy=b.king(not b.turn)
+              n=s._qsearch_legal_moves_with_checks(enc.board,enc.side,enc.castling,enc.ep_square,pseudo,legal,int(own),int(enemy))
+              for i in range(n):
+                mv=chess.Move.from_uci(move_to_uci(int(legal[i])))
+                quiet=(not b.is_capture(mv) and mv.promotion is None)
+                expected=quiet and b.gives_check(mv)
+                actual=bool(int(pseudo[i]))
+                if expected: quiet_checks+=1
+                if actual!=expected:
+                  raise SystemExit(f'quiet-check mismatch {b.fen()} {mv} expected={expected} got={actual}')
+                checked+=1
+            print('QCHECK_DIFFERENTIAL',checked,quiet_checks)
+
+          hist=np.empty(0,dtype=np.uint64)
+          out={}
+          # First call carries compilation cost; report it separately.
+          warm=board_after(*cases['r51_pre_g5']); enc=encode_position(warm)
+          t=time.perf_counter(); s.iterative_search_stateful(enc.board.copy(),enc.side,enc.castling,enc.ep_square,warm.halfmove_clock,hist,0,2000); print('JIT_WARM_S',time.perf_counter()-t)
+          for name,(fen,moves) in cases.items():
+            b=board_after(fen,moves); enc=encode_position(b)
+            rows=[]
+            for budget in (50000,150000,350000):
+              t=time.perf_counter(); m,sc,d,n=s.iterative_search_stateful(enc.board.copy(),enc.side,enc.castling,enc.ep_square,b.halfmove_clock,hist,0,budget); dt=time.perf_counter()-t
+              rows.append({'budget':budget,'move':move_to_uci(int(m)),'score':int(sc),'depth':int(d),'nodes':int(n),'seconds':dt})
+              print('CASE',name,budget,rows[-1])
+            out[name]=rows
+          Path(sys.argv[2]).write_text(json.dumps(out,indent=2))
+          PY
+      - name: Probe repaired control
+        run: python /tmp/probe.py /tmp/control /tmp/control.json | tee /tmp/control.log
+      - name: Probe candidate
+        run: python /tmp/probe.py /tmp/candidate /tmp/candidate.json | tee /tmp/candidate.log
+      - name: Compare search cost and rated positions
+        run: |
+          python - <<'PY'
+          import json
+          a=json.load(open('/tmp/control.json')); b=json.load(open('/tmp/candidate.json'))
+          print('COMPARISON')
+          for name in a:
+            ac=a[name][-1]; bc=b[name][-1]
+            ratio=bc['seconds']/max(ac['seconds'],1e-9)
+            print(name,'control',ac,'candidate',bc,'time_ratio',round(ratio,3))
+          # The forcing-check frontier must cure the specific R50 mate-entry move at a useful node budget.
+          if b['r50_pre_ned4'][-1]['move']=='e2d4':
+            raise SystemExit('candidate still selects Round-50 19.Ned4?? at 350k nodes')
+          # A >45% fixed-node wall-time regression would almost certainly cost a completed depth in production.
+          ratios=[b[n][-1]['seconds']/max(a[n][-1]['seconds'],1e-9) for n in a]
+          if sum(ratios)/len(ratios) > 1.45:
+            raise SystemExit('candidate qsearch cost is too high')
+          PY
+      - name: Archive qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v11-r49-r51-qualification
+          path: |
+            /tmp/control.log
+            /tmp/candidate.log
+            /tmp/control.json
+            /tmp/candidate.json
+          retention-days: 7
