@@ -1,0 +1,37 @@
+name: M6 Bullet NNUE-A trainer
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  trainer-api:
+    if: github.head_ref == 'm6/bullet-nnue-a'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: Verify frozen Bullet commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -Fq 'rev = "629ee50000b2afb7b3337595401c830d3b1e0f42"' training/bullet-m6-a/Cargo.toml
+
+      - name: Format standalone trainer
+        run: cargo fmt --manifest-path training/bullet-m6-a/Cargo.toml -- --check
+
+      - name: Check pinned Bullet API without GPU backend
+        run: cargo check --manifest-path training/bullet-m6-a/Cargo.toml
+
+      - name: Clippy standalone trainer
+        run: cargo clippy --manifest-path training/bullet-m6-a/Cargo.toml -- -D warnings
