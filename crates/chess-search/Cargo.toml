@@ -10,6 +10,8 @@ repository.workspace = true
 [features]
 default = []
 search-trace = ["chess-eval/search-trace"]
+# Research-only Search v2 move-ordering experiment. Default builds remain the accepted search.
+context-history = []
 
 [dependencies]
 chess-core = { path = "../chess-core" }
