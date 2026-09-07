@@ -1,0 +1,58 @@
+name: M4 accepted RFP v1 production port
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  production-port:
+    if: github.head_ref == 'm4/reverse-futility-v1-production'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: m4/reverse-futility-v1-production
+          fetch-depth: 2
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - name: Materialize frozen accepted delta if needed
+        id: materialize
+        run: |
+          set -euo pipefail
+          if grep -q '^fn has_reverse_futility_material' crates/chess-search/src/lib.rs; then
+            echo 'already=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python3 tools/materialize_reverse_futility_v1.py
+          cargo fmt --all
+          git diff --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test -p chess-search --all-features
+          cargo test -p chess-search --test draw_strategy
+          cargo test -p chess-core --all-features
+          cargo test -p chess-engine --all-features
+          cargo test -p chess-uci --all-features
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates/chess-search/src/lib.rs
+          git commit -m 'm4: port accepted RFP v1 onto current main'
+          git push origin HEAD:m4/reverse-futility-v1-production
+          echo 'already=false' >> "$GITHUB_OUTPUT"
+      - name: Verify committed production source
+        if: steps.materialize.outputs.already == 'true'
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --all-features
+          cargo test --workspace --all-features --release
+          cargo run -q -p chess-bench -- reference-search
+          git diff --exit-code
+          git diff --cached --exit-code
