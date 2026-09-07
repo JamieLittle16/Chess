@@ -1,0 +1,83 @@
+name: Round50 Stockfish Audit
+
+on:
+  push:
+    branches:
+      - analysis/round50-stockfish
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y stockfish
+      - name: Audit Little Gambit moves
+        run: |
+          python3 - <<'PY'
+          import os,re,subprocess
+          eng='/usr/games/stockfish' if os.path.exists('/usr/games/stockfish') else 'stockfish'
+          start='r1bqk2r/pp3ppp/2nbpn2/2pp4/3P1B2/P1P1P3/1P1N1PPP/R2QKBNR w KQkq - 1 7'
+          game=[
+            'd4c5','e6e5','c5d6','e5f4','e3f4','c8f5','b2b4','a7a6',
+            'd1e2','e8f8','b4b5','a6b5','e2b5','d8d6','b5b7','a8b8',
+            'b7a6','d6c5','g1e2','f6g4','d2f3','c5f2','e1d1','b8b2',
+            'e2d4','c6e3','d1c1','b2c2','c1b1','c2a2','d4f5','f2c2'
+          ]
+          labels=['7.dxc5','8.cxd6','9.exf4','10.b4','11.Qe2+','12.b5','13.Qxb5','14.Qxb7','15.Qa6','16.Ne2','17.Nf3','18.Kd1','19.Ned4','20.Kc1','21.Kb1','22.Nxf5']
+          p=subprocess.Popen([eng],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1)
+          def c(x): p.stdin.write(x+'\n');p.stdin.flush()
+          def wait(x):
+            while True:
+              line=p.stdout.readline()
+              if not line: raise RuntimeError('engine exited')
+              if line.strip()==x: return
+          c('uci');wait('uciok');c('setoption name Threads value 1');c('setoption name Hash value 128');c('isready');wait('readyok')
+          sr=re.compile(r' score (cp|mate) (-?\d+)')
+          def run(prefix,only=None,nodes=700000):
+            c('setoption name Clear Hash')
+            cmd='position fen '+start
+            if prefix: cmd+=' moves '+' '.join(prefix)
+            c(cmd)
+            g=f'go nodes {nodes}' + ((' searchmoves '+only) if only else '')
+            c(g); last=None;best=None;pv=''
+            while True:
+              line=p.stdout.readline().strip()
+              if line.startswith('info ') and ' score ' in line:
+                m=sr.search(line)
+                if m:
+                  last=(m.group(1),int(m.group(2)))
+                  q=re.search(r' pv (.+)$',line)
+                  if q: pv=q.group(1)
+              elif line.startswith('bestmove '):
+                best=line.split()[1];break
+            return last,best,pv
+          def perft(prefix):
+            cmd='position fen '+start
+            if prefix: cmd+=' moves '+' '.join(prefix)
+            c(cmd);c('go perft 1'); moves=[]
+            while True:
+              line=p.stdout.readline().strip()
+              if line.startswith('Nodes searched:'): break
+              m=re.match(r'^([a-h][1-8][a-h][1-8][qrbn]?):\s+1$',line)
+              if m: moves.append(m.group(1))
+            return moves
+          prefix=[]
+          print('IDX LABEL PLAYED BEST BEST_SCORE PLAY_SCORE PV')
+          white_i=0
+          for ply,mv in enumerate(game):
+            if ply%2==0:
+              a,b,pv=run(prefix)
+              ap,bp,pvp=run(prefix,mv)
+              print(white_i+1,labels[white_i],mv,b,a,ap,pv)
+              if white_i>=11:
+                print(' LEGAL',labels[white_i],perft(prefix))
+              white_i+=1
+            prefix.append(mv)
+          c('quit')
+          PY
