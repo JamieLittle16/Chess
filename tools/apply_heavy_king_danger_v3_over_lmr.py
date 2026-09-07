@@ -63,7 +63,7 @@ text = replace_once(
     let mut pressure_units = 0_i32;
 
     for queen in queens {
-        pressure_units += i32::from((queen_attacks(queen, occupied) & zone).count())
+        pressure_units += (queen_attacks(queen, occupied) & zone).count() as i32
             * QUEEN_KING_ZONE_HIT_UNITS;
     }
     let rook_weight = if queen_present {
@@ -72,8 +72,7 @@ text = replace_once(
         ROOK_KING_ZONE_HIT_UNITS_WITHOUT_QUEEN
     };
     for rook in rooks {
-        pressure_units +=
-            i32::from((rook_attacks(rook, occupied) & zone).count()) * rook_weight;
+        pressure_units += (rook_attacks(rook, occupied) & zone).count() as i32 * rook_weight;
     }
     if pressure_units == 0 {
         return 0;
