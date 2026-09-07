@@ -10,7 +10,7 @@ mod root_analysis;
 
 pub use root_analysis::RootCandidate;
 
-use chess_core::{ChessMove, PieceKind, Position, generate_legal_moves_mut};
+use chess_core::{ChessMove, PieceKind, Position, generate_legal_moves_mut, has_legal_move_mut};
 use chess_eval::evaluate;
 use move_picker::MovePicker;
 
@@ -409,24 +409,23 @@ impl Searcher {
             }
         }
 
-        let moves = generate_legal_moves_mut(position);
-        if moves.is_empty() {
-            let score = terminal_score(position, ply);
-            self.table
-                .store(key, depth, score_to_tt(score, ply), Bound::Exact, None);
-            return Some(score);
-        }
-
-        // Accepted conservative reverse futility pruning v1. Terminal positions have already been
-        // handled; only shallow internal null-window nodes with non-pawn material are eligible.
+        // Accepted conservative reverse futility pruning v1. On eligible non-check scout
+        // nodes, first prove that the position is nonterminal with an early-exit legal-move probe.
+        // A successful RFP cutoff can then avoid constructing/filtering the complete legal list.
         let in_check = position.is_in_check(position.side_to_move());
         let null_window = beta == alpha + 1;
-        let pruning_static_eval = if depth <= 3
+        let pruning_eligible = depth <= 3
             && null_window
             && !in_check
             && beta.abs() < MATE_TT_THRESHOLD
-            && has_reverse_futility_material(position)
-        {
+            && has_reverse_futility_material(position);
+        let pruning_static_eval = if pruning_eligible {
+            if !has_legal_move_mut(position) {
+                let score = terminal_score(position, ply);
+                self.table
+                    .store(key, depth, score_to_tt(score, ply), Bound::Exact, None);
+                return Some(score);
+            }
             Some(evaluate(position))
         } else {
             None
@@ -436,6 +435,14 @@ impl Searcher {
             if static_eval.saturating_sub(margin) >= beta {
                 return Some(static_eval);
             }
+        }
+
+        let moves = generate_legal_moves_mut(position);
+        if moves.is_empty() {
+            let score = terminal_score(position, ply);
+            self.table
+                .store(key, depth, score_to_tt(score, ply), Bound::Exact, None);
+            return Some(score);
         }
 
         debug_assert!(path_len < MAX_SEARCH_PLY);

@@ -56,6 +56,32 @@ pub fn generate_legal_moves_mut(position: &mut Position) -> MoveList {
     filter_legal_moves(position, &pseudo, us)
 }
 
+/// Return whether the side to move has at least one legal move, restoring `position` exactly.
+///
+/// This deliberately shares the ordinary pseudo-legal generator and make/unmake legality test, but
+/// stops at the first legal move. Search uses it only on nodes that may be discarded by a static
+/// pruning decision, where constructing and legality-filtering every move would otherwise be wasted.
+#[must_use]
+pub fn has_legal_move_mut(position: &mut Position) -> bool {
+    let us = position.side_to_move();
+    if position.king_square(us).is_none() {
+        return false;
+    }
+
+    let pseudo = generate_pseudo_legal_moves(position);
+    for &mv in &pseudo {
+        let undo = position.make_move(mv);
+        let is_legal = position
+            .king_square(us)
+            .is_some_and(|king| !is_square_attacked(position, king, us.opposite()));
+        position.unmake_move(mv, undo);
+        if is_legal {
+            return true;
+        }
+    }
+    false
+}
+
 /// Generate only legal captures, en-passant moves and promotions.
 ///
 /// This is the qsearch-facing hot path. It deliberately avoids constructing ordinary quiet pawn
@@ -361,7 +387,10 @@ fn square(file: u8, rank: u8) -> Square {
 
 #[cfg(test)]
 mod tests {
-    use crate::{MoveKind, Position, generate_legal_moves_mut, generate_legal_tactical_moves_mut};
+    use crate::{
+        MoveKind, Position, generate_legal_moves_mut, generate_legal_tactical_moves_mut,
+        has_legal_move_mut,
+    };
 
     #[test]
     fn start_position_has_twenty_legal_moves() {
@@ -378,6 +407,27 @@ mod tests {
         let moves = generate_legal_moves_mut(&mut position);
         assert_eq!(moves.len(), 48);
         assert_eq!(position, before);
+    }
+
+    #[test]
+    fn legal_existence_probe_matches_full_generation_and_restores_position() {
+        let fens = [
+            crate::STARTPOS_FEN,
+            "7k/8/8/8/8/8/8/K7 w - - 0 1",
+            "7k/5Q2/6K1/8/8/8/8/8 b - - 0 1",
+            "7k/6Q1/6K1/8/8/8/8/8 b - - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+        ];
+
+        for fen in fens {
+            let mut probe_position = Position::from_fen(fen).expect("valid probe FEN");
+            let original = probe_position.clone();
+            let mut full_position = original.clone();
+            let expected = !generate_legal_moves_mut(&mut full_position).is_empty();
+            assert_eq!(has_legal_move_mut(&mut probe_position), expected, "{fen}");
+            assert_eq!(probe_position, original, "probe must restore {fen}");
+            assert_eq!(full_position, original, "full generator must restore {fen}");
+        }
     }
 
     #[test]
