@@ -47,8 +47,7 @@ pub fn material(position: &Position, color: Color) -> i32 {
 #[must_use]
 pub fn evaluate(position: &Position) -> i32 {
     let enabled = EXPERIMENTAL_JOINT_TAPERED_PSQT_V1.get_or_init(|| {
-        std::env::var("CHESS_EXPERIMENTAL_JOINT_TAPERED_PSQT_V1")
-            .is_ok_and(|value| value == "1")
+        std::env::var("CHESS_EXPERIMENTAL_JOINT_TAPERED_PSQT_V1").is_ok_and(|value| value == "1")
     });
     if *enabled {
         evaluate_joint_tapered_psqt_v1(position)
@@ -124,11 +123,10 @@ fn evaluate_joint_tapered_psqt_v1(position: &Position) -> i32 {
                         square.file(),
                         square.rank(),
                     );
-                middle_game += sign
-                    * (i32::from(MG_PSQT[kind.index()][relative_index])
-                        + correction_middle_game);
-                end_game += sign
-                    * (i32::from(EG_PSQT[kind.index()][relative_index]) + correction_end_game);
+                middle_game +=
+                    sign * (i32::from(MG_PSQT[kind.index()][relative_index]) + correction_middle_game);
+                end_game +=
+                    sign * (i32::from(EG_PSQT[kind.index()][relative_index]) + correction_end_game);
             }
         }
     }
