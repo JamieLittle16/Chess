@@ -365,7 +365,7 @@ mod tests {
             None,
         );
         assert_special_move(
-            "k7/8/8/4KPpr/8/8/8/8 w - g6 0 1",
+            "k7/8/8/4KPp1/8/8/8/8 w - g6 0 1",
             square(5, 4),
             square(6, 5),
             None,
