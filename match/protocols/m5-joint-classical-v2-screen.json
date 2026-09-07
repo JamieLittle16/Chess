@@ -1,0 +1,14 @@
+{
+  "event": "M5 joint classical evaluator v2 100-game screen",
+  "games": 100,
+  "time_control": "1+0.01",
+  "concurrency": 1,
+  "hash_mb": 32,
+  "threads": 1,
+  "max_moves": 300,
+  "ponder": false,
+  "tablebases": false,
+  "eval_adjudication": false,
+  "opening_order": "random",
+  "repeat": true
+}
