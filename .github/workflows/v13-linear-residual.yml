@@ -1,0 +1,115 @@
+name: V13 linear residual
+
+on:
+  push:
+    branches:
+      - analysis/v13-linear-residual
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  train-residual:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install analysis dependencies
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy scipy scikit-learn
+      - name: Download immutable accepted 200-game source
+        uses: actions/download-artifact@v4
+        with:
+          name: m4-static-legality-v1-acceptance-1f44bb9d867c5c8166e1590324c41b66a44ea924
+          path: .qualification/frozen-games
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34136520700
+      - name: Verify frozen game source
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '429c8c40f79782de1355ffa14c3c6a07d440b348fb4e0937af76150781e3df8e  .qualification/frozen-games/games.pgn' | sha256sum --check --strict
+      - name: Fetch pinned Stockfish 19
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/stockfish
+          curl --fail --location --retry 3 \
+            --output .qualification/stockfish.tar.gz \
+            https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  .qualification/stockfish.tar.gz' | sha256sum --check --strict
+          tar -xzf .qualification/stockfish.tar.gz -C .qualification/stockfish
+          STOCKFISH_BIN=$(find "$PWD/.qualification/stockfish" -type f -name 'stockfish*' -perm -111 -print -quit)
+          test -n "$STOCKFISH_BIN"
+          echo "STOCKFISH_BIN=$STOCKFISH_BIN" >> "$GITHUB_ENV"
+      - name: Label dense reached positions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/generate_nnue_teacher_data.py \
+            --stockfish "$STOCKFISH_BIN" \
+            --pgn .qualification/frozen-games/games.pgn \
+            --nodes 8000 \
+            --threads 1 \
+            --hash-mb 64 \
+            --stride 1 \
+            --min-ply 8 \
+            --max-ply 180 \
+            --max-positions 22000 \
+            --validation-permille 100 \
+            --holdout-permille 100 \
+            --split-salt 'Chess/v13-large-width32-v1' \
+            --output-dir teacher-games
+      - name: Label all frozen UHO roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/generate_nnue_teacher_data.py \
+            --stockfish "$STOCKFISH_BIN" \
+            --epd match/openings/m3-uho-lichess-100-v1.epd \
+            --nodes 25000 \
+            --threads 1 \
+            --hash-mb 64 \
+            --stride 1 \
+            --min-ply 0 \
+            --max-ply 0 \
+            --max-positions 100 \
+            --validation-permille 100 \
+            --holdout-permille 100 \
+            --split-salt 'Chess/v13-large-width32-v1' \
+            --output-dir teacher-roots
+      - name: Combine teacher corpus
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir teacher-combined
+          cat teacher-games/teacher.jsonl teacher-roots/teacher.jsonl > teacher-combined/teacher.jsonl
+          cp teacher-games/manifest.json teacher-combined/games-manifest.json
+          cp teacher-roots/manifest.json teacher-combined/roots-manifest.json
+          sha256sum teacher-combined/teacher.jsonl
+      - name: Train quantized residual
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/train_v13_linear_residual.py \
+            --teacher teacher-combined/teacher.jsonl \
+            --output-dir residual
+          cat residual/model.json
+          cat residual/report.json
+      - name: Freeze corpus manifest with model
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp teacher-games/manifest.json residual/games-manifest.json
+          cp teacher-roots/manifest.json residual/roots-manifest.json
+          sha256sum residual/weights.i16 residual/model.json residual/report.json > residual/SHA256SUMS
+      - name: Upload V13 residual artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: v13-linear-residual-${{ github.sha }}
+          path: residual/
+          retention-days: 30
