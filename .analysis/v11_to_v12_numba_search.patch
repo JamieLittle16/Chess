@@ -1,0 +1,362 @@
+--- experiments/numba_search.py
++++ experiments/numba_search.py
+@@ -860,6 +860,9 @@
+                 return -MATE + ply, False
+         return 0, False
+ 
++    if _is_elementary_dead_material(board, eval_stack[ply]):
++        return 0, False
++
+     checked = _state_in_check(board, side, eval_stack[ply])
+     if not checked:
+         stand_pat = _evaluate_state(side, eval_stack[ply])
+@@ -936,21 +939,48 @@
+     return alpha, False
+ 
+ 
++@njit(cache=False, inline="never")
++def _is_elementary_dead_material(board: np.ndarray, state: np.ndarray) -> bool:
++    # Cheap exact draw recognition for K vs K, K+B vs K and K+N vs K.
++    # EVAL_PHASE is zero/one only in these tiny-material regimes, so normal
++    # middlegame nodes return before touching the board.
++    if int(state[EVAL_PHASE]) > 1:
++        return False
++    minors = 0
++    for square in range(64):
++        piece = abs(int(board[square]))
++        if piece == PAWN or piece == ROOK or piece == QUEEN:
++            return False
++        if piece == KNIGHT or piece == BISHOP:
++            minors += 1
++            if minors > 1:
++                return False
++    return True
++
++
+ @njit(cache=False, inline="always")
+-def _should_reduce_late_move(
+-    depth: int,
+-    move_index: int,
+-    quiet: bool,
+-    parent_in_check: bool,
+-    gives_check: bool,
+-) -> bool:
+-    return (
+-        depth >= 3
+-        and move_index >= 3
+-        and quiet
+-        and not parent_in_check
+-        and not gives_check
+-    )
++def _has_nonpawn_material(board: np.ndarray, side: int) -> bool:
++    # Conservative zugzwang gate used only on shallow scout nodes. Early exit makes this much
++    # cheaper than full move generation in ordinary middlegames.
++    for square in range(64):
++        signed_piece = int(board[square])
++        if signed_piece * side > 0:
++            piece = abs(signed_piece)
++            if piece == KNIGHT or piece == BISHOP or piece == ROOK or piece == QUEEN:
++                return True
++    return False
++
++
++@njit(cache=False, inline="always")
++def _lmr_v3_reduction(depth: int, move_index: int) -> int:
++    """Accepted Rust adaptive verified-LMR schedule, zero-based move index."""
++    if depth >= 9 and move_index >= 12:
++        return 3
++    if depth >= 6 and move_index >= 8:
++        return 2
++    if depth >= 3 and move_index >= 4:
++        return 1
++    return 0
+ 
+ 
+ @njit(cache=False)
+@@ -992,6 +1022,8 @@
+             ) == 0:
+                 return -MATE + ply, False
+         return 0, False
++    if _is_elementary_dead_material(board, eval_stack[ply]):
++        return 0, False
+     if depth <= 0:
+         return _quiescence(
+             board,
+@@ -1044,6 +1076,23 @@
+     )
+     if count == 0:
+         return (-MATE + ply if _state_in_check(board, side, eval_stack[ply]) else 0), False
++
++    checked = _state_in_check(board, side, eval_stack[ply])
++    # Conservative reverse-futility pruning ported from the accepted Rust policy. Rule draws and
++    # terminal positions were handled first; only shallow non-check scout nodes with own non-pawn
++    # material may return the static lower bound.
++    pruning_static_eval = INFINITY
++    if (
++        depth <= 3
++        and beta == alpha + 1
++        and not checked
++        and abs(beta) < MATE_THRESHOLD
++        and _has_nonpawn_material(board, side)
++    ):
++        pruning_static_eval = _evaluate_state(side, eval_stack[ply])
++        if pruning_static_eval - 120 * depth >= beta:
++            return pruning_static_eval, False
++
+     hash_index = int(current_key & np.uint64(HASH_MOVE_MASK))
+     hash_preferred = int(hash_moves[hash_index]) if hash_keys[hash_index] == current_key else -1
+     preferred = tt_preferred if tt_preferred >= 0 else hash_preferred
+@@ -1059,10 +1108,14 @@
+ 
+     best_score = -INFINITY
+     best_move = -1
+-    checked = _state_in_check(board, side, eval_stack[ply])
+     for index in range(count):
+         move = int(moves[index])
+         order_score = int(score_stack[ply, index])
++        # Submission-V11 recursive semantics: immediate-promotion verification is root-only.
++        # Recursive quiet pawn pushes are ordinary quiets, so do not pay for a promotion classifier
++        # in this hot loop or bias LMR/futility/killer behaviour here.
++        quiet = not _is_tactical(board, move)
++        protected_killer = move == int(killers[ply, 0]) or move == int(killers[ply, 1])
+         child_halfmove = _next_halfmove_clock(board, move, halfmove_clock)
+         _advance_eval_state_into(board, side, move, eval_stack[ply], eval_stack[ply + 1])
+         child_castling, child_ep, captured_piece, captured_square = make_move_inplace(
+@@ -1084,81 +1137,85 @@
+             current_context, current_key, child_halfmove
+         )
+ 
+-        # Conservative verified LMR. Promotion verification is intentionally ROOT-ONLY:
+-        # enabling the seventh-rank extension throughout the recursive tree consumed too much
+-        # search budget and regressed strength. Recursive quiet pawn pushes therefore follow the
+-        # same proven V11 reduction policy as other quiet moves. Checks are still never reduced,
+-        # and every reduced alpha improvement is verified at full depth.
+-        lmr_candidate = (
+-            depth >= 3
+-            and index >= 3
+-            and not checked
+-            and order_score < 5_040_000
+-        )
+-        gives_check = _state_in_check(board, -side, eval_stack[ply + 1]) if lmr_candidate else False
+-        reduce = lmr_candidate and not gives_check
+-        search_depth = depth - 2 if reduce else depth - 1
+-        child_score, aborted = _negamax(
+-            board,
+-            -side,
+-            child_castling,
+-            child_ep,
+-            child_halfmove,
+-            search_depth,
+-            -beta,
+-            -alpha,
+-            ply + 1,
+-            nodes,
+-            max_nodes,
+-            hard_deadline_ticks,
+-            pseudo_stack,
+-            move_stack,
+-            score_stack,
+-            eval_stack,
+-            history_keys,
+-            history_count,
+-            path_keys,
+-            killers,
+-            hash_keys,
+-            hash_moves,
+-            history_contexts,
+-            tt_table,
+-        )
+-        if aborted:
++        # Adaptive verified LMR v3. Captures/promotions, both killers, checks, nodes in check and
++        # the defender-safe immediate promotion threat are never reduced. The deeper R2/R3 bands
++        # only apply to genuinely late quiets. Any reduced alpha raise is verified at full depth.
++        lmr_candidate = not checked and quiet and not protected_killer
++        reduction = _lmr_v3_reduction(depth, index) if lmr_candidate else 0
++        futility_candidate = (
++            pruning_static_eval != INFINITY
++            and depth <= 2
++            and index >= 4
++            and quiet
++            and not protected_killer
++            and abs(alpha) < MATE_THRESHOLD
++            and pruning_static_eval + 180 * depth <= alpha
++        )
++        # Check status only matters when this quiet could actually be reduced or pruned. Avoiding
++        # the attack test for early/non-reduced quiets preserves exact search semantics while
++        # removing work from one of the hottest recursive paths.
++        need_gives_check = lmr_candidate and (reduction > 0 or futility_candidate)
++        gives_check = _state_in_check(board, -side, eval_stack[ply + 1]) if need_gives_check else False
++        # Accepted Rust late-quiet futility on top of submission-V11 recursive semantics. The shared
++        # static eval exists only on the same conservative scout
++        # nodes as RFP. We have already made the move so gives_check is exact; skipped moves are
++        # immediately unmade and never enter TT/killer state.
++        if futility_candidate and not gives_check:
+             undo_move_inplace(board, side, move, captured_piece, captured_square)
+-            return 0, True
+-        score = -child_score
+-        if reduce and score > alpha:
++            continue
++
++        if gives_check:
++            reduction = 0
++        reduce = reduction > 0
++        search_depth = max(0, depth - 1 - reduction)
++        # Principal variation search: the first ordered move keeps the ordinary window. Later
++        # moves are expected to fail low, so probe them with a one-point window and only pay for a
++        # full-window verification when a full-depth probe genuinely raises alpha. Reduced probes
++        # are still verified at full depth before they may influence alpha or cause a cutoff.
++        if index == 0:
++            child_score, aborted = _negamax(
++                board, -side, child_castling, child_ep, child_halfmove, search_depth,
++                -beta, -alpha, ply + 1, nodes, max_nodes, hard_deadline_ticks,
++                pseudo_stack, move_stack, score_stack, eval_stack, history_keys, history_count,
++                path_keys, killers, hash_keys, hash_moves, history_contexts, tt_table,
++            )
++            if aborted:
++                undo_move_inplace(board, side, move, captured_piece, captured_square)
++                return 0, True
++            score = -child_score
++        else:
+             child_score, aborted = _negamax(
+-                board,
+-                -side,
+-                child_castling,
+-                child_ep,
+-                child_halfmove,
+-                depth - 1,
+-                -beta,
+-                -alpha,
+-                ply + 1,
+-                nodes,
+-                max_nodes,
+-                hard_deadline_ticks,
+-                pseudo_stack,
+-                move_stack,
+-                score_stack,
+-                eval_stack,
+-                history_keys,
+-                history_count,
+-                path_keys,
+-                killers,
+-                hash_keys,
+-                hash_moves,
+-                history_contexts,
+-                tt_table,
++                board, -side, child_castling, child_ep, child_halfmove, search_depth,
++                -alpha - 1, -alpha, ply + 1, nodes, max_nodes, hard_deadline_ticks,
++                pseudo_stack, move_stack, score_stack, eval_stack, history_keys, history_count,
++                path_keys, killers, hash_keys, hash_moves, history_contexts, tt_table,
+             )
+             if aborted:
+                 undo_move_inplace(board, side, move, captured_piece, captured_square)
+                 return 0, True
+             score = -child_score
++            if reduce and score > alpha:
++                child_score, aborted = _negamax(
++                    board, -side, child_castling, child_ep, child_halfmove, depth - 1,
++                    -alpha - 1, -alpha, ply + 1, nodes, max_nodes, hard_deadline_ticks,
++                    pseudo_stack, move_stack, score_stack, eval_stack, history_keys, history_count,
++                    path_keys, killers, hash_keys, hash_moves, history_contexts, tt_table,
++                )
++                if aborted:
++                    undo_move_inplace(board, side, move, captured_piece, captured_square)
++                    return 0, True
++                score = -child_score
++            if score > alpha and score < beta:
++                child_score, aborted = _negamax(
++                    board, -side, child_castling, child_ep, child_halfmove, depth - 1,
++                    -beta, -alpha, ply + 1, nodes, max_nodes, hard_deadline_ticks,
++                    pseudo_stack, move_stack, score_stack, eval_stack, history_keys, history_count,
++                    path_keys, killers, hash_keys, hash_moves, history_contexts, tt_table,
++                )
++                if aborted:
++                    undo_move_inplace(board, side, move, captured_piece, captured_square)
++                    return 0, True
++                score = -child_score
+         undo_move_inplace(board, side, move, captured_piece, captured_square)
+         if score > best_score:
+             best_score = score
+@@ -1166,8 +1223,7 @@
+         if score > alpha:
+             alpha = score
+         if alpha >= beta:
+-            # Preserve the proven V11 recursive killer policy. Root-only promotion verification
+-            # deliberately does not change recursive killer semantics.
++            # Preserve submission-V11 recursive killer semantics; promotion verification is root-only.
+             if order_score < 5_590_000:
+                 current = int(killers[ply, 0])
+                 if move != current:
+@@ -1206,6 +1262,7 @@
+     return best_score, False
+ 
+ 
++
+ @njit(cache=False)
+ def _root(
+     board: np.ndarray,
+@@ -1263,9 +1320,8 @@
+         move = int(moves[index])
+         child_depth = depth - 1
+         if depth == 1 and _quiet_pawn_relative_rank(board, move) == 6:
+-            # Deliberately root-only: verify an immediate quiet seventh-rank push with one complete
+-            # defender reply, but do not recursively extend analogous pushes deeper in the tree.
+-            # This keeps the useful V10 horizon repair without globally biasing search effort.
++            # Root preferred moves live in the 10M ordering band, so classify the rare horizon case
++            # directly rather than inferring it from order_score.
+             child_depth = depth
+         child_halfmove = _next_halfmove_clock(board, move, halfmove_clock)
+         _advance_eval_state_into(board, side, move, eval_stack[0], eval_stack[1])
+@@ -1287,32 +1343,27 @@
+         history_contexts[1] = _child_history_context(
+             root_context, root_key, child_halfmove
+         )
+-        score, aborted = _negamax(
+-            board,
+-            -side,
+-            child_castling,
+-            child_ep,
+-            child_halfmove,
+-            child_depth,
+-            -INFINITY,
+-            -alpha,
+-            1,
+-            nodes,
+-            max_nodes,
+-            hard_deadline_ticks,
+-            pseudo_stack,
+-            move_stack,
+-            score_stack,
+-            eval_stack,
+-            history_keys,
+-            history_count,
+-            path_keys,
+-            killers,
+-            hash_keys,
+-            hash_moves,
+-            history_contexts,
+-            tt_table,
+-        )
++        if index == 0:
++            score, aborted = _negamax(
++                board, -side, child_castling, child_ep, child_halfmove, child_depth,
++                -INFINITY, -alpha, 1, nodes, max_nodes, hard_deadline_ticks,
++                pseudo_stack, move_stack, score_stack, eval_stack, history_keys, history_count,
++                path_keys, killers, hash_keys, hash_moves, history_contexts, tt_table,
++            )
++        else:
++            score, aborted = _negamax(
++                board, -side, child_castling, child_ep, child_halfmove, child_depth,
++                -alpha - 1, -alpha, 1, nodes, max_nodes, hard_deadline_ticks,
++                pseudo_stack, move_stack, score_stack, eval_stack, history_keys, history_count,
++                path_keys, killers, hash_keys, hash_moves, history_contexts, tt_table,
++            )
++            if not aborted and -score > alpha:
++                score, aborted = _negamax(
++                    board, -side, child_castling, child_ep, child_halfmove, child_depth,
++                    -INFINITY, -alpha, 1, nodes, max_nodes, hard_deadline_ticks,
++                    pseudo_stack, move_stack, score_stack, eval_stack, history_keys, history_count,
++                    path_keys, killers, hash_keys, hash_moves, history_contexts, tt_table,
++                )
+         undo_move_inplace(board, side, move, captured_piece, captured_square)
+         if aborted:
+             return best_move, best_score, True
