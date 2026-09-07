@@ -1,0 +1,29 @@
+name: V13 dynamic feature parity probe
+
+on:
+  push:
+    branches:
+      - analysis/v13-dynamic-parity2
+
+jobs:
+  parity:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy scikit-learn scipy
+      - name: Print canonical dynamic features
+        run: |
+          python - <<'PY'
+          import chess, json
+          from scripts.train_v13_dynamic_residual import dynamic_features
+          fens = {
+            'm23':'5rk1/pq3ppp/1p2pn2/3rN3/P7/1P3PP1/1Q2R1KP/R7 w - - 0 1',
+            'm24':'3r2k1/pq3ppp/1p2pn2/3rN3/P7/RP3PP1/1Q2R1KP/8 w - - 0 1',
+            'm31':'3r2k1/pq3p1p/1p2p1p1/1P2R3/P6P/R1Q2PP1/3r2K1/8 w - - 0 1',
+          }
+          for name, fen in fens.items():
+              print(name, [int(x) for x in dynamic_features(chess.Board(fen))])
+          PY
