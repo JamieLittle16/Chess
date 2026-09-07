@@ -302,8 +302,7 @@ mod tests {
 
     #[test]
     fn en_passant_removes_the_off_target_captured_pawn() {
-        let position =
-            Position::from_fen("k7/8/8/4KPp1/8/8/8/8 w - g6 0 1").expect("valid FEN");
+        let position = Position::from_fen("k7/8/8/4KPp1/8/8/8/8 w - g6 0 1").expect("valid FEN");
         let mv = position
             .legal_moves()
             .iter()
