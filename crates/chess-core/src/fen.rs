@@ -57,7 +57,8 @@ impl Position {
             }
             let mut empty = 0_u8;
             for file in 0_u8..8 {
-                let square = Square::from_file_rank(file, rank).expect("board coordinates are valid");
+                let square =
+                    Square::from_file_rank(file, rank).expect("board coordinates are valid");
                 if let Some(piece) = self.piece_at(square) {
                     if empty != 0 {
                         output.push(char::from(b'0' + empty));
