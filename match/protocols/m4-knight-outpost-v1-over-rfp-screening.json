@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "protocol_id": "m4-knight-outpost-v1-over-rfp-screening",
+  "runner": "fastchess",
+  "games": 100,
+  "time_control": "1+0.01",
+  "concurrency": 1,
+  "seed": 20260921,
+  "max_moves": 300,
+  "opening_format": "epd",
+  "openings_required": true,
+  "opening_suite_id": "m3-uho-lichess-100-v1",
+  "opening_sha256": "599a45efb446e91952d13e79bc7fec8de319e332036a54552a3e8e4af91f9cf1",
+  "paired_colour_reversal": true,
+  "ponder": false,
+  "tablebases": false,
+  "evaluation_adjudication": false,
+  "notes": "Knight-outpost v1 over accepted RFP: only advanced relative ranks 4-6, must be pawn-supported, and no enemy pawn on an adjacent file may still be able to advance and challenge the square. Cheap pawn geometry only; no general mobility or search changes."
+}
