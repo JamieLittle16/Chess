@@ -4,14 +4,19 @@
 //! negamax/alpha-beta search with deterministic move ordering and a bounded direct-mapped
 //! transposition table. It is the control group for later tactical and strategic search research.
 
+mod history;
 mod move_picker;
 mod quiescence;
 mod root_analysis;
+mod see;
 
 pub use root_analysis::RootCandidate;
 
-use chess_core::{ChessMove, PieceKind, Position, generate_legal_moves_mut, has_legal_move_mut};
+use chess_core::{
+    ChessMove, Color, PieceKind, Position, generate_legal_moves_mut, has_legal_move_mut,
+};
 use chess_eval::evaluate;
+use history::HistoryTables;
 use move_picker::MovePicker;
 
 /// Scores at or above this range encode forced mate rather than static evaluation.
@@ -74,6 +79,7 @@ pub struct Searcher {
     tt_hits: u64,
     path_keys: [u64; MAX_SEARCH_PLY],
     killers: [[Option<ChessMove>; 2]; MAX_SEARCH_PLY],
+    history: HistoryTables,
 }
 
 impl Searcher {
@@ -85,6 +91,7 @@ impl Searcher {
             tt_hits: 0,
             path_keys: [0; MAX_SEARCH_PLY],
             killers: [[None; 2]; MAX_SEARCH_PLY],
+            history: HistoryTables::default(),
         }
     }
 
@@ -122,6 +129,7 @@ impl Searcher {
         self.nodes = 1;
         self.tt_hits = 0;
         self.killers = [[None; 2]; MAX_SEARCH_PLY];
+        self.history = HistoryTables::default();
         let result = self
             .search_root(position, prior_history, depth, &NeverStop)
             .expect("NeverStop cannot interrupt search");
@@ -191,6 +199,7 @@ impl Searcher {
         self.nodes = 0;
         self.tt_hits = 0;
         self.killers = [[None; 2]; MAX_SEARCH_PLY];
+        self.history = HistoryTables::default();
         let mut last_completed = None;
 
         for depth in 1..=max_depth {
@@ -236,8 +245,6 @@ impl Searcher {
         depth: u8,
         control: &C,
     ) -> Option<SearchResult> {
-        // Control must precede even an exact root TT hit; otherwise a cached result can make an
-        // interruptible depth-only search ignore an already-issued UCI `stop`.
         if control.should_stop(self.nodes) {
             return None;
         }
@@ -288,11 +295,12 @@ impl Searcher {
         let mut best_score = -INFINITY;
         let mut alpha = -INFINITY;
         self.path_keys[0] = repetition_key;
+        let root_color = position.side_to_move();
 
         let mut moves = moves;
         let mut picker = MovePicker::new(&mut moves, hint, [None; 2]);
         let mut first_move = true;
-        while let Some(mv) = picker.next(position) {
+        while let Some(mv) = picker.next(position, &self.history, root_color) {
             let undo = position.make_move(mv);
             let child = if first_move {
                 self.negamax(
@@ -306,8 +314,6 @@ impl Searcher {
                     control,
                 )
             } else {
-                // Later root moves first get a null-window probe. Good ordering
-                // should make most fail low; only alpha-raising moves are re-searched.
                 let probe = self.negamax(
                     position,
                     prior_history,
@@ -381,9 +387,6 @@ impl Searcher {
             prior_history,
             &self.path_keys[..path_len],
         ) {
-            // Checkmate ends the game before a draw claim can be made. We only need legal move
-            // generation in the draw path when the side to move is actually in check; otherwise a
-            // claimable draw can return immediately.
             if position.is_in_check(position.side_to_move()) {
                 let moves = generate_legal_moves_mut(position);
                 if moves.is_empty() {
@@ -409,9 +412,6 @@ impl Searcher {
             }
         }
 
-        // Accepted conservative reverse futility pruning v1. On eligible non-check scout
-        // nodes, first prove that the position is nonterminal with an early-exit legal-move probe.
-        // A successful RFP cutoff can then avoid constructing/filtering the complete legal list.
         let in_check = position.is_in_check(position.side_to_move());
         let null_window = beta == alpha + 1;
         let pruning_eligible = depth <= 3
@@ -451,15 +451,22 @@ impl Searcher {
         let hint = table_entry.and_then(|entry| entry.best_move);
         let mut best = -INFINITY;
         let mut best_move = None;
+        let us = position.side_to_move();
 
         let mut moves = moves;
         let killers = self.killers[usize::from(ply)];
         let mut picker = MovePicker::new(&mut moves, hint, killers);
         let mut first_move = true;
         let mut move_index = 0usize;
-        while let Some(mv) = picker.next(position) {
+        while let Some(mv) = picker.next(position, &self.history, us) {
             let quiet = !mv.kind().is_capture() && !mv.kind().is_promotion();
             let protected_killer = killers.contains(&Some(mv));
+            let history_score = if quiet {
+                self.history.quiet_score(us, mv)
+            } else {
+                self.history.capture_score(position, mv)
+            };
+            let alpha_before_move = alpha;
             let undo = position.make_move(mv);
             let gives_check = position.is_in_check(position.side_to_move());
             if let Some(static_eval) = pruning_static_eval
@@ -492,12 +499,8 @@ impl Searcher {
                     control,
                 )
             } else {
-                // Adaptive LMR v3. Only late ordinary quiets in non-check nodes are reduced. The
-                // schedule becomes more aggressive only at deeper nodes and much later moves.
-                // Any reduced alpha raise is re-probed at full depth before normal PVS verification,
-                // so a reduced result can never directly become a principal score or beta cutoff.
                 let reduction = if !in_check && quiet && !protected_killer && !gives_check {
-                    lmr_v3_reduction(depth, move_index)
+                    lmr_v4_reduction(depth, move_index, history_score)
                 } else {
                     0
                 };
@@ -552,14 +555,25 @@ impl Searcher {
             }
             alpha = alpha.max(score);
             if alpha >= beta {
-                if !mv.kind().is_capture() && !mv.kind().is_promotion() {
+                if quiet {
                     let killers = &mut self.killers[usize::from(ply)];
                     if killers[0] != Some(mv) {
                         killers[1] = killers[0];
                         killers[0] = Some(mv);
                     }
+                    self.history.reward_quiet(us, mv, depth);
+                } else if mv.kind().is_capture() {
+                    self.history.reward_capture(position, mv, depth);
                 }
                 break;
+            }
+
+            if score <= alpha_before_move {
+                if quiet {
+                    self.history.penalize_quiet(us, mv, depth);
+                } else if mv.kind().is_capture() {
+                    self.history.penalize_capture(position, mv, depth);
+                }
             }
         }
 
@@ -680,6 +694,19 @@ fn lmr_v3_reduction(depth: u8, move_index: usize) -> u8 {
     } else {
         0
     }
+}
+
+fn lmr_v4_reduction(depth: u8, move_index: usize, history_score: i32) -> u8 {
+    let mut reduction = lmr_v3_reduction(depth, move_index);
+    if reduction == 0 {
+        return 0;
+    }
+    if history_score >= 1_024 {
+        reduction = reduction.saturating_sub(1);
+    } else if history_score <= -1_024 && depth >= 6 {
+        reduction = reduction.saturating_add(1);
+    }
+    reduction.min(depth.saturating_sub(2))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1007,6 +1034,13 @@ mod tests {
         assert!(!super::should_prune_late_quiet_futility(
             3, 4, false, true, true, false, false, -800, -100, -99,
         ));
+    }
+
+    #[test]
+    fn history_modulates_lmr_without_reducing_early_moves() {
+        assert_eq!(super::lmr_v4_reduction(6, 3, -8_000), 0);
+        assert!(super::lmr_v4_reduction(9, 12, 2_000) < super::lmr_v4_reduction(9, 12, 0));
+        assert!(super::lmr_v4_reduction(9, 12, -2_000) > super::lmr_v4_reduction(9, 12, 0));
     }
 
     #[test]
