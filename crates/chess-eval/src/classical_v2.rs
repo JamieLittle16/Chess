@@ -1,6 +1,6 @@
 use chess_core::{
-    Bitboard, Color, PieceKind, Position, bishop_attacks, king_attacks, knight_attacks, pawn_attacks,
-    queen_attacks, rook_attacks,
+    Bitboard, Color, PieceKind, Position, bishop_attacks, king_attacks, knight_attacks,
+    pawn_attacks, queen_attacks, rook_attacks,
 };
 
 use super::{MAX_PHASE, PHASE_WEIGHTS};
@@ -28,8 +28,6 @@ const PAWN_THREATS: usize = 18;
 const CENTRAL_PAWN_CONTROL: usize = 19;
 const CENTRAL_OCCUPANCY: usize = 20;
 
-const BOARD_MASK: u64 = u64::MAX;
-const FILE_A: u64 = 0x0101_0101_0101_0101;
 const CENTRAL_16: u64 = 0x0000_3c3c_3c3c_0000;
 
 /// Two frozen fits over the same small structural feature set.
@@ -56,12 +54,12 @@ impl JointClassicalVariant {
     const fn middle_game_weights(self) -> &'static [i16; FEATURE_COUNT] {
         match self {
             Self::CpResidual => &[
-                -18, -15, -3, -4, 41, 29, -12, 133, -38, 12, 7, 8, 1, 10, 34, 21, -45, -33,
-                18, 10, -6,
+                -18, -15, -3, -4, 41, 29, -12, 133, -38, 12, 7, 8, 1, 10, 34, 21, -45, -33, 18, 10,
+                -6,
             ],
             Self::WdlResidual => &[
-                -19, -37, -27, -10, 108, -2, 2, 159, 57, 11, 9, 13, -7, 51, 26, 24, -50,
-                -29, 20, 30, -2,
+                -19, -37, -27, -10, 108, -2, 2, 159, 57, 11, 9, 13, -7, 51, 26, 24, -50, -29, 20,
+                30, -2,
             ],
         }
     }
@@ -69,12 +67,11 @@ impl JointClassicalVariant {
     const fn end_game_weights(self) -> &'static [i16; FEATURE_COUNT] {
         match self {
             Self::CpResidual => &[
-                -39, 10, -11, 27, 4, -9, 49, 134, 273, 2, 1, 10, 13, 74, 24, 4, 63, -12, 37,
-                -6, 20,
+                -39, 10, -11, 27, 4, -9, 49, 134, 273, 2, 1, 10, 13, 74, 24, 4, 63, -12, 37, -6, 20,
             ],
             Self::WdlResidual => &[
-                -72, -26, -22, 18, -16, 14, 24, 67, 157, -6, -7, 2, -18, 23, 15, -4, 24, 15,
-                37, 13, -13,
+                -72, -26, -22, 18, -16, 14, 24, 67, 157, -6, -7, 2, -18, 23, 15, -4, 24, 15, 37,
+                13, -13,
             ],
         }
     }
@@ -100,7 +97,10 @@ struct SideFeatures {
 /// move generation; no legal-move list is constructed.
 pub(crate) fn residual(position: &Position, variant: JointClassicalVariant) -> i32 {
     let occupied = position.occupied();
-    let own_occupied = [occupied_by(position, Color::White), occupied_by(position, Color::Black)];
+    let own_occupied = [
+        occupied_by(position, Color::White),
+        occupied_by(position, Color::Black),
+    ];
     let pawn_attack_maps = [
         pawn_attack_union(position, Color::White),
         pawn_attack_union(position, Color::Black),
@@ -137,8 +137,7 @@ pub(crate) fn residual(position: &Position, variant: JointClassicalVariant) -> i
     }
 
     let phase = phase(position);
-    let white_minus_black =
-        (middle_game * phase + end_game * (MAX_PHASE - phase)) / MAX_PHASE;
+    let white_minus_black = (middle_game * phase + end_game * (MAX_PHASE - phase)) / MAX_PHASE;
     let oriented = match position.side_to_move() {
         Color::White => white_minus_black,
         Color::Black => -white_minus_black,
@@ -172,8 +171,8 @@ fn analyze_side(
 
     for square in pawns {
         let file = usize::from(square.file());
-        let isolated = (file == 0 || file_counts[file - 1] == 0)
-            && (file == 7 || file_counts[file + 1] == 0);
+        let isolated =
+            (file == 0 || file_counts[file - 1] == 0) && (file == 7 || file_counts[file + 1] == 0);
         if isolated {
             result.values[ISOLATED_PAWNS] += 1;
         }
@@ -204,7 +203,7 @@ fn analyze_side(
                 PieceKind::Pawn | PieceKind::King => Bitboard::EMPTY,
             };
             result.attacks = result.attacks | attacks;
-            let safe = attacks.raw() & !own_occupied.raw() & !enemy_pawn_raw & BOARD_MASK;
+            let safe = attacks.raw() & !own_occupied.raw() & !enemy_pawn_raw;
             result.values[feature] += safe.count_ones() as i32;
         }
     }
@@ -273,10 +272,8 @@ fn analyze_side(
             (own_pawn_attacks & position.pieces(color.opposite(), kind)).count() as i32 * weight;
     }
 
-    result.values[CENTRAL_PAWN_CONTROL] =
-        (own_pawn_attacks.raw() & CENTRAL_16).count_ones() as i32;
-    result.values[CENTRAL_OCCUPANCY] =
-        (own_occupied.raw() & CENTRAL_16).count_ones() as i32;
+    result.values[CENTRAL_PAWN_CONTROL] = (own_pawn_attacks.raw() & CENTRAL_16).count_ones() as i32;
+    result.values[CENTRAL_OCCUPANCY] = (own_occupied.raw() & CENTRAL_16).count_ones() as i32;
 
     result
 }
@@ -350,16 +347,20 @@ mod tests {
     #[test]
     fn start_position_only_receives_the_fitted_tempo() {
         let position = Position::startpos();
-        assert_eq!(residual(&position, JointClassicalVariant::CpResidual), 77);
-        assert_eq!(residual(&position, JointClassicalVariant::WdlResidual), 71);
+        assert_eq!(
+            residual(&position, JointClassicalVariant::CpResidual),
+            77
+        );
+        assert_eq!(
+            residual(&position, JointClassicalVariant::WdlResidual),
+            71
+        );
     }
 
     #[test]
     fn structural_residual_changes_on_a_damaged_pawn_structure() {
-        let healthy =
-            Position::from_fen("4k3/8/8/8/8/8/PP6/4K3 w - - 0 1").expect("valid FEN");
-        let doubled =
-            Position::from_fen("4k3/8/8/8/8/P7/P7/4K3 w - - 0 1").expect("valid FEN");
+        let healthy = Position::from_fen("4k3/8/8/8/8/8/PP6/4K3 w - - 0 1").expect("valid FEN");
+        let doubled = Position::from_fen("4k3/8/8/8/8/P7/P7/4K3 w - - 0 1").expect("valid FEN");
         assert_ne!(
             residual(&healthy, JointClassicalVariant::WdlResidual),
             residual(&doubled, JointClassicalVariant::WdlResidual)
