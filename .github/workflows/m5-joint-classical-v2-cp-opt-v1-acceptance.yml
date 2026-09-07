@@ -1,0 +1,130 @@
+name: M5 optimized CP evaluator acceptance
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    if: github.head_ref == 'm5/joint-classical-v2-cp-opt-v1-acceptance'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: Strict candidate correctness and identity gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          unset CHESS_EXPERIMENTAL_CLASSICAL_V2
+          cargo run --quiet --release -p chess-bench | tee reference-path-bench.txt
+          grep -Fx 'signature 0x4c3bbe8701fbbb68' reference-path-bench.txt
+          CHESS_EXPERIMENTAL_CLASSICAL_V2=cp cargo run --quiet --release -p chess-bench | tee candidate-bench.txt
+          grep -Fx 'signature 0x58a1e0cf782ce779' candidate-bench.txt
+
+      - name: Build exact candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release -p chess-uci
+          mkdir -p .qualification/bin .qualification/acceptance
+          cp target/release/chess-uci .qualification/bin/candidate
+          sha256sum .qualification/bin/candidate | tee .qualification/acceptance/candidate.sha256
+
+      - name: Materialize exact current-main reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin main
+          MAIN_SHA=$(git rev-parse origin/main)
+          echo "$MAIN_SHA" | tee .qualification/acceptance/reference-main.sha
+          git clone --quiet https://github.com/JamieLittle16/Chess.git .qualification/reference-src
+          git -C .qualification/reference-src checkout --quiet "$MAIN_SHA"
+          test "$(git -C .qualification/reference-src rev-parse HEAD)" = "$MAIN_SHA"
+          cargo build --quiet --release -p chess-uci -p chess-bench --manifest-path .qualification/reference-src/Cargo.toml
+          cp .qualification/reference-src/target/release/chess-uci .qualification/bin/reference
+          sha256sum .qualification/bin/reference | tee .qualification/acceptance/reference.sha256
+          .qualification/reference-src/target/release/chess-bench > .qualification/acceptance/reference-bench.txt
+          grep -Fx 'signature 0x4c3bbe8701fbbb68' .qualification/acceptance/reference-bench.txt
+
+      - name: Build pinned Fastchess 1.8.2-alpha
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = 'f618e34540f94f4719ad3817950618dabe441318'
+          make -C .qualification/fastchess-src -j2
+
+      - name: Create candidate launcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$PWD"
+          cat > .qualification/bin/candidate.sh <<EOF
+          #!/usr/bin/env bash
+          export CHESS_EXPERIMENTAL_CLASSICAL_V2=cp
+          exec '$ROOT/.qualification/bin/candidate'
+          EOF
+          chmod +x .qualification/bin/candidate.sh
+          sha256sum .qualification/bin/candidate.sh | tee .qualification/acceptance/candidate-launcher.sha256
+
+      - name: Run fresh paired 200-game acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/.qualification/bin/candidate.sh" name=cp-opt-v1 option.Hash=32 \
+            -engine cmd="$PWD/.qualification/bin/reference" name=current-main option.Hash=32 \
+            -each tc=1+0.01 \
+            -openings file=match/openings/m3-uho-lichess-100-v1.epd format=epd order=random \
+            -srand 20261031 \
+            -rounds 100 -repeat -concurrency 1 -maxmoves 300 \
+            -ratinginterval 40 \
+            -pgnout file=.qualification/acceptance/games.pgn notation=uci append=false nodes=true nps=true \
+            -log file=.qualification/acceptance/uci.log level=info engine=true append=false \
+            | tee .qualification/acceptance/fastchess.stdout.log
+
+      - name: Record immutable evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/acceptance
+          cp reference-path-bench.txt .qualification/acceptance/candidate-reference-path-bench.txt || true
+          cp candidate-bench.txt .qualification/acceptance/candidate-bench.txt || true
+          cat > .qualification/acceptance/evidence.txt <<EOF
+          experiment=joint-classical-v2-cp-opt-v1-acceptance
+          candidate_source=${GITHUB_HEAD_SHA:-unknown}
+          candidate_signature=0x58a1e0cf782ce779
+          reference_signature=0x4c3bbe8701fbbb68
+          games=200
+          tc=1+0.01
+          seed=20261031
+          opening_sha256=599a45efb446e91952d13e79bc7fec8de319e332036a54552a3e8e4af91f9cf1
+          fastchess_commit=f618e34540f94f4719ad3817950618dabe441318
+          source_screen_games=100
+          source_screen_seed=20261027
+          source_screen_result=37W-38D-25L
+          EOF
+
+      - name: Upload complete acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m5-joint-classical-v2-cp-opt-v1-acceptance-${{ github.sha }}
+          path: .qualification/acceptance/
+          retention-days: 30
