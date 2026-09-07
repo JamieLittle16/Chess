@@ -14,7 +14,11 @@ fn main() {
     });
     let repetitions = args
         .next()
-        .map(|value| value.parse::<usize>().expect("repetitions must be a positive integer"))
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .expect("repetitions must be a positive integer")
+        })
         .unwrap_or(DEFAULT_REPETITIONS);
     assert!(repetitions > 0, "repetitions must be positive");
 
@@ -99,10 +103,7 @@ fn time_full_refresh(
     (start.elapsed(), black_box(checksum))
 }
 
-fn time_position_round_trip(
-    line: &[ChessMove],
-    repetitions: usize,
-) -> (std::time::Duration, u64) {
+fn time_position_round_trip(line: &[ChessMove], repetitions: usize) -> (std::time::Duration, u64) {
     let mut position = Position::startpos();
     let mut history = Vec::with_capacity(line.len());
     let mut checksum = 0_u64;
