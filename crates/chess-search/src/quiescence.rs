@@ -13,8 +13,8 @@ impl Searcher {
     ///
     /// Outside check we use the ordinary static evaluation as stand-pat and generate only captures,
     /// en-passant and promotions. In check there is no stand-pat: every legal evasion is searched.
-    /// The first quiescence implementation deliberately has no TT, SEE, delta pruning or
-    /// speculative reductions; it exists as a transparent tactical-correctness baseline.
+    /// This ablation preserves qsearch-v1 selection semantics while routing the already-active
+    /// history-aware MovePicker through the tactical list.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn quiescence<C: SearchControl>(
         &mut self,
@@ -116,9 +116,10 @@ impl Searcher {
         }
         self.path_keys[path_len] = repetition_key;
 
+        let us = position.side_to_move();
         let mut moves = moves;
         let mut picker = MovePicker::new(&mut moves, None, [None; 2]);
-        while let Some(mv) = picker.next(position) {
+        while let Some(mv) = picker.next(position, &self.history, us) {
             let undo = position.make_move(mv);
             self.nodes = self.nodes.saturating_add(1);
             let child = self.quiescence_inner(
@@ -192,8 +193,6 @@ mod tests {
 
     #[test]
     fn in_check_does_not_use_stand_pat() {
-        // White is in rook check and materially ahead. The king has quiet evasions; returning the
-        // raw stand-pat without searching them would violate quiescence semantics.
         let mut position =
             Position::from_fen("4r2k/8/8/8/8/8/6Q1/4K3 w - - 0 1").expect("valid FEN");
         assert!(position.is_in_check(position.side_to_move()));
