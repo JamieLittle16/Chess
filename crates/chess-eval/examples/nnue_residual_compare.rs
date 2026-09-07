@@ -4,7 +4,7 @@ use chess_core::Position;
 use chess_eval::{evaluate, nnue::network::Network};
 
 const SCALE_DENOMINATOR: usize = 16;
-const MAX_SCALE_STEPS: usize = 32;
+const MAX_SCALE_STEPS: usize = 64;
 
 #[derive(Clone, Copy, Default)]
 struct ErrorStats {
