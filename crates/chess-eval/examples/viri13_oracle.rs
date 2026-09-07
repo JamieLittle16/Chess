@@ -94,8 +94,10 @@ impl Network {
         for color in Color::ALL {
             for kind in PieceKind::ALL {
                 for square in position.pieces(color, kind) {
-                    let white_feature = feature_index(Color::White, white_king, color, kind, square);
-                    let black_feature = feature_index(Color::Black, black_king, color, kind, square);
+                    let white_feature =
+                        feature_index(Color::White, white_king, color, kind, square);
+                    let black_feature =
+                        feature_index(Color::Black, black_king, color, kind, square);
                     self.add_feature(&mut white, white_bucket, white_feature);
                     self.add_feature(&mut black, black_bucket, black_feature);
                 }
@@ -158,7 +160,9 @@ fn read_i16s(bytes: &[u8], cursor: &mut usize, count: usize) -> Result<Box<[i16]
 
 fn king_square(position: &Position, color: Color) -> Result<Square, String> {
     let mut kings = position.pieces(color, PieceKind::King).into_iter();
-    let king = kings.next().ok_or_else(|| format!("missing {color:?} king"))?;
+    let king = kings
+        .next()
+        .ok_or_else(|| format!("missing {color:?} king"))?;
     if kings.next().is_some() {
         return Err(format!("multiple {color:?} kings"));
     }
