@@ -112,7 +112,7 @@ impl Searcher {
         }
         self.path_keys[path_len] = repetition_key;
 
-        let us = position.side_to_move();
+        let us: Color = position.side_to_move();
         let mut moves = moves;
         let mut picker = MovePicker::new(&mut moves, None, [None; 2]);
         while let Some(mv) = picker.next(position, &self.history, us) {
