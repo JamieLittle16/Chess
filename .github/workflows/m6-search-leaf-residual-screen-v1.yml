@@ -1,0 +1,191 @@
+name: M6 search-leaf residual screen v1
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  equal-node-screen:
+    if: github.head_ref == 'm6/search-leaf-residual-screen-v1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Download retained whole-root search-leaf residual
+        uses: actions/download-artifact@v4
+        with:
+          name: m5-search-leaf-residual-v1-654ba27dcb514ad74d17488ba9a2d0ad85dfafbc
+          path: retained-model
+          repository: JamieLittle16/Chess
+          run-id: '34164523788'
+          github-token: ${{ github.token }}
+
+      - name: Verify retained model and training evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f retained-model/weights.i16
+          test -f retained-model/model.json
+          test -f retained-model/report.json
+          test -f retained-model/teacher-manifest.json
+          echo '2d77db231cf37d11b4e3061b5c2c20234bc9e4babceafdc09dc6d1ce17db547b  retained-model/weights.i16' | sha256sum --check --strict
+          echo '31d7e78f2458dc17e53e1727eb066a3c32b0dce4ac2c0586911c870f62e08eca  retained-model/model.json' | sha256sum --check --strict
+          echo '033f018085d41f0f05acb619afd3d8b8b49e83468212bdd51964746365b10f49  retained-model/report.json' | sha256sum --check --strict
+          grep -Fq '"corpus_sha256": "153b51baa53e184c007696a55107f52ccd26590c31f1916cad558090bff17798"' retained-model/teacher-manifest.json
+          grep -Fq '"assignment_unit": "certified search-leaf root group"' retained-model/teacher-manifest.json
+          mkdir -p .qualification/search-leaf-residual
+          cp retained-model/model.json .qualification/search-leaf-residual/model.json
+          cp retained-model/report.json .qualification/search-leaf-residual/report.json
+          cp retained-model/teacher-manifest.json .qualification/search-leaf-residual/teacher-manifest.json
+          sha256sum retained-model/weights.i16 retained-model/model.json retained-model/report.json \
+            | tee .qualification/search-leaf-residual/retained-SHA256SUMS
+
+      - name: Materialize and build full residual candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/materialize_search_leaf_residual_v1.py \
+            --model-dir retained-model \
+            --repo . \
+            --expected-weights-sha256 2d77db231cf37d11b4e3061b5c2c20234bc9e4babceafdc09dc6d1ce17db547b \
+            --denominator 1 \
+            --clamp-cp 0 \
+            --identity-out .qualification/search-leaf-residual/full-identity.json
+          cargo fmt
+          git diff --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace --release
+          CARGO_TARGET_DIR="$PWD/target-full" cargo build --release -p chess-uci
+          cp target-full/release/chess-uci candidate-full
+          sha256sum candidate-full | tee .qualification/search-leaf-residual/candidate-full.sha256
+          git diff --binary -- crates/chess-eval/src/lib.rs crates/chess-eval/src/linear_residual_generated.rs \
+            > .qualification/search-leaf-residual/full.patch
+
+      - name: Materialize and build restrained residual candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git restore crates/chess-eval/src/lib.rs
+          rm -f crates/chess-eval/src/linear_residual_generated.rs
+          python tools/materialize_search_leaf_residual_v1.py \
+            --model-dir retained-model \
+            --repo . \
+            --expected-weights-sha256 2d77db231cf37d11b4e3061b5c2c20234bc9e4babceafdc09dc6d1ce17db547b \
+            --denominator 3 \
+            --clamp-cp 400 \
+            --identity-out .qualification/search-leaf-residual/restrained-identity.json
+          cargo fmt
+          git diff --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace --release
+          CARGO_TARGET_DIR="$PWD/target-restrained" cargo build --release -p chess-uci
+          cp target-restrained/release/chess-uci candidate-restrained
+          sha256sum candidate-restrained | tee .qualification/search-leaf-residual/candidate-restrained.sha256
+          git diff --binary -- crates/chess-eval/src/lib.rs crates/chess-eval/src/linear_residual_generated.rs \
+            > .qualification/search-leaf-residual/restrained.patch
+
+      - name: Build exact current production reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          REFERENCE_SHA=6bb92c1526cc256ea7c29c77d624cea545fbfe0e
+          git fetch --quiet origin "$REFERENCE_SHA"
+          git worktree add --detach .qualification/reference "$REFERENCE_SHA"
+          CARGO_TARGET_DIR="$PWD/target-reference" cargo run --quiet --release -p chess-bench \
+            --manifest-path .qualification/reference/Cargo.toml \
+            | tee .qualification/search-leaf-residual/reference-bench.txt
+          grep -Fx 'signature 0x4c3bbe8701fbbb68' .qualification/search-leaf-residual/reference-bench.txt
+          CARGO_TARGET_DIR="$PWD/target-reference" cargo build --release -p chess-uci \
+            --manifest-path .qualification/reference/Cargo.toml
+          cp target-reference/release/chess-uci reference-engine
+          sha256sum reference-engine | tee .qualification/search-leaf-residual/reference-engine.sha256
+          echo "$REFERENCE_SHA" | tee .qualification/search-leaf-residual/reference-main.sha
+
+      - name: Build pinned Fastchess 1.8.2-alpha
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = 'f618e34540f94f4719ad3817950618dabe441318'
+          make -C .qualification/fastchess-src -j2
+
+      - name: Run full residual equal-node screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/search-leaf-residual/full
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/candidate-full" name=search-leaf-full nodes=25000 option.Hash=32 \
+            -engine cmd="$PWD/reference-engine" name=production-main nodes=25000 option.Hash=32 \
+            -openings file=match/openings/m3-uho-lichess-100-v1.epd format=epd order=random \
+            -srand 20261201 \
+            -rounds 50 -repeat -concurrency 1 -maxmoves 300 \
+            -ratinginterval 20 \
+            -pgnout file=.qualification/search-leaf-residual/full/games.pgn notation=uci append=false nodes=true nps=true \
+            -log file=.qualification/search-leaf-residual/full/uci.log level=info engine=true append=false \
+            | tee .qualification/search-leaf-residual/full/fastchess.stdout.log
+
+      - name: Run restrained residual equal-node screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/search-leaf-residual/restrained
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/candidate-restrained" name=search-leaf-restrained nodes=25000 option.Hash=32 \
+            -engine cmd="$PWD/reference-engine" name=production-main nodes=25000 option.Hash=32 \
+            -openings file=match/openings/m3-uho-lichess-100-v1.epd format=epd order=random \
+            -srand 20261201 \
+            -rounds 50 -repeat -concurrency 1 -maxmoves 300 \
+            -ratinginterval 20 \
+            -pgnout file=.qualification/search-leaf-residual/restrained/games.pgn notation=uci append=false nodes=true nps=true \
+            -log file=.qualification/search-leaf-residual/restrained/uci.log level=info engine=true append=false \
+            | tee .qualification/search-leaf-residual/restrained/fastchess.stdout.log
+
+      - name: Record immutable experiment identity
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/search-leaf-residual
+          cat > .qualification/search-leaf-residual/evidence.txt <<'EOF'
+          experiment=m6-search-leaf-residual-screen-v1
+          retained_training_run=34164523788
+          retained_artifact_id=10033719886
+          retained_artifact_digest=sha256:5d28a9a2da9a37accd577a9e8cfac20afa60f19428fb7cc3fb67eb318a2b5f2c
+          weights_sha256=2d77db231cf37d11b4e3061b5c2c20234bc9e4babceafdc09dc6d1ce17db547b
+          corpus_sha256=153b51baa53e184c007696a55107f52ccd26590c31f1916cad558090bff17798
+          split_unit=whole_search_root
+          reference_sha=6bb92c1526cc256ea7c29c77d624cea545fbfe0e
+          nodes_per_move=25000
+          games_per_variant=100
+          seed=20261201
+          full_variant=unclamped_full_quantized_residual
+          restrained_variant=clamp_400_then_divide_3
+          fastchess_commit=f618e34540f94f4719ad3817950618dabe441318
+          EOF
+
+      - name: Upload complete search-leaf residual evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m6-search-leaf-residual-screen-v1-${{ github.sha }}
+          path: .qualification/search-leaf-residual/
+          retention-days: 30
