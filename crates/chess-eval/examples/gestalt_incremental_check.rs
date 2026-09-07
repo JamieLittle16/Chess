@@ -56,7 +56,9 @@ fn main() -> Result<(), String> {
     if position != root || state != root_state {
         return Err("root position/accumulator not restored exactly".to_owned());
     }
-    println!("gestalt incremental differential: {reached} pushes + {reached} pops exact; startpos={start_score}");
+    println!(
+        "gestalt incremental differential: {reached} pushes + {reached} pops exact; startpos={start_score}"
+    );
     Ok(())
 }
 
