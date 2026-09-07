@@ -1,4 +1,6 @@
-use chess_core::{ChessMove, MoveKind, MoveList, Position};
+use chess_core::{ChessMove, Color, MoveKind, MoveList, Position};
+
+use super::history::HistoryTables;
 
 const ORDER_VALUES: [i32; 6] = [100, 320, 330, 500, 900, 20_000];
 
@@ -15,11 +17,9 @@ enum Stage {
 ///
 /// The picker mutates only the ordering of the freshly generated `MoveList`. It never allocates or
 /// clones a board. The TT move is emitted first, tactical moves are selected lazily by a cheap
-/// capture/promotion score, and untouched quiets follow in generator order. Lazy selection means a
-/// beta cutoff avoids scoring/sorting moves that are never searched.
-///
-/// This is deliberately a substrate rather than a final ordering policy. SEE, killers, history and
-/// counter-moves can become additional stages without changing search ownership or move generation.
+/// material score plus capture history, killers are protected, and remaining quiets are selected
+/// lazily by side/from/to history. Lazy selection means a beta cutoff avoids scoring/sorting moves
+/// that are never searched.
 pub(super) struct MovePicker<'a> {
     moves: &'a mut [ChessMove],
     tt_move: Option<ChessMove>,
@@ -46,7 +46,15 @@ impl<'a> MovePicker<'a> {
     }
 
     /// Select the next move, doing only the ordering work required to produce that move.
-    pub(super) fn next(&mut self, position: &Position) -> Option<ChessMove> {
+    ///
+    /// History is supplied to each call rather than borrowed by the picker itself, so recursive
+    /// search can update the same tables between picks without a long-lived borrow into `Searcher`.
+    pub(super) fn next(
+        &mut self,
+        position: &Position,
+        history: &HistoryTables,
+        color: Color,
+    ) -> Option<ChessMove> {
         loop {
             match self.stage {
                 Stage::Tt => {
@@ -71,7 +79,8 @@ impl<'a> MovePicker<'a> {
                         if !is_tactical(mv) {
                             continue;
                         }
-                        let score = tactical_score(position, mv);
+                        let score = tactical_score(position, mv)
+                            .saturating_add(history.capture_score(position, mv));
                         if score > best_score {
                             best_score = score;
                             best_index = Some(index);
@@ -106,12 +115,24 @@ impl<'a> MovePicker<'a> {
                     self.stage = Stage::Quiet;
                 }
                 Stage::Quiet => {
-                    if self.cursor < self.moves.len() {
-                        let mv = self.moves[self.cursor];
-                        self.cursor += 1;
-                        return Some(mv);
+                    if self.cursor >= self.moves.len() {
+                        self.stage = Stage::Done;
+                        continue;
                     }
-                    self.stage = Stage::Done;
+
+                    let mut best_index = self.cursor;
+                    let mut best_score = history.quiet_score(color, self.moves[self.cursor]);
+                    for index in self.cursor + 1..self.moves.len() {
+                        let score = history.quiet_score(color, self.moves[index]);
+                        if score > best_score {
+                            best_score = score;
+                            best_index = index;
+                        }
+                    }
+                    self.moves.swap(self.cursor, best_index);
+                    let mv = self.moves[self.cursor];
+                    self.cursor += 1;
+                    return Some(mv);
                 }
                 Stage::Done => return None,
             }
@@ -151,18 +172,22 @@ fn tactical_score(position: &Position, mv: ChessMove) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use chess_core::{Position, Square};
+    use chess_core::{Color, Position, Square};
 
-    use super::MovePicker;
+    use super::{HistoryTables, MovePicker};
 
     #[test]
     fn tt_move_is_returned_first_without_global_sorting() {
         let position = Position::startpos();
         let mut moves = position.legal_moves();
         let tt_move = moves.as_slice()[moves.len() - 1];
+        let history = HistoryTables::default();
         let mut picker = MovePicker::new(&mut moves, Some(tt_move), [None; 2]);
 
-        assert_eq!(picker.next(&position), Some(tt_move));
+        assert_eq!(
+            picker.next(&position, &history, Color::White),
+            Some(tt_move)
+        );
     }
 
     #[test]
@@ -177,20 +202,44 @@ mod tests {
             .copied()
             .find(|mv| mv.from() == d2 && mv.to() == d4)
             .expect("Qxd4 is legal");
+        let history = HistoryTables::default();
         let mut picker = MovePicker::new(&mut moves, None, [None; 2]);
 
-        assert_eq!(picker.next(&position), Some(queen_capture));
+        assert_eq!(
+            picker.next(&position, &history, Color::White),
+            Some(queen_capture)
+        );
     }
 
     #[test]
-    fn quiet_killer_is_emitted_before_generator_order_quiets() {
+    fn quiet_killer_is_emitted_before_history_ordered_quiets() {
         let position = Position::startpos();
         let original = position.legal_moves();
         let killer = original.as_slice()[original.len() - 1];
         let mut moves = original.clone();
+        let history = HistoryTables::default();
         let mut picker = MovePicker::new(&mut moves, None, [Some(killer), None]);
 
-        assert_eq!(picker.next(&position), Some(killer));
+        assert_eq!(
+            picker.next(&position, &history, Color::White),
+            Some(killer)
+        );
+    }
+
+    #[test]
+    fn quiet_history_reorders_non_killers() {
+        let position = Position::startpos();
+        let original = position.legal_moves();
+        let preferred = original.as_slice()[original.len() - 1];
+        let mut moves = original.clone();
+        let mut history = HistoryTables::default();
+        history.reward_quiet(Color::White, preferred, 8);
+        let mut picker = MovePicker::new(&mut moves, None, [None; 2]);
+
+        assert_eq!(
+            picker.next(&position, &history, Color::White),
+            Some(preferred)
+        );
     }
 
     #[test]
@@ -201,9 +250,10 @@ mod tests {
         .expect("valid FEN");
         let original = position.legal_moves();
         let mut scratch = original.clone();
+        let history = HistoryTables::default();
         let mut picker = MovePicker::new(&mut scratch, Some(original.as_slice()[3]), [None; 2]);
         let mut picked = Vec::with_capacity(original.len());
-        while let Some(mv) = picker.next(&position) {
+        while let Some(mv) = picker.next(&position, &history, Color::White) {
             assert!(!picked.contains(&mv));
             picked.push(mv);
         }
