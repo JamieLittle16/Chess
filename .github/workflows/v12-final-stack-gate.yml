@@ -1,0 +1,51 @@
+name: V12 final competition-stack gate
+
+on:
+  push:
+    branches:
+      - analysis/v12-final-stack-gate
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Verify exact V12 archive
+        run: |
+          echo '250e67e452cd036f66aefa8aaf72dbdaad9c41104938ffc73d8d897ce67c02d1  .analysis/v12-final.zip' | sha256sum -c -
+          rm -rf /tmp/v12-final
+          mkdir -p /tmp/v12-final
+          unzip -q .analysis/v12-final.zip -d /tmp/v12-final
+          python -m py_compile /tmp/v12-final/agent.py /tmp/v12-final/experiments/__init__.py /tmp/v12-final/experiments/numba_core.py /tmp/v12-final/experiments/numba_search.py
+      - name: Production import JIT and legal-move smoke
+        run: |
+          /usr/bin/time -f 'maxrss_kb=%M wall_s=%e' python - <<'PY'
+          import sys
+          import time
+          t0 = time.perf_counter()
+          sys.path.insert(0, '/tmp/v12-final')
+          import agent
+          import chess
+          fen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+          move = agent.get_move(fen, 2000)
+          elapsed = time.perf_counter() - t0
+          board = chess.Board(fen)
+          parsed = chess.Move.from_uci(move)
+          print(f'v12_init_first_move_s={elapsed:.6f}')
+          print(f'v12_first_move={move}')
+          print(f'python={sys.version}')
+          import numba, numpy
+          print(f'numba={numba.__version__} numpy={numpy.__version__} chess={chess.__version__}')
+          if parsed not in board.legal_moves:
+              raise SystemExit(f'illegal first move: {move}')
+          if elapsed >= 90.0:
+              raise SystemExit(f'90s initialization gate failed: {elapsed:.3f}s')
+          PY
