@@ -1,0 +1,109 @@
+name: M5 history and LMR v1 ablation
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  screen:
+    if: github.head_ref == 'm5/search-history-lmr-v1-ablation'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: Candidate correctness gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          # The candidate intentionally changes deterministic search identity; the old chess-bench
+          # assertion is excluded until the observed ablation signature is frozen separately.
+          cargo test --workspace --release --exclude chess-bench
+          cargo run --quiet --release -p chess-bench | tee candidate-bench.txt
+
+      - name: Build exact candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          CARGO_TARGET_DIR="$PWD/target-candidate" cargo build --release -p chess-uci
+          sha256sum target-candidate/release/chess-uci | tee candidate-engine.sha256
+
+      - name: Materialize exact current main reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin main
+          git worktree add --detach .qualification/reference FETCH_HEAD
+          CARGO_TARGET_DIR="$PWD/target-reference" cargo run --quiet --release -p chess-bench --manifest-path .qualification/reference/Cargo.toml | tee reference-bench.txt
+          grep -Fx 'signature 0x4c3bbe8701fbbb68' reference-bench.txt
+          CARGO_TARGET_DIR="$PWD/target-reference" cargo build --release -p chess-uci --manifest-path .qualification/reference/Cargo.toml
+          git -C .qualification/reference rev-parse HEAD | tee reference-main.sha
+          sha256sum target-reference/release/chess-uci | tee reference-engine.sha256
+
+      - name: Build pinned Fastchess
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = 'f618e34540f94f4719ad3817950618dabe441318'
+          make -C .qualification/fastchess-src -j2
+
+      - name: Run paired 100-game screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/screen
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/target-candidate/release/chess-uci" name=history-lmr-v1 option.Hash=32 \
+            -engine cmd="$PWD/target-reference/release/chess-uci" name=current-main option.Hash=32 \
+            -each tc=1+0.01 \
+            -openings file=match/openings/m3-uho-lichess-100-v1.epd format=epd order=random \
+            -srand 20261029 \
+            -rounds 50 -repeat -concurrency 1 -maxmoves 300 \
+            -ratinginterval 20 \
+            -pgnout file=.qualification/screen/games.pgn notation=uci append=false nodes=true nps=true \
+            -log file=.qualification/screen/uci.log level=info engine=true append=false \
+            | tee .qualification/screen/fastchess.stdout.log
+
+      - name: Record evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/screen
+          cp candidate-bench.txt .qualification/screen/candidate-bench.txt || true
+          cp reference-bench.txt .qualification/screen/reference-bench.txt || true
+          cp candidate-engine.sha256 .qualification/screen/candidate-engine.sha256 || true
+          cp reference-engine.sha256 .qualification/screen/reference-engine.sha256 || true
+          cp reference-main.sha .qualification/screen/reference-main.sha || true
+          cat > .qualification/screen/evidence.txt <<EOF
+          experiment=search-history-lmr-v1-ablation
+          candidate_source=${GITHUB_HEAD_SHA:-unknown}
+          games=100
+          tc=1+0.01
+          seed=20261029
+          opening_sha256=599a45efb446e91952d13e79bc7fec8de319e332036a54552a3e8e4af91f9cf1
+          reference_signature=0x4c3bbe8701fbbb68
+          fastchess_commit=f618e34540f94f4719ad3817950618dabe441318
+          EOF
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m5-history-lmr-v1-ablation-${{ github.sha }}
+          path: .qualification/screen/
+          retention-days: 30
