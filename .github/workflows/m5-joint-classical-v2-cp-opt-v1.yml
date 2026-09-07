@@ -1,0 +1,121 @@
+name: M5 joint classical v2 CP optimization v1
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    if: github.head_ref == 'm5/joint-classical-v2-cp-opt-v1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - name: Strict correctness gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+      - name: Verify reference and exact CP search identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset CHESS_EXPERIMENTAL_CLASSICAL_V2
+          cargo run --quiet --release -p chess-bench | tee reference-bench.txt
+          grep -Fx 'signature 0x4c3bbe8701fbbb68' reference-bench.txt
+          CHESS_EXPERIMENTAL_CLASSICAL_V2=cp cargo run --quiet --release -p chess-bench | tee optimized-candidate-bench.txt
+          grep -Fx 'signature 0x58a1e0cf782ce779' optimized-candidate-bench.txt
+      - name: Build optimized candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release -p chess-uci
+          mkdir -p .qualification/bin .qualification/opt-v1
+          cp target/release/chess-uci .qualification/bin/optimized
+          sha256sum .qualification/bin/optimized | tee .qualification/opt-v1/optimized.sha256
+      - name: Build exact unoptimized CP source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/JamieLittle16/Chess.git .qualification/original-src
+          git -C .qualification/original-src checkout --quiet 23799f360aa99d91a811afdeb707b949e8679d09
+          test "$(git -C .qualification/original-src rev-parse HEAD)" = '23799f360aa99d91a811afdeb707b949e8679d09'
+          cargo build --quiet --release -p chess-uci --manifest-path .qualification/original-src/Cargo.toml
+          cp .qualification/original-src/target/release/chess-uci .qualification/bin/original
+          sha256sum .qualification/bin/original | tee .qualification/opt-v1/original.sha256
+          CHESS_EXPERIMENTAL_CLASSICAL_V2=cp .qualification/original-src/target/release/chess-bench > .qualification/opt-v1/original-candidate-bench.txt 2>/dev/null || true
+      - name: Build pinned Fastchess 1.8.2-alpha
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = 'f618e34540f94f4719ad3817950618dabe441318'
+          make -C .qualification/fastchess-src -j2
+      - name: Create launchers
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$PWD"
+          cat > .qualification/bin/optimized.sh <<EOF
+          #!/usr/bin/env bash
+          export CHESS_EXPERIMENTAL_CLASSICAL_V2=cp
+          exec '$ROOT/.qualification/bin/optimized'
+          EOF
+          cat > .qualification/bin/original.sh <<EOF
+          #!/usr/bin/env bash
+          export CHESS_EXPERIMENTAL_CLASSICAL_V2=cp
+          exec '$ROOT/.qualification/bin/original'
+          EOF
+          chmod +x .qualification/bin/optimized.sh .qualification/bin/original.sh
+      - name: Run paired equal-time optimization screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/.qualification/bin/optimized.sh" name=cp-opt-v1 option.Hash=32 \
+            -engine cmd="$PWD/.qualification/bin/original.sh" name=cp-original option.Hash=32 \
+            -each tc=1+0.01 \
+            -openings file=match/openings/m3-uho-lichess-100-v1.epd format=epd order=random \
+            -srand 20261024 \
+            -rounds 50 -repeat -concurrency 1 -maxmoves 300 \
+            -ratinginterval 20 \
+            -pgnout file=.qualification/opt-v1/games.pgn notation=uci append=false nodes=true nps=true \
+            -log file=.qualification/opt-v1/uci.log level=info engine=true append=false \
+            | tee .qualification/opt-v1/fastchess.stdout.log
+      - name: Record evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/opt-v1
+          cp reference-bench.txt .qualification/opt-v1/reference-bench.txt || true
+          cp optimized-candidate-bench.txt .qualification/opt-v1/optimized-candidate-bench.txt || true
+          cat > .qualification/opt-v1/evidence.txt <<EOF
+          experiment=joint-classical-v2-cp-opt-v1
+          original_source=23799f360aa99d91a811afdeb707b949e8679d09
+          candidate_signature=0x58a1e0cf782ce779
+          reference_signature=0x4c3bbe8701fbbb68
+          games=100
+          tc=1+0.01
+          seed=20261024
+          opening_sha256=599a45efb446e91952d13e79bc7fec8de319e332036a54552a3e8e4af91f9cf1
+          fastchess_commit=f618e34540f94f4719ad3817950618dabe441318
+          EOF
+      - name: Upload optimization evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m5-joint-classical-v2-cp-opt-v1-${{ github.sha }}
+          path: .qualification/opt-v1/
+          retention-days: 30
