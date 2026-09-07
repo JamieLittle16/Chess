@@ -1,0 +1,89 @@
+name: V13 pruning margin sweep
+
+on:
+  push:
+    branches:
+      - analysis/v13-pruning-margin-sweep-20260907
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  arena:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: r100-a, rfp: 100, fut: 180, start: 0, seed: 101101 }
+          - { name: r100-b, rfp: 100, fut: 180, start: 20, seed: 101102 }
+          - { name: r140-a, rfp: 140, fut: 180, start: 0, seed: 101201 }
+          - { name: r140-b, rfp: 140, fut: 180, start: 20, seed: 101202 }
+          - { name: f160-a, rfp: 120, fut: 160, start: 0, seed: 101301 }
+          - { name: f160-b, rfp: 120, fut: 160, start: 20, seed: 101302 }
+          - { name: f200-a, rfp: 120, fut: 200, start: 0, seed: 101401 }
+          - { name: f200-b, rfp: 120, fut: 200, start: 20, seed: 101402 }
+          - { name: r140f200-a, rfp: 140, fut: 200, start: 0, seed: 101501 }
+          - { name: r140f200-b, rfp: 140, fut: 200, start: 20, seed: 101502 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: analysis/v13-linear-residual
+          path: arena-src
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition dependencies
+        run: python -m pip install --disable-pip-version-check numba==0.67.0 numpy==2.5.2 chess==1.11.2
+      - name: Reconstruct one-sixth control and candidate
+        shell: bash
+        env:
+          RFP: ${{ matrix.rfp }}
+          FUT: ${{ matrix.fut }}
+        run: |
+          set -euo pipefail
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum -c -
+          rm -rf /tmp/base /tmp/cand; mkdir /tmp/base /tmp/cand
+          unzip -q /tmp/v13.zip -d /tmp/base; unzip -q /tmp/v13.zip -d /tmp/cand
+          patch /tmp/base/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          patch /tmp/cand/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          for DIR in /tmp/base /tmp/cand; do
+            DIR="$DIR" python - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path(os.environ['DIR'])/'experiments/numba_search.py'; s=p.read_text()
+          old='    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          new='    correction = correction // 6\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          assert s.count(old)==1; p.write_text(s.replace(old,new,1))
+          PY
+            python scripts/patch_v13_legality_context.py "$DIR/experiments/numba_core.py"
+          done
+          RFP="$RFP" FUT="$FUT" python - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path('/tmp/cand/experiments/numba_search.py'); s=p.read_text(); r=int(os.environ['RFP']); f=int(os.environ['FUT'])
+          old='pruning_static_eval - 120 * depth >= beta'; new=f'pruning_static_eval - {r} * depth >= beta'; assert s.count(old)==1; s=s.replace(old,new,1)
+          old='pruning_static_eval + 180 * depth <= alpha'; new=f'pruning_static_eval + {f} * depth <= alpha'; assert s.count(old)==1; s=s.replace(old,new,1)
+          p.write_text(s)
+          PY
+          python -m py_compile /tmp/base/agent.py /tmp/base/experiments/*.py /tmp/cand/agent.py /tmp/cand/experiments/*.py
+      - name: Fixed-node paired arena
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p v13-results
+          /usr/bin/time -f 'ARENA_WALL_SEC=%e MAX_RSS_KB=%M' \
+            python -u arena-src/.v13/v13_arena.py /tmp/cand /tmp/base 20000 20 '${{ matrix.seed }}' 220 \
+              match/openings/m3-uho-lichess-100-v1.epd '${{ matrix.start }}' \
+            | tee 'v13-results/${{ matrix.name }}.log'
+          grep '^FINAL ' 'v13-results/${{ matrix.name }}.log'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v13-pruning-${{ matrix.name }}-${{ github.sha }}
+          path: v13-results/
+          retention-days: 7
