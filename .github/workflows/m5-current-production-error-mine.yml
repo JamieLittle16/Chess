@@ -82,9 +82,25 @@ jobs:
           from collections import Counter, defaultdict
           from pathlib import Path
 
+          import chess
+
           rows = [json.loads(line) for line in Path('.diagnostic/error-mine/positions.jsonl').read_text().splitlines() if line]
+
+          for row in rows:
+              board = chess.Board(row['fen_before'])
+              played = chess.Move.from_uci(row['played_uci'])
+              best = chess.Move.from_uci(row['best_uci']) if row['best_uci'] else None
+              played_piece = board.piece_at(played.from_square)
+              best_piece = board.piece_at(best.from_square) if best is not None else None
+              row['played_piece'] = chess.piece_name(played_piece.piece_type) if played_piece else 'none'
+              row['best_piece'] = chess.piece_name(best_piece.piece_type) if best_piece else 'none'
+              row['played_is_castling'] = board.is_castling(played)
+              row['best_is_castling'] = bool(best is not None and board.is_castling(best))
+
           severe = [r for r in rows if r['cp_loss'] >= 80]
           blunders = [r for r in rows if r['cp_loss'] >= 150]
+          quiet_quiet = [r for r in severe if r['played_kind'] == 'quiet' and r['best_kind'] == 'quiet']
+          missed_forcing = [r for r in severe if not r['played_is_forcing'] and r['best_is_forcing']]
 
           def cluster(items, fields):
               counts = Counter(tuple(r[f] for f in fields) for r in items)
@@ -104,14 +120,30 @@ jobs:
                   })
               return out
 
+          total_by_phase = Counter(r['phase'] for r in rows)
+          severe_by_phase = Counter(r['phase'] for r in severe)
+          severe_rate_by_phase = {
+              phase: {
+                  'positions': total_by_phase[phase],
+                  'severe': severe_by_phase[phase],
+                  'rate': round(severe_by_phase[phase] / total_by_phase[phase], 6),
+              }
+              for phase in sorted(total_by_phase)
+          }
+
           top = sorted(rows, key=lambda r: (r['expectation_loss'], r['cp_loss']), reverse=True)[:100]
           summary = {
               'positions': len(rows),
               'severe_cp_ge_80': len(severe),
               'blunders_cp_ge_150': len(blunders),
+              'severe_rate_by_phase': severe_rate_by_phase,
               'severe_by_phase_and_move_transition': cluster(severe, ['phase', 'played_kind', 'best_kind']),
               'severe_by_forcing_transition': cluster(severe, ['played_is_forcing', 'best_is_forcing']),
               'blunders_by_phase_and_move_transition': cluster(blunders, ['phase', 'played_kind', 'best_kind']),
+              'quiet_quiet_severe_by_phase_and_best_piece': cluster(quiet_quiet, ['phase', 'best_piece']),
+              'quiet_quiet_severe_by_played_and_best_piece': cluster(quiet_quiet, ['played_piece', 'best_piece']),
+              'quiet_quiet_castling': cluster(quiet_quiet, ['phase', 'played_is_castling', 'best_is_castling']),
+              'missed_forcing_by_phase_kind_piece': cluster(missed_forcing, ['phase', 'best_kind', 'best_piece']),
               'top_100': top,
           }
           Path('.diagnostic/actionable-summary.json').write_text(json.dumps(summary, indent=2, sort_keys=True) + '\n')
@@ -140,4 +172,5 @@ jobs:
         with:
           name: m5-current-production-error-mine-${{ github.sha }}
           path: .diagnostic/
+          include-hidden-files: true
           retention-days: 30
