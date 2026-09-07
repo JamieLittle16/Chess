@@ -21,6 +21,10 @@ jobs:
           toolchain: 1.98.1
           components: rustfmt, clippy
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
       - name: Production correctness gate
         run: |
           set -euo pipefail
@@ -51,7 +55,6 @@ jobs:
           test "$(git -C /tmp/viridithas-v13 rev-parse HEAD)" = '89df8aee361e603e1fc34f52abbc2470fdfff4ba'
           cp .qualification/viri13/gestalt-b840.nnue /tmp/viridithas-v13/viridithas.nnue
           cargo build --quiet --release --manifest-path /tmp/viridithas-v13/Cargo.toml
-          /tmp/viridithas-v13/target/release/viridithas --help >/dev/null || true
 
       - name: Build Rust scalar compatibility oracle
         run: |
@@ -61,15 +64,9 @@ jobs:
       - name: Require exact raw-eval parity on diverse FENs
         shell: bash
         run: |
-          set -uo pipefail
-          # GitHub invokes bash with -e even when the body does not request it. Disable that
-          # injected errexit so a broken reference invocation is captured as evidence instead of
-          # aborting before the raw output/status reaches the artifact.
-          set +e
+          set -euo pipefail
           : > .qualification/viri13/oracle-parity.txt
           : > .qualification/viri13/reference-raw.txt
-          failures=0
-          index=0
           FENS=(
             'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
             '2k5/5p2/8/3N4/6b1/1P6/8/4K3 w - - 0 1'
@@ -78,35 +75,16 @@ jobs:
             '3r2k1/5pp1/2p4p/1pPp4/1P1P1Q2/6P1/5PKP/8 b - - 2 31'
           )
           for fen in "${FENS[@]}"; do
-            index=$((index + 1))
-            reference_raw="$({ printf 'uci\nisready\nposition fen %s\nraweval\nquit\n' "$fen"; } \
-              | /tmp/viridithas-v13/target/release/viridithas 2>&1)"
-            reference_status=$?
-            {
-              printf '=== case %d ===\nFEN: %s\nreference_status=%d\n' "$index" "$fen" "$reference_status"
-              printf '%s\n' "$reference_raw"
-            } >> .qualification/viri13/reference-raw.txt
-            expected="$(printf '%s\n' "$reference_raw" \
-              | sed 's/\r$//' \
-              | grep -E '^-?[0-9]+$' \
-              | tail -n1)"
-
-            actual_raw="$(target/release/examples/viri13_oracle \
-              .qualification/viri13/gestalt-b840.nnue "$fen" 2>&1)"
-            actual_status=$?
-            actual="$(printf '%s\n' "$actual_raw" | sed 's/\r$//' | tail -n1)"
-
-            printf '%s | ref_status=%d v13=%s rust_status=%d rust=%s\n' \
-              "$fen" "$reference_status" "${expected:-<missing>}" "$actual_status" "${actual:-<missing>}" \
+            expected="$(python3 scripts/viri13_raweval_reference.py \
+              --engine /tmp/viridithas-v13/target/release/viridithas \
+              --fen "$fen" \
+              --transcript .qualification/viri13/reference-raw.txt)"
+            actual="$(target/release/examples/viri13_oracle \
+              .qualification/viri13/gestalt-b840.nnue "$fen")"
+            printf '%s | v13=%s rust=%s\n' "$fen" "$expected" "$actual" \
               | tee -a .qualification/viri13/oracle-parity.txt
-
-            if [ "$reference_status" -ne 0 ] || [ -z "$expected" ] || \
-               [ "$actual_status" -ne 0 ] || [ "$actual" != "$expected" ]; then
-              failures=$((failures + 1))
-            fi
+            test "$actual" = "$expected"
           done
-          printf 'failures=%d\n' "$failures" | tee -a .qualification/viri13/oracle-parity.txt
-          test "$failures" -eq 0
 
       - name: Record provenance
         shell: bash
