@@ -1,0 +1,90 @@
+name: V11 Stockfish Elo bracket
+
+on:
+  push:
+    branches:
+      - analysis/v11-stockfish-elo-20260907
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  calibration:
+    name: sf-${{ matrix.elo }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        elo: [1400, 1600, 1800, 2000]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install runtime and Stockfish
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install chess==1.11.2 numpy==2.5.2 numba==0.67.0
+          sudo apt-get update -qq
+          sudo apt-get install -y stockfish
+      - name: Reconstruct exact V11
+        run: |
+          cat .analysis/v11_chunks_*.b64 | base64 -d > /tmp/v11.zip
+          echo 'fd06e9f5718b9af3be3b13f8d6b67f92018b43ce2f2cb991063d2a281310d0b8  /tmp/v11.zip' | sha256sum -c -
+          rm -rf /tmp/v11 && mkdir -p /tmp/v11
+          unzip -q /tmp/v11.zip -d /tmp/v11
+      - name: Create limited-strength opponent harness
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          src = Path('tools/v9_rust_diagnostic.py').read_text()
+          src = src.replace('import io\n', 'import io\nimport os\n', 1)
+          needle = '            self.engine = chess.engine.SimpleEngine.popen_uci(str(engine_path.resolve()), timeout=30.0)\n'
+          replacement = needle + '''            elo_raw = os.environ.get("OPPONENT_ELO")\n            if elo_raw:\n                self.engine.configure({\n                    "UCI_LimitStrength": True,\n                    "UCI_Elo": int(elo_raw),\n                    "Threads": 1,\n                    "Hash": 16,\n                })\n'''
+          if needle not in src:
+              raise SystemExit('opponent harness insertion point not found')
+          Path('/tmp/v11_elo_diagnostic.py').write_text(src.replace(needle, replacement, 1))
+          PY
+      - name: Run Stockfish Elo bracket
+        shell: bash
+        env:
+          OPPONENT_ELO: ${{ matrix.elo }}
+        run: |
+          set -euo pipefail
+          STOCKFISH="$(command -v stockfish || true)"
+          if [ -z "$STOCKFISH" ]; then STOCKFISH=/usr/games/stockfish; fi
+          OUT="analysis-results/sf-${{ matrix.elo }}"
+          mkdir -p "$OUT"
+          python /tmp/v11_elo_diagnostic.py \
+            --agent /tmp/v11 \
+            --runner tools/v9_agent_runner.py \
+            --engine "$STOCKFISH" \
+            --stockfish "$STOCKFISH" \
+            --openings match/openings/m3-uho-lichess-100-v1.epd \
+            --opening-start 70 \
+            --opening-count 5 \
+            --base-ms 2500 \
+            --increment-ms 50 \
+            --analysis-nodes 10000 \
+            --out-dir "$OUT" | tee "$OUT/run.log"
+          {
+            echo "candidate=Little-Gambit-V11-FINAL.zip"
+            echo "v11_zip_sha256=fd06e9f5718b9af3be3b13f8d6b67f92018b43ce2f2cb991063d2a281310d0b8"
+            echo "opponent=Stockfish16-UCI_Elo-${{ matrix.elo }}"
+            echo "UCI_LimitStrength=true"
+            echo "Threads=1"
+            echo "Hash=16"
+            echo "openings=71-75 colour-swapped"
+            echo "base_ms=2500 increment_ms=50"
+          } > "$OUT/provenance.txt"
+      - name: Upload calibration shard
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v11-stockfish-elo-${{ matrix.elo }}
+          path: analysis-results/sf-${{ matrix.elo }}
+          if-no-files-found: error
+          retention-days: 7
