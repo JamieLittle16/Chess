@@ -63,9 +63,13 @@ def main() -> int:
     weights = list(struct.unpack(f"<{FEATURE_COUNT}h", raw))
     bias = int(model["bias_cp"])
 
-    clamp_expr = (
-        f"score.clamp(-CLAMP_CP, CLAMP_CP)" if args.clamp_cp else "score"
-    )
+    if args.clamp_cp:
+        clamp_decl = f"const CLAMP_CP: i32 = {args.clamp_cp};\n"
+        score_expr = "score.clamp(-CLAMP_CP, CLAMP_CP)"
+    else:
+        clamp_decl = ""
+        score_expr = "score"
+
     module = f'''//! Generated experiment-only search-leaf linear residual.
 //! Do not hand-edit: `tools/materialize_search_leaf_residual_v1.py` owns this file.
 
@@ -75,8 +79,7 @@ use crate::nnue::{{FEATURE_COUNT, active_features}};
 
 const BIAS_CP: i32 = {bias};
 const DENOMINATOR: i32 = {args.denominator};
-const CLAMP_CP: i32 = {args.clamp_cp};
-static WEIGHTS: [i16; FEATURE_COUNT] = [
+{clamp_decl}static WEIGHTS: [i16; FEATURE_COUNT] = [
 {rust_array(weights)}
 ];
 
@@ -97,7 +100,7 @@ pub(crate) fn correction(position: &Position) -> i32 {{
     for feature in them_features.as_slice() {{
         score -= i32::from(WEIGHTS[usize::from(feature.raw())]);
     }}
-    {clamp_expr} / DENOMINATOR
+    {score_expr} / DENOMINATOR
 }}
 '''
 
