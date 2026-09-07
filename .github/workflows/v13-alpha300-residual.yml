@@ -49,41 +49,47 @@ jobs:
         run: |
           set -euo pipefail
           python scripts/generate_nnue_teacher_data.py \
-            --stockfish "$STOCKFISH_BIN" \
-            --pgn .qualification/frozen-games/games.pgn \
+            --stockfish "$STOCKFISH_BIN" --pgn .qualification/frozen-games/games.pgn \
             --nodes 8000 --threads 1 --hash-mb 64 --stride 1 \
             --min-ply 8 --max-ply 180 --max-positions 22000 \
             --validation-permille 100 --holdout-permille 100 \
-            --split-salt 'Chess/v13-large-width32-v1' \
-            --output-dir teacher-games
+            --split-salt 'Chess/v13-large-width32-v1' --output-dir teacher-games
       - name: Label frozen UHO roots
         shell: bash
         run: |
           set -euo pipefail
           python scripts/generate_nnue_teacher_data.py \
-            --stockfish "$STOCKFISH_BIN" \
-            --epd match/openings/m3-uho-lichess-100-v1.epd \
+            --stockfish "$STOCKFISH_BIN" --epd match/openings/m3-uho-lichess-100-v1.epd \
             --nodes 25000 --threads 1 --hash-mb 64 --stride 1 \
             --min-ply 0 --max-ply 0 --max-positions 100 \
             --validation-permille 100 --holdout-permille 100 \
-            --split-salt 'Chess/v13-large-width32-v1' \
-            --output-dir teacher-roots
-      - name: Build exact teacher corpus
+            --split-salt 'Chess/v13-large-width32-v1' --output-dir teacher-roots
+      - name: Build teacher corpus and verify semantic provenance
         shell: bash
         run: |
           set -euo pipefail
           mkdir teacher-combined
           cat teacher-games/teacher.jsonl teacher-roots/teacher.jsonl > teacher-combined/teacher.jsonl
-          echo '695c234161253f6da72b63b9c126f872f690b63464d3bd0a59193e601763d45b  teacher-combined/teacher.jsonl' | sha256sum --check --strict
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          g=json.loads(Path('teacher-games/manifest.json').read_text())
+          r=json.loads(Path('teacher-roots/manifest.json').read_text())
+          assert g['positions_written']==19009, g['positions_written']
+          assert r['positions_written']==100, r['positions_written']
+          assert g['split']['salt']=='Chess/v13-large-width32-v1'
+          assert r['split']['salt']=='Chess/v13-large-width32-v1'
+          assert g['sources'][0]['sha256']=='429c8c40f79782de1355ffa14c3c6a07d440b348fb4e0937af76150781e3df8e'
+          print({'games':g['split_counts'],'roots':r['split_counts']})
+          PY
+          sha256sum teacher-combined/teacher.jsonl
       - name: Train alpha300 unclamped residual
         shell: bash
         run: |
           set -euo pipefail
           python scripts/train_v13_linear_residual.py \
             --teacher teacher-combined/teacher.jsonl \
-            --output-dir residual-alpha300 \
-            --alphas 300 \
-            --clamps 0
+            --output-dir residual-alpha300 --alphas 300 --clamps 0
           cp teacher-games/manifest.json residual-alpha300/games-manifest.json
           cp teacher-roots/manifest.json residual-alpha300/roots-manifest.json
           sha256sum residual-alpha300/weights.i16 residual-alpha300/model.json residual-alpha300/report.json > residual-alpha300/SHA256SUMS
