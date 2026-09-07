@@ -1,0 +1,304 @@
+name: V14 slider-ray qualification
+
+on:
+  push:
+    branches: [analysis/v14-slider-rays-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Reconstruct exact final V13 control and slider-ray candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum -c -
+          rm -rf /tmp/base /tmp/cand
+          mkdir -p /tmp/base /tmp/cand
+          unzip -q /tmp/v13.zip -d /tmp/base
+          unzip -q /tmp/v13.zip -d /tmp/cand
+          patch /tmp/base/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          patch /tmp/cand/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          for DIR in /tmp/base /tmp/cand; do
+            DIR="$DIR" python - <<'PY'
+          import os
+          from pathlib import Path
+          p = Path(os.environ['DIR']) / 'experiments/numba_search.py'
+          s = p.read_text()
+          old = '    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          new = '    correction = correction // 6\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          assert s.count(old) == 1, s.count(old)
+          p.write_text(s.replace(old, new, 1))
+          PY
+            python scripts/patch_v13_legality_context.py "$DIR/experiments/numba_core.py"
+            python scripts/patch_v13_qsearch_tactical.py "$DIR/experiments/numba_core.py" "$DIR/experiments/numba_search.py"
+          done
+          echo '401f6580028a72361286bd99bee1f0022c74e6c8a65da8acd47448835a1ff360  /tmp/base/experiments/numba_search.py' | sha256sum --check --strict
+          echo '0306e8145a453d91b9b5ac92e9980931510d9e18f8ba598a7548d08b85165c35  /tmp/base/experiments/numba_core.py' | sha256sum --check --strict
+          python scripts/patch_v14_slider_rays.py /tmp/cand/experiments/numba_core.py
+          python -m py_compile /tmp/base/agent.py /tmp/base/experiments/*.py /tmp/cand/agent.py /tmp/cand/experiments/*.py
+          cmp /tmp/base/agent.py /tmp/cand/agent.py
+          cmp /tmp/base/experiments/numba_search.py /tmp/cand/experiments/numba_search.py
+          cmp /tmp/base/experiments/v13_residual.i16 /tmp/cand/experiments/v13_residual.i16
+          grep -Fq 'SLIDER_RAYS, SLIDER_RAY_COUNTS = _build_slider_rays()' /tmp/cand/experiments/numba_core.py
+
+      - name: Ordered move-generation parity on 25000 random legal positions
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/ray_digest.py <<'PY'
+          import hashlib
+          import json
+          import random
+          import struct
+          import chess
+          import numpy as np
+          from experiments.numba_core import (
+              MAX_MOVES, encode_position, generate_legal_moves,
+              generate_pseudo_tactical_moves_into,
+          )
+
+          rng = random.Random(0x51414A)
+          board = chess.Board()
+          digest = hashlib.sha256()
+          legal_total = tactical_total = 0
+          positions = 25_000
+          for index in range(positions):
+              if board.is_game_over(claim_draw=False) or board.ply() > 180 or rng.random() < 0.025:
+                  board = chess.Board()
+                  for _ in range(rng.randrange(0, 24)):
+                      moves = list(board.legal_moves)
+                      if not moves:
+                          break
+                      board.push(rng.choice(moves))
+              enc = encode_position(board)
+              legal, count = generate_legal_moves(enc.board, enc.side, enc.castling, enc.ep_square)
+              tactical = np.empty(MAX_MOVES, dtype=np.int32)
+              tcount = generate_pseudo_tactical_moves_into(enc.board, enc.side, enc.ep_square, tactical)
+              digest.update(struct.pack('<H', int(count)))
+              for i in range(int(count)):
+                  digest.update(struct.pack('<I', int(legal[i])))
+              digest.update(struct.pack('<H', int(tcount)))
+              for i in range(int(tcount)):
+                  digest.update(struct.pack('<I', int(tactical[i])))
+              legal_total += int(count)
+              tactical_total += int(tcount)
+              moves = list(board.legal_moves)
+              if moves:
+                  board.push(rng.choice(moves))
+          print(json.dumps({
+              'positions': positions,
+              'ordered_digest': digest.hexdigest(),
+              'legal_total': legal_total,
+              'tactical_total': tactical_total,
+          }, sort_keys=True))
+          PY
+          PYTHONPATH=/tmp/base python /tmp/ray_digest.py | tee /tmp/base-digest.json
+          PYTHONPATH=/tmp/cand python /tmp/ray_digest.py | tee /tmp/cand-digest.json
+          cmp /tmp/base-digest.json /tmp/cand-digest.json
+
+      - name: Directed geometry parity and perft identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/ray_geometry.py <<'PY'
+          import json
+          import chess
+          from experiments.numba_core import (
+              encode_position, generate_legal_moves, make_move_inplace, undo_move_inplace,
+          )
+
+          directed = [
+              chess.STARTING_FEN,
+              'r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1',
+              '4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1',
+              'k3r3/8/8/8/8/8/4R3/4K3 w - - 0 1',
+              '4r1k1/8/8/8/1b6/8/4R3/4K3 w - - 0 1',
+              '4k3/8/8/8/8/2n3n1/8/4K3 w - - 0 1',
+          ]
+          result = {}
+          for fen in directed:
+              b = chess.Board(fen)
+              e = encode_position(b)
+              moves, count = generate_legal_moves(e.board, e.side, e.castling, e.ep_square)
+              seq = [int(moves[i]) for i in range(int(count))]
+              result[fen] = seq
+
+          def perft(board_array, side, castling, ep, depth):
+              if depth == 0:
+                  return 1
+              moves, count = generate_legal_moves(board_array, side, castling, ep)
+              total = 0
+              for i in range(int(count)):
+                  move = int(moves[i])
+                  nc, ne, captured, captured_square = make_move_inplace(
+                      board_array, side, castling, ep, move
+                  )
+                  total += perft(board_array, -side, nc, ne, depth - 1)
+                  undo_move_inplace(board_array, side, move, captured, captured_square)
+              return total
+
+          start = encode_position(chess.Board())
+          result['perft_d4'] = perft(start.board, start.side, start.castling, start.ep_square, 4)
+          result['perft_d5'] = perft(start.board, start.side, start.castling, start.ep_square, 5)
+          assert result['perft_d4'] == 197281
+          assert result['perft_d5'] == 4865609
+          print(json.dumps(result, sort_keys=True))
+          PY
+          PYTHONPATH=/tmp/base python /tmp/ray_geometry.py > /tmp/base-geometry.json
+          PYTHONPATH=/tmp/cand python /tmp/ray_geometry.py > /tmp/cand-geometry.json
+          cmp /tmp/base-geometry.json /tmp/cand-geometry.json
+          cat /tmp/cand-geometry.json
+
+      - name: Exact fixed-node search parity and throughput
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p slider-ray-results
+          cat >/tmp/search_worker.py <<'PY'
+          import json
+          import sys
+          import chess
+          import numpy as np
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful
+          for line in sys.stdin:
+              q = json.loads(line)
+              b = chess.Board(q['fen'])
+              e = encode_position(b)
+              h = np.empty(0, dtype=np.uint64)
+              o = iterative_search_stateful(
+                  e.board, e.side, e.castling, e.ep_square,
+                  b.halfmove_clock, h, 0, int(q['nodes'])
+              )
+              print(json.dumps({
+                  'move': int(o[0]), 'score': int(o[1]), 'depth': int(o[2]), 'nodes': int(o[3])
+              }), flush=True)
+          PY
+          python - <<'PY'
+          import json
+          import os
+          import statistics
+          import subprocess
+          import sys
+          import time
+          from pathlib import Path
+
+          roots = [
+              x.strip() for x in open('match/openings/m3-uho-lichess-100-v1.epd')
+              if x.strip() and not x.startswith('#')
+          ][:40]
+
+          def start(path):
+              env = os.environ.copy(); env['PYTHONPATH'] = path
+              return subprocess.Popen(
+                  [sys.executable, '/tmp/search_worker.py'],
+                  stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                  text=True, bufsize=1, env=env,
+              )
+
+          def ask(proc, fen, nodes):
+              proc.stdin.write(json.dumps({'fen': fen, 'nodes': nodes}) + '\n')
+              proc.stdin.flush()
+              return json.loads(proc.stdout.readline())
+
+          base = start('/tmp/base'); cand = start('/tmp/cand')
+          ratios = []
+          records = []
+          try:
+              ask(base, roots[0], 300); ask(cand, roots[0], 300)
+              for rep in range(3):
+                  order = roots if rep % 2 == 0 else list(reversed(roots))
+                  t0 = time.perf_counter(); a = [ask(base, f, 30_000) for f in order]; at = time.perf_counter() - t0
+                  t0 = time.perf_counter(); b = [ask(cand, f, 30_000) for f in order]; bt = time.perf_counter() - t0
+                  assert a == b, (rep, next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), None))
+                  ratio = at / bt
+                  ratios.append(ratio)
+                  records.append({'rep': rep, 'base_seconds': at, 'candidate_seconds': bt, 'speedup': ratio})
+                  print('rep', rep, 'speedup', ratio)
+          finally:
+              for proc in (base, cand):
+                  proc.terminate(); proc.wait()
+          summary = {
+              'identical_searches': 120,
+              'median_speedup': statistics.median(ratios),
+              'records': records,
+          }
+          Path('slider-ray-results/search-throughput.json').write_text(json.dumps(summary, indent=2))
+          print(json.dumps(summary, indent=2))
+          PY
+
+      - name: Direct legal-move generation microbenchmark
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/movegen_bench.py <<'PY'
+          import json
+          import time
+          import chess
+          import numpy as np
+          from numba import njit
+          from experiments.numba_core import (
+              MAX_MOVES, encode_position, generate_legal_moves_into_with_king,
+          )
+
+          positions = [
+              chess.Board(),
+              chess.Board('r1bq1rk1/pp2bppp/2n1pn2/2pp4/3P4/2PBPN2/PP3PPP/R1BQ1RK1 w - - 2 9'),
+              chess.Board('r3k2r/pp1n1ppp/2pbpn2/q7/3P4/2N1PN2/PPQ1BPPP/R3K2R w KQkq - 4 10'),
+          ]
+          encoded = [encode_position(p) for p in positions]
+          boards = np.stack([e.board for e in encoded])
+          sides = np.asarray([e.side for e in encoded], dtype=np.int8)
+          castling = np.asarray([e.castling for e in encoded], dtype=np.int32)
+          ep = np.asarray([e.ep_square for e in encoded], dtype=np.int32)
+          kings = np.asarray([
+              next(s for s, pc in p.piece_map().items() if pc.piece_type == chess.KING and pc.color == p.turn)
+              for p in positions
+          ], dtype=np.int32)
+
+          @njit(cache=False)
+          def bench(boards, sides, castling, ep, kings, iterations):
+              pseudo = np.empty(MAX_MOVES, dtype=np.int32)
+              legal = np.empty(MAX_MOVES, dtype=np.int32)
+              checksum = 0
+              for i in range(iterations):
+                  j = i % boards.shape[0]
+                  checksum += generate_legal_moves_into_with_king(
+                      boards[j], int(sides[j]), int(castling[j]), int(ep[j]),
+                      pseudo, legal, int(kings[j]),
+                  )
+              return checksum
+
+          bench(boards, sides, castling, ep, kings, 3)
+          samples = []
+          iterations = 250_000
+          for _ in range(5):
+              start = time.perf_counter_ns()
+              checksum = bench(boards, sides, castling, ep, kings, iterations)
+              elapsed = time.perf_counter_ns() - start
+              samples.append(elapsed / iterations)
+          print(json.dumps({'ns_per_call_samples': samples, 'checksum': int(checksum)}))
+          PY
+          PYTHONPATH=/tmp/base python /tmp/movegen_bench.py | tee slider-ray-results/base-movegen.json
+          PYTHONPATH=/tmp/cand python /tmp/movegen_bench.py | tee slider-ray-results/candidate-movegen.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v14-slider-rays-${{ github.sha }}
+          path: slider-ray-results/
+          retention-days: 14
