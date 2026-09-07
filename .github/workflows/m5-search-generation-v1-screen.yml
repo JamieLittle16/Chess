@@ -1,0 +1,119 @@
+name: M5 coherent search-generation v1 screen
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  screen:
+    if: github.head_ref == 'm5/search-generation-v1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: Strict candidate correctness gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+
+      - name: Record candidate deterministic drift
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --quiet --release -p chess-bench | tee candidate-bench.txt
+
+      - name: Build candidate release engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          CARGO_TARGET_DIR="$PWD/target-candidate" cargo build --release -p chess-uci
+          test -x target-candidate/release/chess-uci
+          sha256sum target-candidate/release/chess-uci | tee candidate-engine.sha256
+
+      - name: Materialize and verify exact current main reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin main
+          git worktree add --detach .qualification/reference FETCH_HEAD
+          (
+            cd .qualification/reference
+            cargo fmt --check
+            CARGO_TARGET_DIR="$PWD/../../target-reference" cargo run --quiet --release -p chess-bench | tee ../../reference-bench.txt
+          )
+          grep -Fx 'signature 0x4c3bbe8701fbbb68' reference-bench.txt
+          CARGO_TARGET_DIR="$PWD/target-reference" cargo build --release -p chess-uci --manifest-path .qualification/reference/Cargo.toml
+          test -x target-reference/release/chess-uci
+          sha256sum target-reference/release/chess-uci | tee reference-engine.sha256
+          git -C .qualification/reference rev-parse HEAD | tee reference-main.sha
+
+      - name: Build pinned Fastchess 1.8.2-alpha
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = 'f618e34540f94f4719ad3817950618dabe441318'
+          make -C .qualification/fastchess-src -j2
+          test -x .qualification/fastchess-src/fastchess
+
+      - name: Run frozen paired 100-game screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/screen
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/target-candidate/release/chess-uci" name=search-generation-v1 option.Hash=32 \
+            -engine cmd="$PWD/target-reference/release/chess-uci" name=production-main option.Hash=32 \
+            -each tc=1+0.01 \
+            -openings file=match/openings/m3-uho-lichess-100-v1.epd format=epd order=random \
+            -srand 20261026 \
+            -rounds 50 -repeat -concurrency 1 -maxmoves 300 \
+            -ratinginterval 20 \
+            -pgnout file=.qualification/screen/games.pgn notation=uci append=false nodes=true nps=true \
+            -log file=.qualification/screen/uci.log level=info engine=true append=false \
+            | tee .qualification/screen/fastchess.stdout.log
+
+      - name: Record immutable experiment identities
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/screen
+          cp candidate-engine.sha256 .qualification/screen/candidate-engine.sha256 || true
+          cp reference-engine.sha256 .qualification/screen/reference-engine.sha256 || true
+          cp candidate-bench.txt .qualification/screen/candidate-bench.txt || true
+          cp reference-bench.txt .qualification/screen/reference-bench.txt || true
+          cp reference-main.sha .qualification/screen/reference-main.sha || true
+          cat > .qualification/screen/evidence.txt <<EOF
+          experiment=search-generation-v1
+          candidate_head=${GITHUB_HEAD_REF:-unknown}
+          games=100
+          tc=1+0.01
+          seed=20261026
+          opening_sha256=599a45efb446e91952d13e79bc7fec8de319e332036a54552a3e8e4af91f9cf1
+          reference_signature=0x4c3bbe8701fbbb68
+          fastchess_commit=f618e34540f94f4719ad3817950618dabe441318
+          EOF
+
+      - name: Upload complete screen evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m5-search-generation-v1-${{ github.sha }}
+          path: .qualification/screen/
+          retention-days: 30
