@@ -1,0 +1,61 @@
+name: Materialize repaired V11
+
+on:
+  push:
+    branches:
+      - analysis/v11-fixed-vs-rust-public-20260907
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Reconstruct exact V11 and repair recursive promotion classification
+        run: |
+          set -euxo pipefail
+          cat .analysis/v11_chunks_*.b64 | base64 -d > /tmp/v11-original.zip
+          echo 'fd06e9f5718b9af3be3b13f8d6b67f92018b43ce2f2cb991063d2a281310d0b8  /tmp/v11-original.zip' | sha256sum -c -
+          rm -rf /tmp/v11 && mkdir -p /tmp/v11
+          unzip -q /tmp/v11-original.zip -d /tmp/v11
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('/tmp/v11/experiments/numba_search.py')
+          s = p.read_text()
+          old = '''        move = int(moves[index])\n        order_score = int(score_stack[ply, index])\n        child_halfmove = _next_halfmove_clock(board, move, halfmove_clock)\n        _advance_eval_state_into(board, side, move, eval_stack[ply], eval_stack[ply + 1])\n        child_castling, child_ep, captured_piece, captured_square = make_move_inplace(\n            board, side, castling, ep_square, move\n        )\n'''
+          new = '''        move = int(moves[index])\n        order_score = int(score_stack[ply, index])\n        child_halfmove = _next_halfmove_clock(board, move, halfmove_clock)\n        # Must classify before make_move_inplace clears the source pawn.\n        promotion_threat = _quiet_pawn_relative_rank(board, move) == 6\n        _advance_eval_state_into(board, side, move, eval_stack[ply], eval_stack[ply + 1])\n        child_castling, child_ep, captured_piece, captured_square = make_move_inplace(\n            board, side, castling, ep_square, move\n        )\n'''
+          if old not in s:
+              raise SystemExit('pre-mutation insertion point missing')
+          s = s.replace(old, new, 1)
+          old2 = '''        promotion_threat = _quiet_pawn_relative_rank(board, move) == 6\n        lmr_candidate = (\n'''
+          if old2 not in s:
+              raise SystemExit('post-mutation classifier missing')
+          s = s.replace(old2, '''        lmr_candidate = (\n''', 1)
+          p.write_text(s)
+          PY
+          echo '3946e10aca3dcfe7ab2d6a8bb6d4e5093caa543004a9205ddce61230332e2c3a  /tmp/v11/experiments/numba_search.py' | sha256sum -c -
+          python -m py_compile /tmp/v11/agent.py /tmp/v11/experiments/__init__.py /tmp/v11/experiments/numba_core.py /tmp/v11/experiments/numba_search.py
+      - name: Package repaired artifact
+        run: |
+          set -euxo pipefail
+          find /tmp/v11 -type d -name __pycache__ -prune -exec rm -rf {} +
+          find /tmp/v11 -name '*.pyc' -delete
+          cd /tmp/v11
+          zip -X -q -r /tmp/little-gambit-v11-repaired.zip .
+          test "$(unzip -Z1 /tmp/little-gambit-v11-repaired.zip | grep -xc agent.py)" -eq 1
+          sha256sum /tmp/little-gambit-v11-repaired.zip | tee /tmp/v11-repaired.sha256
+          unzip -l /tmp/little-gambit-v11-repaired.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: little-gambit-v11-repaired
+          path: |
+            /tmp/little-gambit-v11-repaired.zip
+            /tmp/v11-repaired.sha256
+          retention-days: 7
