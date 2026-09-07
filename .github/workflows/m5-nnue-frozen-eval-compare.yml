@@ -1,0 +1,91 @@
+name: M5 NNUE frozen eval comparison
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  compare:
+    if: github.head_ref == 'm5/nnue-search-ab-v1'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Download frozen teacher corpus
+        uses: actions/download-artifact@v4
+        with:
+          name: m5-nnue-teacher-v1-fffd0054018bdce2a8b912bc8481465bdcb26ed6
+          path: frozen/teacher
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34146954019
+      - name: Download width 32
+        uses: actions/download-artifact@v4
+        with:
+          name: m5-nnue-width-32-fffd0054018bdce2a8b912bc8481465bdcb26ed6
+          path: frozen/32
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34146954019
+      - name: Download width 64
+        uses: actions/download-artifact@v4
+        with:
+          name: m5-nnue-width-64-fffd0054018bdce2a8b912bc8481465bdcb26ed6
+          path: frozen/64
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34146954019
+      - name: Download width 128
+        uses: actions/download-artifact@v4
+        with:
+          name: m5-nnue-width-128-fffd0054018bdce2a8b912bc8481465bdcb26ed6
+          path: frozen/128
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34146954019
+      - name: Convert immutable teacher records to evaluation TSV
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          source = Path('frozen/teacher/teacher.jsonl')
+          target = Path('frozen/eval.tsv')
+          with source.open(encoding='utf-8') as inp, target.open('w', encoding='utf-8') as out:
+              for line in inp:
+                  if not line.strip():
+                      continue
+                  record = json.loads(line)
+                  cp = record.get('teacher_cp')
+                  if cp is None:
+                      continue
+                  cp = max(-1800, min(1800, int(cp)))
+                  out.write(f"{record['split']}\t{cp}\t{record['fen']}\n")
+          PY
+      - name: Compare classical, learned and validation-selected blends
+        shell: bash
+        run: |
+          set -euo pipefail
+          for WIDTH in 32 64 128; do
+            cargo run --release --quiet -p chess-eval --example nnue_teacher_compare -- \
+              "frozen/$WIDTH/nnue-$WIDTH-v1.nnue" frozen/eval.tsv | tee "frozen/compare-$WIDTH.json"
+          done
+      - name: Upload comparison evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: m5-nnue-frozen-eval-compare-${{ github.sha }}
+          path: frozen/compare-*.json
+          retention-days: 30
