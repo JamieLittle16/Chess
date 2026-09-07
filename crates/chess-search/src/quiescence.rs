@@ -1,20 +1,22 @@
-use chess_core::generate_legal_tactical_moves_mut;
+use chess_core::{MoveKind, PieceKind, generate_legal_tactical_moves_mut};
 
 use super::*;
+use crate::see::see;
 
-// Qsearch v1 is intentionally transparent and does not yet have SEE/delta pruning. A bounded local
-// qsearch path prevents pathological alternating check-evasion trees from consuming an unbounded
-// share of a search. This is a safety/performance guardrail, not a claim that 4 is an optimal chess
-// value; later M4 work should re-qualify or remove it once tactical ordering and SEE are available.
 const MAX_QSEARCH_PLY: usize = 4;
+const QSEARCH_DELTA_MARGIN: i32 = 140;
+const QSEARCH_BAD_CAPTURE_THRESHOLD: i32 = -80;
+const QSEARCH_BAD_CAPTURE_ALPHA_MARGIN: i32 = 90;
+const QSEARCH_VALUES: [i32; 6] = [100, 320, 330, 500, 900, 0];
 
 impl Searcher {
     /// Stabilise a nominal leaf by resolving forcing tactical continuations.
     ///
-    /// Outside check we use the ordinary static evaluation as stand-pat and generate only captures,
-    /// en-passant and promotions. In check there is no stand-pat: every legal evasion is searched.
-    /// The first quiescence implementation deliberately has no TT, SEE, delta pruning or
-    /// speculative reductions; it exists as a transparent tactical-correctness baseline.
+    /// Outside check we use static evaluation as stand-pat and generate captures/promotions only.
+    /// Conservative qsearch-v2 selectivity may discard a non-checking, non-promoting capture when
+    /// either its maximum immediate material swing cannot reach alpha or a legality-aware SEE says
+    /// it is clearly losing while stand-pat is already well below alpha. Checks, promotions and all
+    /// check evasions remain fully searched.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn quiescence<C: SearchControl>(
         &mut self,
@@ -61,8 +63,6 @@ impl Searcher {
             prior_history,
             &self.path_keys[..path_len],
         ) {
-            // Checkmate takes precedence over a claimable draw. In non-check positions the draw
-            // score is already the correct terminal value, including stalemate.
             if position.is_in_check(position.side_to_move()) {
                 let moves = generate_legal_moves_mut(position);
                 if moves.is_empty() {
@@ -84,16 +84,12 @@ impl Searcher {
         }
 
         if !in_check && moves.is_empty() {
-            // A tactical-only empty list normally means a stable quiet position, but stalemate must
-            // still score zero. Only this terminal-candidate path pays for full legal generation.
             if generate_legal_moves_mut(position).is_empty() {
                 return Some(terminal_score(position, ply));
             }
             return Some(evaluate(position));
         }
 
-        // Legal terminal detection happened above. The qsearch budget is local to this nominal leaf,
-        // so a deep main search still receives the same tactical stabilization as a shallow search.
         if qply >= MAX_QSEARCH_PLY {
             return Some(evaluate(position));
         }
@@ -116,10 +112,37 @@ impl Searcher {
         }
         self.path_keys[path_len] = repetition_key;
 
+        let us = position.side_to_move();
         let mut moves = moves;
         let mut picker = MovePicker::new(&mut moves, None, [None; 2]);
-        while let Some(mv) = picker.next(position) {
+        while let Some(mv) = picker.next(position, &self.history, us) {
+            let alpha_before_move = alpha;
+            let capture = mv.kind().is_capture();
+            let promotion = mv.kind().is_promotion();
+            let exchange = (!in_check && capture).then(|| see(position, mv));
+            let optimistic = if !in_check && capture && !promotion {
+                best.saturating_add(tactical_gain_bound(position, mv))
+                    .saturating_add(QSEARCH_DELTA_MARGIN)
+            } else {
+                INFINITY
+            };
+
             let undo = position.make_move(mv);
+            let gives_check = position.is_in_check(position.side_to_move());
+
+            let delta_prune = !in_check && capture && !promotion && !gives_check && optimistic <= alpha;
+            let bad_capture_prune = !in_check
+                && capture
+                && !promotion
+                && !gives_check
+                && qply > 0
+                && exchange.is_some_and(|value| value < QSEARCH_BAD_CAPTURE_THRESHOLD)
+                && best.saturating_add(QSEARCH_BAD_CAPTURE_ALPHA_MARGIN) <= alpha;
+            if delta_prune || bad_capture_prune {
+                position.unmake_move(mv, undo);
+                continue;
+            }
+
             self.nodes = self.nodes.saturating_add(1);
             let child = self.quiescence_inner(
                 position,
@@ -137,12 +160,32 @@ impl Searcher {
             best = best.max(score);
             alpha = alpha.max(score);
             if alpha >= beta {
+                if capture {
+                    self.history.reward_capture(position, mv, 2);
+                }
                 break;
+            }
+            if capture && score <= alpha_before_move {
+                self.history.penalize_capture(position, mv, 1);
             }
         }
 
         Some(best)
     }
+}
+
+fn tactical_gain_bound(position: &Position, mv: ChessMove) -> i32 {
+    let captured = if mv.kind() == MoveKind::EnPassant {
+        QSEARCH_VALUES[PieceKind::Pawn.index()]
+    } else {
+        position
+            .piece_at(mv.to())
+            .map_or(0, |piece| QSEARCH_VALUES[piece.kind().index()])
+    };
+    let promotion = mv.kind().promotion_piece().map_or(0, |kind| {
+        QSEARCH_VALUES[kind.index()] - QSEARCH_VALUES[PieceKind::Pawn.index()]
+    });
+    captured.saturating_add(promotion)
 }
 
 #[cfg(test)]
@@ -153,9 +196,6 @@ mod tests {
 
     #[test]
     fn poisoned_capture_is_rejected_at_the_horizon() {
-        // Qxd7 wins a pawn according to a static depth-one leaf, but ...Rxd7 loses the queen.
-        // Quiescence must see the recapture and prefer a quiet move that keeps White's material
-        // advantage instead.
         let root = Position::from_fen("3r3k/3p4/8/8/8/8/8/K2Q4 w - - 0 1").expect("valid FEN");
         let d1 = Square::from_file_rank(3, 0).expect("d1");
         let d7 = Square::from_file_rank(3, 6).expect("d7");
@@ -169,10 +209,7 @@ mod tests {
 
         let result = search(&root, 1);
         assert_ne!(result.best_move, Some(poisoned));
-        assert!(
-            result.score >= 250,
-            "quiet queen moves retain the material edge"
-        );
+        assert!(result.score >= 250, "quiet queen moves retain the material edge");
     }
 
     #[test]
@@ -192,8 +229,6 @@ mod tests {
 
     #[test]
     fn in_check_does_not_use_stand_pat() {
-        // White is in rook check and materially ahead. The king has quiet evasions; returning the
-        // raw stand-pat without searching them would violate quiescence semantics.
         let mut position =
             Position::from_fen("4r2k/8/8/8/8/8/6Q1/4K3 w - - 0 1").expect("valid FEN");
         assert!(position.is_in_check(position.side_to_move()));
@@ -206,10 +241,7 @@ mod tests {
             .quiescence(&mut position, &[], -INFINITY, INFINITY, 0, 0, &NeverStop)
             .expect("uncontrolled quiescence completes");
         assert!(score > -INFINITY);
-        assert!(
-            searcher.nodes > 1,
-            "at least one legal evasion was searched"
-        );
+        assert!(searcher.nodes > 1, "at least one legal evasion was searched");
         assert_eq!(position, original);
     }
 
@@ -253,5 +285,17 @@ mod tests {
         assert_eq!(score, evaluate(&position));
         assert_eq!(searcher.nodes, 1);
         assert_eq!(position, original);
+    }
+
+    #[test]
+    fn tactical_gain_bound_handles_en_passant_and_capture_values() {
+        let ep = Position::from_fen("k7/8/8/4KPp1/8/8/8/8 w - g6 0 1").expect("valid FEN");
+        let mv = ep
+            .legal_moves()
+            .iter()
+            .copied()
+            .find(|mv| mv.kind() == MoveKind::EnPassant)
+            .expect("en-passant is legal");
+        assert_eq!(tactical_gain_bound(&ep, mv), 100);
     }
 }
