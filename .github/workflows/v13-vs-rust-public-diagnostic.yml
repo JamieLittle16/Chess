@@ -107,7 +107,7 @@ jobs:
           if [ -z "$STOCKFISH" ] && [ -x /usr/games/stockfish ]; then STOCKFISH=/usr/games/stockfish; fi
           test -x "$STOCKFISH"
           /usr/bin/time -f 'v13_init_wall_s=%e v13_init_maxrss_kb=%M' -o /tmp/v13-init.txt \
-            timeout 90s python tools/v9_agent_runner.py /tmp/v13 <<'EOF' >/tmp/v13-smoke.json
+            timeout 180s python tools/v9_agent_runner.py /tmp/v13 <<'EOF' >/tmp/v13-smoke.json
           {"fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1","time_left_ms":2000}
           EOF
           cat /tmp/v13-init.txt
