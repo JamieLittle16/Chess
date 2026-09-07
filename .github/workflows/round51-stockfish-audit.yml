@@ -27,7 +27,7 @@ jobs:
             'f7f6','d3b5','a7a6','b5c6','b7c6','c1d2','g7g5','e5f6','g5f4','f6f7','e8f7','d2f4','h7h5','f3e5','d7e5','f4e5',
             'h8h6','d1f3','f7e8','e1c1','d8h4','h1f1','h6h7','f3d3','h4g5','e5f4','g5f5','d3f5','e6f5','d1e1','h7e7','c1b1',
             'a6a5','c3a4','c5a7','e1e7','e8e7','f4d2','e7e6','d2a5','c8a6','f1e1','e6d6','a4c3','h5h4','a5b4','c6c5','b4a5',
-            'a8g8','e1g1','d5d4','c3d1','c5c4','a5e1','h4h3','e1g3','g8g3','h2g3','d4d3','g2h3','a7g1','c2d3','c4d3','a3a4',
+            'a8g8','e1g1','d5d4','c3d1','c5c4','a5e1','h4h3','e1g3','g8g3','h2g3','d4d3','g2h3','a7g1','c2d3','c4d3','a2a4',
             'd6c5','g3g4','f5f4','d1c3','c5d4','g4g5','f4f3','c3d1','d3d2','b1c2','g1e3','b2b3','a6d3','c2b2','f3f2','b3b4',
             'f2f1q','h3h4','f1d1','a4a5','d1a4','h4h5','d2d1n'
           ]
@@ -62,7 +62,7 @@ jobs:
           prefix=[]; bi=0
           print('IDX LABEL PLAYED BEST BEST_SCORE PLAY_SCORE PV')
           for ply,mv in enumerate(game):
-              if ply%2==0:  # black to move at start, so even ply is Little Gambit
+              if ply%2==0:
                   best_score,best,pv=run(prefix)
                   play_score,_,_=run(prefix,mv)
                   print(bi+1,labels[bi],mv,best,best_score,play_score,pv)
