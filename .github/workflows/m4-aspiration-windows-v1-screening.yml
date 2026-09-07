@@ -20,6 +20,31 @@ jobs:
         with:
           toolchain: 1.98.1
           components: rustfmt, clippy
+      - name: Record production depth-four search identity
+        run: |
+          set -euo pipefail
+          cat > crates/chess-search/tests/aspiration_baseline_probe.rs <<'RS'
+          use chess_core::Position;
+          use chess_search::{iterative_deepening, search};
+
+          #[test]
+          fn print_baseline_depth_four_identity() {
+              let root = Position::startpos();
+              let direct = search(&root, 4);
+              let iterative = iterative_deepening(&root, 4);
+              println!(
+                  "BASELINE_DEPTH4 direct_score={} direct_move={:?} iterative_score={} iterative_move={:?} iterative_nodes={} iterative_tt_hits={}",
+                  direct.score,
+                  direct.best_move.map(|mv| mv.raw()),
+                  iterative.score,
+                  iterative.best_move.map(|mv| mv.raw()),
+                  iterative.nodes,
+                  iterative.tt_hits,
+              );
+          }
+          RS
+          cargo test -p chess-search --test aspiration_baseline_probe -- --nocapture
+          rm crates/chess-search/tests/aspiration_baseline_probe.rs
       - name: Apply isolated aspiration candidate
         run: |
           set -euo pipefail
