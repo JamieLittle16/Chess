@@ -1,0 +1,109 @@
+name: M6 Viridithas v13 ceiling oracle
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  oracle:
+    if: github.head_ref == 'm6/viri13-ceiling-probe-v1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: Production correctness gate
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+
+      - name: Download exact CC0 gestalt release asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/viri13
+          curl --fail --location --retry 5 \
+            'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' \
+            --output .qualification/viri13/gestalt-b840.nnue
+          test "$(stat -c%s .qualification/viri13/gestalt-b840.nnue)" = '21242944'
+          sha256sum .qualification/viri13/gestalt-b840.nnue \
+            | tee .qualification/viri13/gestalt-b840.sha256
+
+      - name: Build MIT Viridithas v13 oracle reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet --branch v13.0.0 --depth 1 \
+            https://github.com/cosmobobak/viridithas.git /tmp/viridithas-v13
+          test "$(git -C /tmp/viridithas-v13 rev-parse HEAD)" = '89df8aee361e603e1fc34f52abbc2470fdfff4ba'
+          cp .qualification/viri13/gestalt-b840.nnue /tmp/viridithas-v13/viridithas.nnue
+          cargo build --quiet --release --manifest-path /tmp/viridithas-v13/Cargo.toml
+          /tmp/viridithas-v13/target/release/viridithas --help >/dev/null || true
+
+      - name: Build Rust scalar compatibility oracle
+        run: |
+          set -euo pipefail
+          cargo build --release -p chess-eval --example viri13_oracle
+
+      - name: Require exact raw-eval parity on diverse FENs
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > .qualification/viri13/oracle-parity.txt
+          FENS=(
+            'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+            '2k5/5p2/8/3N4/6b1/1P6/8/4K3 w - - 0 1'
+            'r3k2r/pppq1ppp/2npbn2/3Np3/4P3/2N1B3/PPP2PPP/R2Q1RK1 b kq - 4 10'
+            '8/2p5/3p4/1P1P4/2K5/8/6k1/8 w - - 0 45'
+            '3r2k1/5pp1/2p4p/1pPp4/1P1P1Q2/6P1/5PKP/8 b - - 2 31'
+          )
+          for fen in "${FENS[@]}"; do
+            expected="$({ printf 'position fen %s\nraweval\nquit\n' "$fen"; } \
+              | /tmp/viridithas-v13/target/release/viridithas \
+              | grep -E '^-?[0-9]+$' | tail -n1)"
+            actual="$(target/release/examples/viri13_oracle \
+              .qualification/viri13/gestalt-b840.nnue "$fen")"
+            printf '%s | v13=%s rust=%s\n' "$fen" "$expected" "$actual" \
+              | tee -a .qualification/viri13/oracle-parity.txt
+            test "$actual" = "$expected"
+          done
+
+      - name: Record provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > .qualification/viri13/provenance.txt <<'EOF'
+          purpose=research-only mature-network ceiling probe
+          engine_reference=Viridithas v13.0.0
+          engine_reference_commit=89df8aee361e603e1fc34f52abbc2470fdfff4ba
+          engine_reference_license=MIT
+          network_repository=cosmobobak/viridithas-networks
+          network_release=v85
+          network_name=gestalt
+          network_asset=gestalt-b840.nnue
+          network_asset_size=21242944
+          network_license=CC0-1.0
+          architecture=768 inputs, 9 mirrored king buckets, 1536x2 SCReLU, linear output
+          EOF
+
+      - name: Upload oracle evidence (excluding network bytes)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m6-viri13-gestalt-oracle-${{ github.sha }}
+          path: |
+            .qualification/viri13/gestalt-b840.sha256
+            .qualification/viri13/oracle-parity.txt
+            .qualification/viri13/provenance.txt
+          retention-days: 30
