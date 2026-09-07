@@ -3,7 +3,8 @@
 
 PGN positions are split by whole source game, never by individual position, so adjacent positions from
 the same game cannot leak across train/validation/holdout. EPD/FEN sources use one source line as the
-group unless the caller prepares a stronger external grouping scheme.
+group unless the caller prepares a stronger external grouping scheme. Group identity is derived from
+the source-file hash rather than its local path so copying/renaming a corpus cannot change its split.
 """
 from __future__ import annotations
 
@@ -51,7 +52,12 @@ def deterministic_split(group: str, *, salt: str, validation: int, holdout: int)
     return "train"
 
 
-def pgn_positions(path: Path, min_ply: int, max_ply: int) -> Iterator[tuple[str, str, chess.Board]]:
+def pgn_positions(
+    path: Path,
+    source_sha256: str,
+    min_ply: int,
+    max_ply: int,
+) -> Iterator[tuple[str, str, chess.Board]]:
     with path.open(encoding="utf-8", errors="replace") as handle:
         game_index = 0
         while True:
@@ -59,7 +65,7 @@ def pgn_positions(path: Path, min_ply: int, max_ply: int) -> Iterator[tuple[str,
             if game is None:
                 return
             game_index += 1
-            group = f"pgn:{path.resolve()}:{game_index}"
+            group = f"pgn:{source_sha256}:{game_index}"
             board = game.board()
             # Include the game root as ply zero only when explicitly requested.
             if min_ply <= 0 <= max_ply:
@@ -71,7 +77,7 @@ def pgn_positions(path: Path, min_ply: int, max_ply: int) -> Iterator[tuple[str,
                     yield group, f"ply:{ply}", board.copy(stack=False)
 
 
-def epd_positions(path: Path) -> Iterator[tuple[str, str, chess.Board]]:
+def epd_positions(path: Path, source_sha256: str) -> Iterator[tuple[str, str, chess.Board]]:
     with path.open(encoding="utf-8", errors="replace") as handle:
         for line_no, line in enumerate(handle, start=1):
             stripped = line.strip()
@@ -83,7 +89,7 @@ def epd_positions(path: Path) -> Iterator[tuple[str, str, chess.Board]]:
                 raise ValueError(f"{path}:{line_no}: expected at least four EPD/FEN fields")
             fen = " ".join(fields[:4]) + " 0 1"
             board = chess.Board(fen)
-            group = f"epd:{path.resolve()}:{line_no}"
+            group = f"epd:{source_sha256}:{line_no}"
             yield group, f"line:{line_no}", board
 
 
@@ -95,20 +101,21 @@ def main() -> int:
         raise SystemExit("--stride must be positive")
     args.output_dir.mkdir(parents=True, exist_ok=False)
 
+    pgn_sources = [(path, sha256_file(path)) for path in args.pgn]
+    epd_sources = [(path, sha256_file(path)) for path in args.epd]
     sources = [
-        {"kind": "pgn", "path": str(path.resolve()), "sha256": sha256_file(path)}
-        for path in args.pgn
+        {"kind": "pgn", "path": str(path.resolve()), "sha256": source_sha256}
+        for path, source_sha256 in pgn_sources
     ] + [
-        {"kind": "epd", "path": str(path.resolve()), "sha256": sha256_file(path)}
-        for path in args.epd
+        {"kind": "epd", "path": str(path.resolve()), "sha256": source_sha256}
+        for path, source_sha256 in epd_sources
     ]
 
-    position_stream: Iterator[tuple[str, str, chess.Board]]
     def all_positions() -> Iterator[tuple[str, str, chess.Board]]:
-        for path in args.pgn:
-            yield from pgn_positions(path, args.min_ply, args.max_ply)
-        for path in args.epd:
-            yield from epd_positions(path)
+        for path, source_sha256 in pgn_sources:
+            yield from pgn_positions(path, source_sha256, args.min_ply, args.max_ply)
+        for path, source_sha256 in epd_sources:
+            yield from epd_positions(path, source_sha256)
 
     output_path = args.output_dir / "teacher.jsonl"
     split_counts: Counter[str] = Counter()
@@ -177,6 +184,7 @@ def main() -> int:
             "validation_permille": args.validation_permille,
             "holdout_permille": args.holdout_permille,
             "assignment_unit": "whole PGN game; individual EPD line",
+            "group_source_identity": "source SHA-256",
         },
         "positions_seen_before_stride": seen,
         "positions_written": written,
