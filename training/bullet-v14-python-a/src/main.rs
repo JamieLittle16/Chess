@@ -157,10 +157,7 @@ fn run() -> Result<(), String> {
         .map_err(|error| format!("could not create output directory: {error}"))?;
 
     println!("Chess Python V14-A compact Bullet trainer");
-    println!(
-        "architecture=(768 -> {})x2 -> 1 SCReLU",
-        args.hidden_size
-    );
+    println!("architecture=(768 -> {})x2 -> 1 SCReLU", args.hidden_size);
     println!("format={:?}", args.format);
     println!("data={}", args.data_path.display());
     println!("output={}", args.output_dir.display());
