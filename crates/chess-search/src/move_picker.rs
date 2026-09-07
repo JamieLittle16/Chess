@@ -18,8 +18,8 @@ enum Stage {
 /// capture/promotion score, and untouched quiets follow in generator order. Lazy selection means a
 /// beta cutoff avoids scoring/sorting moves that are never searched.
 ///
-/// This is deliberately a substrate rather than a final ordering policy. SEE, killers, history and
-/// counter-moves can become additional stages without changing search ownership or move generation.
+/// The Search v2 experiment can supply a quiet scorer without changing the accepted default path:
+/// ties preserve generator order, and the ordinary `next` call uses an all-zero scorer.
 pub(super) struct MovePicker<'a> {
     moves: &'a mut [ChessMove],
     tt_move: Option<ChessMove>,
@@ -45,8 +45,24 @@ impl<'a> MovePicker<'a> {
         }
     }
 
-    /// Select the next move, doing only the ordering work required to produce that move.
+    /// Select the next move with the accepted generator-order policy for remaining quiets.
     pub(super) fn next(&mut self, position: &Position) -> Option<ChessMove> {
+        self.next_scored(position, |_| 0)
+    }
+
+    /// Select the next move while lazily ranking only the quiets that are actually requested.
+    ///
+    /// TT, tactical and killer stages are identical to `next`. When the picker reaches ordinary
+    /// quiets it selects the highest-scoring remaining move in-place. Equal scores retain the
+    /// original order, so an all-zero scorer is behaviorally identical to the accepted path.
+    pub(super) fn next_scored<F>(
+        &mut self,
+        position: &Position,
+        mut quiet_score: F,
+    ) -> Option<ChessMove>
+    where
+        F: FnMut(ChessMove) -> i32,
+    {
         loop {
             match self.stage {
                 Stage::Tt => {
@@ -106,12 +122,24 @@ impl<'a> MovePicker<'a> {
                     self.stage = Stage::Quiet;
                 }
                 Stage::Quiet => {
-                    if self.cursor < self.moves.len() {
-                        let mv = self.moves[self.cursor];
-                        self.cursor += 1;
-                        return Some(mv);
+                    if self.cursor >= self.moves.len() {
+                        self.stage = Stage::Done;
+                        continue;
                     }
-                    self.stage = Stage::Done;
+
+                    let mut best_index = self.cursor;
+                    let mut best_score = quiet_score(self.moves[self.cursor]);
+                    for index in self.cursor + 1..self.moves.len() {
+                        let score = quiet_score(self.moves[index]);
+                        if score > best_score {
+                            best_score = score;
+                            best_index = index;
+                        }
+                    }
+                    self.moves.swap(self.cursor, best_index);
+                    let mv = self.moves[self.cursor];
+                    self.cursor += 1;
+                    return Some(mv);
                 }
                 Stage::Done => return None,
             }
@@ -191,6 +219,37 @@ mod tests {
         let mut picker = MovePicker::new(&mut moves, None, [Some(killer), None]);
 
         assert_eq!(picker.next(&position), Some(killer));
+    }
+
+    #[test]
+    fn scored_quiets_are_selected_lazily_after_killers() {
+        let position = Position::startpos();
+        let original = position.legal_moves();
+        let preferred = original.as_slice()[original.len() - 1];
+        let mut moves = original.clone();
+        let mut picker = MovePicker::new(&mut moves, None, [None; 2]);
+
+        let selected = picker.next_scored(&position, |mv| i32::from(mv == preferred));
+        assert_eq!(selected, Some(preferred));
+    }
+
+    #[test]
+    fn zero_quiet_scores_preserve_accepted_generator_order() {
+        let position = Position::startpos();
+        let original = position.legal_moves();
+        let mut default_moves = original.clone();
+        let mut scored_moves = original.clone();
+        let mut default_picker = MovePicker::new(&mut default_moves, None, [None; 2]);
+        let mut scored_picker = MovePicker::new(&mut scored_moves, None, [None; 2]);
+
+        loop {
+            let expected = default_picker.next(&position);
+            let actual = scored_picker.next_scored(&position, |_| 0);
+            assert_eq!(actual, expected);
+            if expected.is_none() {
+                break;
+            }
+        }
     }
 
     #[test]
