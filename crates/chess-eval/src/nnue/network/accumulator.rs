@@ -6,10 +6,8 @@
 
 use chess_core::{ChessMove, Color, Position};
 
+use super::super::{FeatureDelta, FeatureFrame, FeatureUpdate, feature_update_for_move};
 use super::{MAX_HIDDEN, Network};
-use super::super::{
-    FeatureDelta, FeatureFrame, FeatureUpdate, feature_update_for_move,
-};
 
 /// The two perspective-specific sparse updates implied by one legal chess move.
 ///
@@ -64,10 +62,7 @@ impl AccumulatorState {
     /// The caller must supply a generated legal move. The returned value can be retained unchanged
     /// across the recursive child search and then reused to restore the accumulator after unmake.
     #[must_use]
-    pub fn prepare_move(
-        position: &Position,
-        mv: ChessMove,
-    ) -> Option<PreparedAccumulatorUpdate> {
+    pub fn prepare_move(position: &Position, mv: ChessMove) -> Option<PreparedAccumulatorUpdate> {
         Some(PreparedAccumulatorUpdate {
             white: feature_update_for_move(position, mv, Color::White)?,
             black: feature_update_for_move(position, mv, Color::Black)?,
@@ -157,11 +152,8 @@ impl AccumulatorState {
     ) -> Option<()> {
         match update {
             FeatureUpdate::Refresh(expected_after) => {
-                let rebuilt = network.rebuild_perspective(
-                    position,
-                    perspective,
-                    &mut accumulator.values,
-                )?;
+                let rebuilt =
+                    network.rebuild_perspective(position, perspective, &mut accumulator.values)?;
                 if direction == Direction::Forward {
                     debug_assert_eq!(rebuilt, expected_after);
                 }
@@ -213,11 +205,11 @@ mod tests {
 
     use chess_core::{ChessMove, Color, MoveKind, Position, Square};
 
-    use super::*;
     use super::super::{
         FEATURE_COUNT, FORMAT_VERSION, HEADER_LEN, MAGIC, encoded_feature_id, payload_checksum,
         payload_len_for,
     };
+    use super::*;
 
     #[test]
     fn prepared_update_is_small_fixed_stack_state() {
