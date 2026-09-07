@@ -210,10 +210,10 @@ marker = '''    #[test]
     fn late_quiet_futility_only_prunes_safe_shallow_scout_candidates() {'''
 regression = '''    #[test]
     fn forced_evasion_extension_is_single_budget_and_only_for_one_legal_reply() {
-        assert_eq!(forced_evasion_child_depth(4, true, 1, 1), (4, 0));
-        assert_eq!(forced_evasion_child_depth(4, true, 1, 0), (3, 0));
-        assert_eq!(forced_evasion_child_depth(4, true, 2, 1), (3, 1));
-        assert_eq!(forced_evasion_child_depth(4, false, 1, 1), (3, 1));
+        assert_eq!(super::forced_evasion_child_depth(4, true, 1, 1), (4, 0));
+        assert_eq!(super::forced_evasion_child_depth(4, true, 1, 0), (3, 0));
+        assert_eq!(super::forced_evasion_child_depth(4, true, 2, 1), (3, 1));
+        assert_eq!(super::forced_evasion_child_depth(4, false, 1, 1), (3, 1));
     }
 
     #[test]
