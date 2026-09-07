@@ -9,7 +9,7 @@ from pathlib import Path
 import chess
 
 from generate_nnue_teacher_data import deterministic_split, epd_positions, pgn_positions
-from stockfish_lab import loss_bucket, move_kind, phase_label
+from stockfish_lab import loss_bucket, move_kind, phase_label, sha256_file
 
 
 class StrengthLabTests(unittest.TestCase):
@@ -26,7 +26,7 @@ class StrengthLabTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             deterministic_split("x", salt="s", validation=600, holdout=400)
 
-    def test_pgn_positions_keep_whole_games_in_one_group(self) -> None:
+    def test_pgn_positions_keep_whole_games_in_one_content_stable_group(self) -> None:
         pgn = """[Event \"A\"]
 [Result \"*\"]
 
@@ -39,26 +39,42 @@ class StrengthLabTests(unittest.TestCase):
 """
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "games.pgn"
+            renamed = Path(directory) / "renamed-copy.pgn"
             path.write_text(pgn)
-            positions = list(pgn_positions(path, 1, 10))
+            renamed.write_text(pgn)
+            source_sha256 = sha256_file(path)
+            self.assertEqual(source_sha256, sha256_file(renamed))
+            positions = list(pgn_positions(path, source_sha256, 1, 10))
+            copied = list(pgn_positions(renamed, source_sha256, 1, 10))
 
         groups = [group for group, _, _ in positions]
         self.assertEqual(len(positions), 6)
         self.assertEqual(len(set(groups[:3])), 1)
         self.assertEqual(len(set(groups[3:])), 1)
         self.assertNotEqual(groups[0], groups[3])
+        self.assertEqual(groups, [group for group, _, _ in copied])
+        self.assertTrue(groups[0].startswith(f"pgn:{source_sha256}:"))
 
-    def test_epd_lines_are_distinct_groups(self) -> None:
+    def test_epd_lines_are_distinct_and_path_independent_groups(self) -> None:
         epd = """8/8/8/8/8/8/4K3/7k w - -
 8/8/8/8/8/8/3K4/7k b - -
 """
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "positions.epd"
+            renamed = Path(directory) / "copy.epd"
             path.write_text(epd)
-            positions = list(epd_positions(path))
+            renamed.write_text(epd)
+            source_sha256 = sha256_file(path)
+            positions = list(epd_positions(path, source_sha256))
+            copied = list(epd_positions(renamed, source_sha256))
 
         self.assertEqual(len(positions), 2)
         self.assertNotEqual(positions[0][0], positions[1][0])
+        self.assertEqual(
+            [group for group, _, _ in positions],
+            [group for group, _, _ in copied],
+        )
+        self.assertTrue(positions[0][0].startswith(f"epd:{source_sha256}:"))
 
     def test_move_classification_is_factual(self) -> None:
         board = chess.Board()
