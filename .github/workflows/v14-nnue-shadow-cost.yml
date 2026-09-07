@@ -1,0 +1,174 @@
+name: V14 NNUE shadow search cost
+
+on:
+  push:
+    branches: [analysis/v14-nnue-shadow-cost-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shadow-cost:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        hidden: [64, 96, 128, 192]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Reconstruct immutable V13 and shadow candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum -c -
+          rm -rf /tmp/base /tmp/cand
+          mkdir -p /tmp/base /tmp/cand
+          unzip -q /tmp/v13.zip -d /tmp/base
+          unzip -q /tmp/v13.zip -d /tmp/cand
+          patch /tmp/base/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          patch /tmp/cand/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          for DIR in /tmp/base /tmp/cand; do
+            DIR="$DIR" python - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path(os.environ['DIR'])/'experiments/numba_search.py'; s=p.read_text()
+          old='    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          new='    correction = correction // 6\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          assert s.count(old)==1,s.count(old)
+          p.write_text(s.replace(old,new,1))
+          PY
+            python scripts/patch_v13_legality_context.py "$DIR/experiments/numba_core.py"
+            python scripts/patch_v13_qsearch_tactical.py "$DIR/experiments/numba_core.py" "$DIR/experiments/numba_search.py"
+          done
+          echo '401f6580028a72361286bd99bee1f0022c74e6c8a65da8acd47448835a1ff360  /tmp/base/experiments/numba_search.py' | sha256sum --check --strict
+          echo '0306e8145a453d91b9b5ac92e9980931510d9e18f8ba598a7548d08b85165c35  /tmp/base/experiments/numba_core.py' | sha256sum --check --strict
+          cp experiments/v14_nnue_runtime.py /tmp/cand/experiments/v14_nnue_runtime.py
+          python scripts/patch_v14_nnue_shadow.py /tmp/cand/experiments/numba_search.py --hidden '${{ matrix.hidden }}'
+          python -m py_compile /tmp/base/agent.py /tmp/base/experiments/*.py /tmp/cand/agent.py /tmp/cand/experiments/*.py
+          cmp /tmp/base/agent.py /tmp/cand/agent.py
+          cmp /tmp/base/experiments/numba_core.py /tmp/cand/experiments/numba_core.py
+          cmp /tmp/base/experiments/v13_residual.i16 /tmp/cand/experiments/v13_residual.i16
+          grep -Fq 'SHADOW_HIDDEN = ${{ matrix.hidden }}' /tmp/cand/experiments/numba_search.py
+
+      - name: Incremental shadow accumulator oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=/tmp/cand python - <<'PY'
+          import random
+          import chess
+          import numpy as np
+          from experiments.numba_core import (
+              encode_position, generate_legal_moves, make_move_inplace, move_to_uci,
+          )
+          from experiments.numba_search import (
+              EVAL_WIDTH, EVAL_V13_WIDTH, SHADOW_HIDDEN,
+              _advance_eval_state_into, _build_eval_state_into,
+          )
+
+          rng = random.Random(0x5A0D0 + SHADOW_HIDDEN)
+          board = chess.Board()
+          checked = 0
+          for step in range(5000):
+              if board.is_game_over(claim_draw=False) or board.ply() > 180 or rng.random() < 0.025:
+                  board = chess.Board()
+                  for _ in range(rng.randrange(0, 28)):
+                      legal = list(board.legal_moves)
+                      if not legal:
+                          break
+                      board.push(rng.choice(legal))
+              encoded = encode_position(board)
+              moves, count = generate_legal_moves(
+                  encoded.board, encoded.side, encoded.castling, encoded.ep_square
+              )
+              if count == 0:
+                  board = chess.Board()
+                  continue
+              move = int(moves[rng.randrange(int(count))])
+              parent = np.empty(EVAL_WIDTH, dtype=np.int32)
+              child = np.empty(EVAL_WIDTH, dtype=np.int32)
+              rebuilt = np.empty(EVAL_WIDTH, dtype=np.int32)
+              _build_eval_state_into(encoded.board, parent)
+              _advance_eval_state_into(encoded.board, encoded.side, move, parent, child)
+              child_castling, child_ep, _, _ = make_move_inplace(
+                  encoded.board, encoded.side, encoded.castling, encoded.ep_square, move
+              )
+              _build_eval_state_into(encoded.board, rebuilt)
+              assert np.array_equal(child[:EVAL_V13_WIDTH], rebuilt[:EVAL_V13_WIDTH]), (step, 'v13')
+              assert np.array_equal(child[EVAL_V13_WIDTH:], rebuilt[EVAL_V13_WIDTH:]), (step, 'shadow')
+              checked += 1
+              board.push(chess.Move.from_uci(move_to_uci(move)))
+          assert checked >= 4900, checked
+          print('shadow_oracle_ok', 'H', SHADOW_HIDDEN, 'transitions', checked, 'eval_width', EVAL_WIDTH)
+          PY
+
+      - name: Exact fixed-node search parity and real integration cost
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p shadow-results
+          cat >/tmp/shadow_worker.py <<'PY'
+          import json, sys, chess, numpy as np
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful
+          for line in sys.stdin:
+              q=json.loads(line); b=chess.Board(q['fen']); e=encode_position(b)
+              h=np.empty(0,dtype=np.uint64)
+              o=iterative_search_stateful(
+                  e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,int(q['nodes'])
+              )
+              print(json.dumps({'move':int(o[0]),'score':int(o[1]),'depth':int(o[2]),'nodes':int(o[3])}),flush=True)
+          PY
+          python - <<'PY'
+          import json, os, statistics, subprocess, sys, time
+          from pathlib import Path
+
+          HIDDEN = int('${{ matrix.hidden }}')
+          roots=[x.strip() for x in open('match/openings/m3-uho-lichess-100-v1.epd') if x.strip() and not x.startswith('#')][:40]
+          def start(path):
+              env=os.environ.copy(); env['PYTHONPATH']=path
+              return subprocess.Popen([sys.executable,'/tmp/shadow_worker.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=env)
+          def ask(p,fen,n):
+              p.stdin.write(json.dumps({'fen':fen,'nodes':n})+'\n'); p.stdin.flush(); return json.loads(p.stdout.readline())
+          base=start('/tmp/base'); cand=start('/tmp/cand')
+          retained=[]; rows=[]
+          try:
+              ask(base,roots[0],300); ask(cand,roots[0],300)
+              for rep in range(3):
+                  order=roots if rep%2==0 else list(reversed(roots))
+                  t=time.perf_counter(); a=[ask(base,f,30000) for f in order]; at=time.perf_counter()-t
+                  t=time.perf_counter(); b=[ask(cand,f,30000) for f in order]; bt=time.perf_counter()-t
+                  assert a==b,(rep,next((i for i,(x,y) in enumerate(zip(a,b)) if x!=y),None))
+                  ratio=at/bt
+                  retained.append(ratio)
+                  rows.append({'rep':rep,'base_seconds':at,'shadow_seconds':bt,'candidate_throughput_fraction':ratio})
+                  print('H',HIDDEN,'rep',rep,'throughput_fraction',ratio)
+          finally:
+              for p in (base,cand):
+                  p.terminate(); p.wait()
+          summary={
+              'hidden':HIDDEN,
+              'identical_searches':120,
+              'median_candidate_throughput_fraction':statistics.median(retained),
+              'median_runtime_overhead_percent':(1.0/statistics.median(retained)-1.0)*100.0,
+              'records':rows,
+              'note':'Shadow accumulator is maintained but never evaluated; chess semantics must be identical.',
+          }
+          Path(f'shadow-results/h{HIDDEN}.json').write_text(json.dumps(summary,indent=2))
+          print(json.dumps(summary,indent=2))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v14-nnue-shadow-h${{ matrix.hidden }}-${{ github.sha }}
+          path: shadow-results/
+          retention-days: 14
