@@ -20,8 +20,8 @@ jobs:
         include:
           - name: old
             model: old
-            bias: 0
-            clamp: 0
+            bias: 61
+            clamp: 600
           - name: static
             model: static
             bias: 26
@@ -82,8 +82,8 @@ jobs:
           import re
           p=Path('/tmp/v13/experiments/numba_search.py')
           s=p.read_text()
-          s,n1=re.subn(r'RESIDUAL_BIAS_CP\s*=\s*-?\d+', 'RESIDUAL_BIAS_CP = ${{ matrix.bias }}', s, count=1)
-          s,n2=re.subn(r'RESIDUAL_CLAMP_CP\s*=\s*-?\d+', 'RESIDUAL_CLAMP_CP = ${{ matrix.clamp }}', s, count=1)
+          s,n1=re.subn(r'RESIDUAL_BIAS\s*=\s*-?\d+', 'RESIDUAL_BIAS = ${{ matrix.bias }}', s, count=1)
+          s,n2=re.subn(r'RESIDUAL_CLAMP\s*=\s*-?\d+', 'RESIDUAL_CLAMP = ${{ matrix.clamp }}', s, count=1)
           if n1 != 1 or n2 != 1:
               raise SystemExit(f'constant replacement failed bias={n1} clamp={n2}')
           p.write_text(s)
@@ -126,6 +126,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: v13-flagship-screen-${{ matrix.name }}
+          name: v13-flagship-screen-${{ matrix.name }}-${{ github.sha }}
           path: analysis-results/${{ matrix.name }}
           retention-days: 7
