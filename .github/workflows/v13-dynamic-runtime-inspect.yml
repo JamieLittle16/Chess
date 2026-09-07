@@ -50,3 +50,16 @@ jobs:
                   for i in range(lo-1,hi):
                       print(f'{i+1:04d}: {lines[i]}')
           PY
+      - name: Stage reconstructed source
+        shell: bash
+        run: |
+          mkdir -p v13-inspect
+          cp /tmp/v13/experiments/numba_search.py v13-inspect/numba_search.py
+          cp /tmp/v13/experiments/numba_core.py v13-inspect/numba_core.py
+          cp /tmp/v13/agent.py v13-inspect/agent.py
+          sha256sum v13-inspect/* > v13-inspect/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v13-reconstructed-source-${{ github.sha }}
+          path: v13-inspect/
+          retention-days: 7
