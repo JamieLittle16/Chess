@@ -1,0 +1,74 @@
+name: M6 gestalt incremental certification
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  differential:
+    if: github.head_ref == 'm6/gestalt-incremental-probe-v1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: Strict Rust gate
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+
+      - name: Download exact certified CC0 gestalt network
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/gestalt-incremental
+          curl --fail --location --retry 5 \
+            'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' \
+            --output .qualification/gestalt-incremental/gestalt-b840.nnue
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  .qualification/gestalt-incremental/gestalt-b840.nnue' \
+            | sha256sum --check --strict
+
+      - name: Differential-check real incremental make and unmake
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --release --quiet -p chess-eval --example gestalt_incremental_check -- \
+            .qualification/gestalt-incremental/gestalt-b840.nnue \
+            | tee .qualification/gestalt-incremental/differential.txt
+
+      - name: Record provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum .qualification/gestalt-incremental/gestalt-b840.nnue \
+            > .qualification/gestalt-incremental/network.sha256
+          cat > .qualification/gestalt-incremental/provenance.txt <<'EOF'
+          purpose=research-only reversible mature-network evaluator certification
+          network=gestalt-b840.nnue
+          network_sha256=956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6
+          network_license=CC0-1.0
+          certified_reference=Viridithas v13.0.0 raw-eval parity in PR 122
+          production_evaluator=unchanged classical
+          EOF
+
+      - name: Upload evidence without network bytes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m6-gestalt-incremental-${{ github.sha }}
+          path: |
+            .qualification/gestalt-incremental/differential.txt
+            .qualification/gestalt-incremental/network.sha256
+            .qualification/gestalt-incremental/provenance.txt
+          retention-days: 30
