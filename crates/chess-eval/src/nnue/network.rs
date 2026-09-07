@@ -11,9 +11,7 @@ use core::fmt;
 
 use chess_core::{Color, Position};
 
-use super::{
-    FEATURE_COUNT, FEATURE_SET_ID, FeatureFrame, FeatureIndex, active_features,
-};
+use super::{FEATURE_COUNT, FEATURE_SET_ID, FeatureFrame, FeatureIndex, active_features};
 
 const MAGIC: [u8; 8] = *b"CHNNUE1\0";
 const FORMAT_VERSION: u16 = 1;
