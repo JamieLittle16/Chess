@@ -37,10 +37,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          REFERENCE_SHA=169fb5d424d90ebc45577ecaabe2a8fa0b4c1c10
           test -f trained-evidence/candidate.patch
           echo 'e09f57fdc89d41b9b489ed31c7ce399519c9cc677ae3906ca5f5fd489b446ecb  trained-evidence/candidate.patch' | sha256sum --check --strict
           grep -Fq '"weights_sha256": "9df52b4c6f233a610cb4ef15090671c9e654a3ecc19e1c9729f16ad52dab0d64"' trained-evidence/provenance.json
+
+          # The immutable candidate patch was trained/materialized against this exact production
+          # snapshot. Apply it there, not to the moving PR merge ref, so this remains the originally
+          # designed causal equal-node comparison rather than an accidental source-port experiment.
+          git fetch --quiet origin "$REFERENCE_SHA"
+          git checkout --detach "$REFERENCE_SHA"
+          test "$(git rev-parse HEAD)" = "$REFERENCE_SHA"
           git apply trained-evidence/candidate.patch
+
           # The original run stopped only on Clippy's large-const-array lint. Static storage is
           # semantically identical for this immutable table and avoids duplicating 49 KiB at use sites.
           sed -i 's/^const WEIGHTS: \[i16; FEATURE_COUNT\] = \[/static WEIGHTS: [i16; FEATURE_COUNT] = [/' \
@@ -54,6 +63,7 @@ jobs:
           cp trained-evidence/static-report.json .qualification/resume/static-report.json
           cp trained-evidence/alpha300-report.json .qualification/resume/alpha300-report.json
           cp trained-evidence/diverse-report.json .qualification/resume/diverse-report.json
+          echo "$REFERENCE_SHA" | tee .qualification/resume/candidate-base.sha
 
       - name: Candidate correctness and build
         shell: bash
@@ -71,7 +81,6 @@ jobs:
         run: |
           set -euo pipefail
           REFERENCE_SHA=169fb5d424d90ebc45577ecaabe2a8fa0b4c1c10
-          git fetch --quiet origin "$REFERENCE_SHA"
           git worktree add --detach .qualification/reference "$REFERENCE_SHA"
           CARGO_TARGET_DIR="$PWD/target-reference" cargo run --quiet --release -p chess-bench --manifest-path .qualification/reference/Cargo.toml | tee .qualification/resume/reference-bench.txt
           grep -Fx 'signature 0x4c3bbe8701fbbb68' .qualification/resume/reference-bench.txt
@@ -116,6 +125,7 @@ jobs:
           source_training_run=34164095270
           source_candidate_patch_sha256=e09f57fdc89d41b9b489ed31c7ce399519c9cc677ae3906ca5f5fd489b446ecb
           blended_weights_sha256=9df52b4c6f233a610cb4ef15090671c9e654a3ecc19e1c9729f16ad52dab0d64
+          candidate_materialized_on_exact_training_base=true
           only_resume_source_change=const-to-static storage for immutable weight table
           production_reference=169fb5d424d90ebc45577ecaabe2a8fa0b4c1c10
           equal_nodes_per_move=25000
