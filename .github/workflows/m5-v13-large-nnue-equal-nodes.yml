@@ -1,0 +1,146 @@
+name: M5 V13 large NNUE equal-nodes
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  equal-nodes:
+    if: github.head_ref == 'm5/v13-large-nnue-equal-nodes'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: Strict correctness gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+
+      - name: Verify exact classical reference identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset CHESS_EXPERIMENTAL_ABSOLUTE_NNUE
+          cargo run --quiet --release -p chess-bench | tee reference-bench.txt
+          grep -Fx 'signature 0x4c3bbe8701fbbb68' reference-bench.txt
+
+      - name: Download immutable V13 large width-32 model
+        uses: actions/download-artifact@v4
+        with:
+          name: v13-large-width32-a2da7b231d2697c7b798d4a90294b8295e407cb5
+          path: .qualification/v13-model
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34152986502
+
+      - name: Verify model identity and loadability
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODEL="$PWD/.qualification/v13-model/nnue-32-v1.nnue"
+          echo '170b84748b0a79acf8454099c3abfe6a53af67cb064bf2660b5aa9d5dfadf3e0  .qualification/v13-model/nnue-32-v1.nnue' | sha256sum --check --strict
+          cargo run --quiet --release -p chess-eval --example nnue_smoke -- "$MODEL" | tee model-smoke.txt
+          export CHESS_EXPERIMENTAL_ABSOLUTE_NNUE="$MODEL"
+          cargo run --quiet --release -p chess-bench | tee candidate-bench.txt
+
+      - name: Build one shared release engine binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release -p chess-uci
+          test -x target/release/chess-uci
+          sha256sum target/release/chess-uci | tee engine.sha256
+
+      - name: Build pinned Fastchess 1.8.2-alpha
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = 'f618e34540f94f4719ad3817950618dabe441318'
+          make -C .qualification/fastchess-src -j2
+          test -x .qualification/fastchess-src/fastchess
+
+      - name: Create same-binary candidate and reference launchers
+        shell: bash
+        run: |
+          set -euo pipefail
+          ENGINE="$PWD/target/release/chess-uci"
+          MODEL="$PWD/.qualification/v13-model/nnue-32-v1.nnue"
+          mkdir -p .qualification/launchers .qualification/screen
+          cat > .qualification/launchers/candidate.sh <<EOF
+          #!/usr/bin/env bash
+          export CHESS_EXPERIMENTAL_ABSOLUTE_NNUE='$MODEL'
+          exec '$ENGINE'
+          EOF
+          cat > .qualification/launchers/reference.sh <<EOF
+          #!/usr/bin/env bash
+          unset CHESS_EXPERIMENTAL_ABSOLUTE_NNUE
+          exec '$ENGINE'
+          EOF
+          chmod +x .qualification/launchers/candidate.sh .qualification/launchers/reference.sh
+          sha256sum .qualification/launchers/candidate.sh .qualification/launchers/reference.sh | tee launchers.sha256
+
+      - name: Run paired 100-game equal-nodes gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/.qualification/launchers/candidate.sh" name=v13-large-nnue nodes=25000 option.Hash=32 \
+            -engine cmd="$PWD/.qualification/launchers/reference.sh" name=classical nodes=25000 option.Hash=32 \
+            -openings file=match/openings/m3-uho-lichess-100-v1.epd format=epd order=random \
+            -srand 20261027 \
+            -rounds 50 -repeat -concurrency 1 -maxmoves 300 \
+            -ratinginterval 20 \
+            -pgnout file=.qualification/screen/games.pgn notation=uci append=false nodes=true nps=true \
+            -log file=.qualification/screen/uci.log level=info engine=true append=false \
+            | tee .qualification/screen/fastchess.stdout.log
+
+      - name: Record immutable evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/screen
+          cp engine.sha256 .qualification/screen/engine.sha256 || true
+          cp launchers.sha256 .qualification/screen/launchers.sha256 || true
+          cp reference-bench.txt .qualification/screen/reference-bench.txt || true
+          cp candidate-bench.txt .qualification/screen/candidate-bench.txt || true
+          cp model-smoke.txt .qualification/screen/model-smoke.txt || true
+          cp .qualification/v13-model/training-metadata.json .qualification/screen/training-metadata.json || true
+          cp .qualification/v13-model/export-manifest.json .qualification/screen/export-manifest.json || true
+          cp .qualification/v13-model/corpus-manifest.json .qualification/screen/corpus-manifest.json || true
+          cat > .qualification/screen/evidence.txt <<EOF
+          experiment=v13-large-width32-absolute-equal-nodes
+          model_sha256=170b84748b0a79acf8454099c3abfe6a53af67cb064bf2660b5aa9d5dfadf3e0
+          model_source_head=a2da7b231d2697c7b798d4a90294b8295e407cb5
+          model_artifact_id=10030083879
+          model_source_run=34152986502
+          nodes_per_move=25000
+          games=100
+          seed=20261027
+          opening_sha256=599a45efb446e91952d13e79bc7fec8de319e332036a54552a3e8e4af91f9cf1
+          reference_signature=0x4c3bbe8701fbbb68
+          fastchess_commit=f618e34540f94f4719ad3817950618dabe441318
+          EOF
+
+      - name: Upload complete evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m5-v13-large-nnue-equal-nodes-${{ github.sha }}
+          path: .qualification/screen/
+          retention-days: 30
