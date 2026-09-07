@@ -48,6 +48,13 @@ pub struct SearchOutcome {
 pub trait SearchControl {
     #[must_use]
     fn should_stop(&self, nodes: u64) -> bool;
+
+    /// Decide whether another iterative-deepening pass should begin after a completed root result.
+    /// The default keeps depth/node-only and deterministic reference searches unchanged.
+    #[must_use]
+    fn should_start_next_iteration(&self, _completed: SearchResult) -> bool {
+        true
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -195,6 +202,14 @@ impl Searcher {
                     result.nodes = self.nodes;
                     result.tt_hits = self.tt_hits;
                     last_completed = Some(result);
+                    if depth < max_depth && !control.should_start_next_iteration(result) {
+                        #[cfg(debug_assertions)]
+                        debug_assert_eq!(*position, root);
+                        return SearchOutcome {
+                            result,
+                            stopped: true,
+                        };
+                    }
                 }
                 None => {
                     let result = match last_completed {

@@ -4,6 +4,7 @@
 //! depend on this crate rather than reaching into search internals directly.
 
 use std::{
+    cell::Cell,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -260,13 +261,20 @@ impl Engine {
     /// or deadline fires before depth one completes.
     #[must_use]
     pub fn search_with_limits(&mut self, limits: SearchLimits, stop: &StopToken) -> SearchOutcome {
+        let started_at = Instant::now();
         let deadline = limits
             .movetime
-            .and_then(|duration| Instant::now().checked_add(duration));
+            .and_then(|duration| started_at.checked_add(duration));
+        let soft_deadline = limits
+            .movetime
+            .and_then(|duration| started_at.checked_add(duration.mul_f64(0.70)));
         let control = EngineControl {
             stop,
             max_nodes: limits.max_nodes,
             deadline,
+            soft_deadline,
+            previous_best_move: Cell::new(None),
+            previous_score: Cell::new(None),
         };
         let prior_len = self.repetition_history.len().saturating_sub(1);
         self.searcher.iterative_deepening_controlled_with_history(
@@ -288,6 +296,9 @@ struct EngineControl<'a> {
     stop: &'a StopToken,
     max_nodes: Option<u64>,
     deadline: Option<Instant>,
+    soft_deadline: Option<Instant>,
+    previous_best_move: Cell<Option<ChessMove>>,
+    previous_score: Cell<Option<i32>>,
 }
 
 impl SearchControl for EngineControl<'_> {
@@ -297,6 +308,33 @@ impl SearchControl for EngineControl<'_> {
             || self
                 .deadline
                 .is_some_and(|deadline| Instant::now() >= deadline)
+    }
+
+    fn should_start_next_iteration(&self, completed: SearchResult) -> bool {
+        let now = Instant::now();
+        if self.stop.is_stopped() || self.deadline.is_some_and(|deadline| now >= deadline) {
+            return false;
+        }
+
+        let previous_best_move = self.previous_best_move.replace(completed.best_move);
+        let previous_score = self.previous_score.replace(Some(completed.score));
+
+        let Some(soft_deadline) = self.soft_deadline else {
+            return true;
+        };
+        if now < soft_deadline {
+            return true;
+        }
+
+        // After 70% of the hard budget, bank time when the principal root decision is stable.
+        // A changed best move or a >20 cp score swing keeps searching up to the existing hard limit.
+        match (previous_best_move, previous_score) {
+            (Some(previous_best_move), Some(previous_score)) => {
+                Some(previous_best_move) != completed.best_move
+                    || previous_score.abs_diff(completed.score) > 20
+            }
+            _ => true,
+        }
     }
 }
 
