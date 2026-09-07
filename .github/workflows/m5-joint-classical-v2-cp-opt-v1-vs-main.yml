@@ -50,7 +50,7 @@ jobs:
           git clone --quiet https://github.com/JamieLittle16/Chess.git .qualification/reference-src
           git -C .qualification/reference-src checkout --quiet "$MAIN_SHA"
           test "$(git -C .qualification/reference-src rev-parse HEAD)" = "$MAIN_SHA"
-          cargo build --quiet --release -p chess-uci --manifest-path .qualification/reference-src/Cargo.toml
+          cargo build --quiet --release -p chess-uci -p chess-bench --manifest-path .qualification/reference-src/Cargo.toml
           cp .qualification/reference-src/target/release/chess-uci .qualification/bin/reference
           sha256sum .qualification/bin/reference | tee .qualification/vs-main/reference.sha256
           .qualification/reference-src/target/release/chess-bench > .qualification/vs-main/reference-bench.txt
