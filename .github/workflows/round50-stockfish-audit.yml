@@ -27,7 +27,7 @@ jobs:
             'd4c5','e6e5','c5d6','e5f4','e3f4','c8f5','b2b4','a7a6',
             'd1e2','e8f8','b4b5','a6b5','e2b5','d8d6','b5b7','a8b8',
             'b7a6','d6c5','g1e2','f6g4','d2f3','c5f2','e1d1','b8b2',
-            'e2d4','c6e3','d1c1','b2c2','c1b1','c2a2','d4f5','f2c2'
+            'e2d4','g4e3','d1c1','b2c2','c1b1','c2a2','d4f5','f2c2'
           ]
           labels=['7.dxc5','8.cxd6','9.exf4','10.b4','11.Qe2+','12.b5','13.Qxb5','14.Qxb7','15.Qa6','16.Ne2','17.Nf3','18.Kd1','19.Ned4','20.Kc1','21.Kb1','22.Nxf5']
           p=subprocess.Popen([eng],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,bufsize=1)
