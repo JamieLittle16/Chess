@@ -350,9 +350,11 @@ fn read_i16_box(
         .checked_add(byte_count)
         .ok_or(NetworkError::LengthOverflow)?;
     let slice = bytes.get(*cursor..end).ok_or(NetworkError::Truncated)?;
+    let (pairs, remainder) = slice.as_chunks::<2>();
+    debug_assert!(remainder.is_empty());
     let mut values = Vec::with_capacity(count);
-    for chunk in slice.chunks_exact(2) {
-        values.push(i16::from_le_bytes([chunk[0], chunk[1]]));
+    for chunk in pairs {
+        values.push(i16::from_le_bytes(*chunk));
     }
     *cursor = end;
     Ok(values.into_boxed_slice())
