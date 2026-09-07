@@ -6,6 +6,9 @@
 
 mod move_picker;
 mod quiescence;
+mod root_analysis;
+
+pub use root_analysis::RootCandidate;
 
 use chess_core::{ChessMove, Position, generate_legal_moves_mut};
 use chess_eval::evaluate;
