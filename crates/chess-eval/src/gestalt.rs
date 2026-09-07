@@ -379,7 +379,8 @@ fn apply_one(
 ) -> Option<()> {
     match update {
         PerspectiveUpdate::Refresh(expected_child) => {
-            let rebuilt = network.rebuild_perspective(position, perspective, &mut accumulator.values)?;
+            let rebuilt =
+                network.rebuild_perspective(position, perspective, &mut accumulator.values)?;
             if !reverse {
                 debug_assert_eq!(rebuilt, expected_child);
             }
@@ -548,7 +549,8 @@ mod tests {
                 break;
             }
             let mv = moves[(ply.wrapping_mul(29).wrapping_add(11)) % moves.len()];
-            let prepared = AccumulatorState::prepare_move(&position, mv).expect("prepared legal move");
+            let prepared =
+                AccumulatorState::prepare_move(&position, mv).expect("prepared legal move");
             let undo = position.make_move(mv);
             state
                 .apply_prepared(&network, &position, prepared)
