@@ -1,0 +1,321 @@
+name: V14 compact NNUE runtime substrate
+
+on:
+  push:
+    branches: [analysis/v14-nnue-runtime-substrate-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Reconstruct exact final V13 and add substrate only
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum -c -
+          rm -rf /tmp/v14-runtime
+          mkdir -p /tmp/v14-runtime
+          unzip -q /tmp/v13.zip -d /tmp/v14-runtime
+          patch /tmp/v14-runtime/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('/tmp/v14-runtime/experiments/numba_search.py')
+          s = p.read_text()
+          old = '    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          new = '    correction = correction // 6\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          assert s.count(old) == 1
+          p.write_text(s.replace(old, new, 1))
+          PY
+          python scripts/patch_v13_legality_context.py /tmp/v14-runtime/experiments/numba_core.py
+          python scripts/patch_v13_qsearch_tactical.py \
+            /tmp/v14-runtime/experiments/numba_core.py /tmp/v14-runtime/experiments/numba_search.py
+
+          echo '0306e8145a453d91b9b5ac92e9980931510d9e18f8ba598a7548d08b85165c35  /tmp/v14-runtime/experiments/numba_core.py' | sha256sum -c -
+          echo '401f6580028a72361286bd99bee1f0022c74e6c8a65da8acd47448835a1ff360  /tmp/v14-runtime/experiments/numba_search.py' | sha256sum -c -
+          echo '7d0fc5f7a186e79317cf12a2ff285d7716c651fbd045c53d65a3cc6eb1b15319  /tmp/v14-runtime/experiments/v13_residual.i16' | sha256sum -c -
+          cp experiments/v14_nnue_runtime.py /tmp/v14-runtime/experiments/v14_nnue_runtime.py
+          python -m py_compile /tmp/v14-runtime/experiments/v14_nnue_runtime.py
+
+      - name: Prove feature, delta, loader and integer-inference equivalence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p v14-runtime-results
+          PYTHONPATH=/tmp/v14-runtime python - <<'PY'
+          import json
+          import random
+          from pathlib import Path
+
+          import chess
+          import numpy as np
+
+          from experiments.numba_core import (
+              FLAG_CASTLE, FLAG_EP, WHITE, encode_position, generate_legal_moves,
+              make_move_inplace, move_to_uci,
+          )
+          from experiments.v14_nnue_runtime import (
+              NNUE_QA, NNUE_QB, NNUE_SCALE,
+              advance_chess768_accumulators_into,
+              build_chess768_accumulator_into,
+              chess768_feature_index,
+              evaluate_chess768_accumulators,
+              load_bullet_quantised,
+          )
+
+          rng = random.Random(0x14A5EED)
+          np_rng = np.random.default_rng(0x14A5EED)
+          H = 128
+          fw = np_rng.integers(-48, 49, size=(768, H), dtype=np.int16)
+          fb = np_rng.integers(-96, 97, size=H, dtype=np.int16)
+          ow = np_rng.integers(-48, 49, size=2 * H, dtype=np.int16)
+          ob = np.int16(731)
+
+          def ref_feature(perspective, signed_piece, square):
+              own = (signed_piece > 0) == (perspective == WHITE)
+              colour = 0 if own else 1
+              piece = abs(signed_piece) - 1
+              local = square if perspective == WHITE else square ^ 56
+              # This is Bullet chess768.rs after converting its stm-normalised ChessBoard back
+              # into stable global White/Black perspectives.
+              return (384 if colour else 0) + 64 * piece + local
+
+          def trunc0(x, d):
+              return x // d if x >= 0 else -((-x) // d)
+
+          def ref_eval(side, wa, ba):
+              us, them = (wa, ba) if side == WHITE else (ba, wa)
+              out = 0
+              for x, w in zip(us, ow[:H]):
+                  y = min(NNUE_QA, max(0, int(x)))
+                  out += y * y * int(w)
+              for x, w in zip(them, ow[H:]):
+                  y = min(NNUE_QA, max(0, int(x)))
+                  out += y * y * int(w)
+              out = trunc0(out, NNUE_QA)
+              out += int(ob)
+              return trunc0(out * NNUE_SCALE, NNUE_QA * NNUE_QB)
+
+          def full(board_array):
+              wa = np.empty(H, dtype=np.int32)
+              ba = np.empty(H, dtype=np.int32)
+              build_chess768_accumulator_into(board_array, WHITE, fw, fb, wa)
+              build_chess768_accumulator_into(board_array, -WHITE, fw, fb, ba)
+              return wa, ba
+
+          # Exhaust feature-map identity on every signed piece and square.
+          for perspective in (WHITE, -WHITE):
+              for signed_piece in list(range(1, 7)) + list(range(-1, -7, -1)):
+                  for square in range(64):
+                      got = int(chess768_feature_index(perspective, signed_piece, square))
+                      exp = ref_feature(perspective, signed_piece, square)
+                      assert got == exp, (perspective, signed_piece, square, got, exp)
+
+          checked = 0
+          board = chess.Board()
+          special_counts = {'castle': 0, 'ep': 0, 'promotion': 0}
+          for _ in range(5000):
+              if board.is_game_over(claim_draw=False) or board.ply() > 180:
+                  board = chess.Board()
+                  # Diversify restart positions deterministically.
+                  for __ in range(rng.randrange(0, 20)):
+                      moves = list(board.legal_moves)
+                      if not moves:
+                          break
+                      board.push(rng.choice(moves))
+
+              enc = encode_position(board)
+              moves, count = generate_legal_moves(
+                  enc.board, enc.side, enc.castling, enc.ep_square
+              )
+              assert count > 0
+              move = int(moves[rng.randrange(int(count))])
+              uci = move_to_uci(move)
+              py_move = chess.Move.from_uci(uci)
+              assert py_move in board.legal_moves, (board.fen(), uci)
+
+              wa, ba = full(enc.board)
+              cwa = np.empty(H, dtype=np.int32)
+              cba = np.empty(H, dtype=np.int32)
+              advance_chess768_accumulators_into(
+                  enc.board, enc.side, move, wa, ba, cwa, cba, fw
+              )
+
+              if move & FLAG_CASTLE:
+                  special_counts['castle'] += 1
+              if move & FLAG_EP:
+                  special_counts['ep'] += 1
+              if py_move.promotion:
+                  special_counts['promotion'] += 1
+
+              make_move_inplace(enc.board, enc.side, enc.castling, enc.ep_square, move)
+              rwa, rba = full(enc.board)
+              assert np.array_equal(cwa, rwa), (board.fen(), uci, 'white')
+              assert np.array_equal(cba, rba), (board.fen(), uci, 'black')
+              got_eval = int(evaluate_chess768_accumulators(-enc.side, cwa, cba, ow, ob))
+              expected_eval = ref_eval(-enc.side, rwa, rba)
+              assert got_eval == expected_eval, (board.fen(), uci, got_eval, expected_eval)
+              board.push(py_move)
+              checked += 1
+
+          # Directed special-move coverage so random play is not allowed to miss rare geometry.
+          directed = [
+              ('r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1', lambda m: bool(m & FLAG_CASTLE)),
+              ('4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1', lambda m: bool(m & FLAG_EP)),
+              ('4k3/P7/8/8/8/8/7p/4K3 w - - 0 1', lambda m: chess.Move.from_uci(move_to_uci(int(m))).promotion is not None),
+          ]
+          directed_checked = 0
+          for fen, predicate in directed:
+              pos = chess.Board(fen)
+              enc = encode_position(pos)
+              moves, count = generate_legal_moves(enc.board, enc.side, enc.castling, enc.ep_square)
+              selected = [int(moves[i]) for i in range(int(count)) if predicate(int(moves[i]))]
+              assert selected, (fen, 'missing directed move')
+              for move in selected:
+                  wa, ba = full(enc.board)
+                  cwa = np.empty(H, dtype=np.int32); cba = np.empty(H, dtype=np.int32)
+                  advance_chess768_accumulators_into(enc.board, enc.side, move, wa, ba, cwa, cba, fw)
+                  board_copy = enc.board.copy()
+                  make_move_inplace(board_copy, enc.side, enc.castling, enc.ep_square, move)
+                  rwa, rba = full(board_copy)
+                  assert np.array_equal(cwa, rwa)
+                  assert np.array_equal(cba, rba)
+                  directed_checked += 1
+
+          # Verify Bullet SavedFormat byte layout and <64-byte padding rule.
+          values_required = 768 * H + H + 2 * H + 1
+          source = np.arange(values_required, dtype=np.int64)
+          source = ((source % 60001) - 30000).astype('<i2')
+          payload = source.tobytes()
+          padding = (-len(payload)) % 64
+          fixture = Path('/tmp/v14-quantised-fixture.bin')
+          fixture.write_bytes(payload + bytes(padding))
+          l0w, l0b, l1w, l1b = load_bullet_quantised(fixture, H)
+          assert l0w.shape == (768, H)
+          assert l0b.shape == (H,)
+          assert l1w.shape == (2 * H,)
+          assert int(l0w[1, 0]) == int(source[H])
+          assert int(l0b[0]) == int(source[768 * H])
+          assert int(l1b) == int(source[-1])
+
+          summary = {
+              'random_transitions': checked,
+              'directed_special_moves': directed_checked,
+              'random_special_counts': special_counts,
+              'hidden_size': H,
+              'feature_map_cases': 2 * 12 * 64,
+              'inference_reference': 'exact signed truncation-toward-zero integer oracle',
+              'v13_search_modified': False,
+          }
+          print(json.dumps(summary, indent=2))
+          Path('v14-runtime-results/equivalence.json').write_text(json.dumps(summary, indent=2))
+          PY
+
+      - name: Benchmark sparse delta versus full refresh
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=/tmp/v14-runtime python - <<'PY'
+          import json
+          import time
+          from pathlib import Path
+
+          import chess
+          import numpy as np
+          from numba import njit
+
+          from experiments.numba_core import WHITE, encode_position, generate_legal_moves
+          from experiments.v14_nnue_runtime import (
+              advance_chess768_accumulators_into, build_chess768_accumulator_into,
+              evaluate_chess768_accumulators,
+          )
+
+          @njit(cache=False)
+          def run_delta(board, side, move, wa, ba, cwa, cba, fw, iters):
+              checksum = 0
+              for _ in range(iters):
+                  advance_chess768_accumulators_into(board, side, move, wa, ba, cwa, cba, fw)
+                  checksum += int(cwa[0]) + int(cba[0])
+              return checksum
+
+          @njit(cache=False)
+          def run_refresh(board, wa, ba, fw, fb, iters):
+              checksum = 0
+              for _ in range(iters):
+                  build_chess768_accumulator_into(board, WHITE, fw, fb, wa)
+                  build_chess768_accumulator_into(board, -WHITE, fw, fb, ba)
+                  checksum += int(wa[0]) + int(ba[0])
+              return checksum
+
+          @njit(cache=False)
+          def run_eval(side, wa, ba, ow, ob, iters):
+              checksum = 0
+              for _ in range(iters):
+                  checksum += evaluate_chess768_accumulators(side, wa, ba, ow, ob)
+              return checksum
+
+          pos = chess.Board('r2q1rk1/pp2bppp/2n1pn2/2pp4/3P4/2PBPN2/PP3PPP/R1BQ1RK1 w - - 2 9')
+          enc = encode_position(pos)
+          moves, count = generate_legal_moves(enc.board, enc.side, enc.castling, enc.ep_square)
+          move = int(moves[0])
+          results = {}
+          rng = np.random.default_rng(140014)
+
+          for H in (64, 96, 128, 192):
+              fw = rng.integers(-48, 49, size=(768, H), dtype=np.int16)
+              fb = rng.integers(-96, 97, size=H, dtype=np.int16)
+              ow = rng.integers(-48, 49, size=2 * H, dtype=np.int16)
+              ob = np.int16(127)
+              wa = np.empty(H, dtype=np.int32); ba = np.empty(H, dtype=np.int32)
+              cwa = np.empty(H, dtype=np.int32); cba = np.empty(H, dtype=np.int32)
+              build_chess768_accumulator_into(enc.board, WHITE, fw, fb, wa)
+              build_chess768_accumulator_into(enc.board, -WHITE, fw, fb, ba)
+
+              # JIT warmup.
+              run_delta(enc.board, enc.side, move, wa, ba, cwa, cba, fw, 1)
+              run_refresh(enc.board, cwa, cba, fw, fb, 1)
+              run_eval(enc.side, wa, ba, ow, ob, 1)
+
+              iters = 20000
+              t0 = time.perf_counter_ns(); dsum = run_delta(enc.board, enc.side, move, wa, ba, cwa, cba, fw, iters); t1 = time.perf_counter_ns()
+              rsum = run_refresh(enc.board, cwa, cba, fw, fb, iters); t2 = time.perf_counter_ns()
+              eval_iters = 100000
+              esum = run_eval(enc.side, wa, ba, ow, ob, eval_iters); t3 = time.perf_counter_ns()
+              delta_ns = (t1 - t0) / iters
+              refresh_ns = (t2 - t1) / iters
+              eval_ns = (t3 - t2) / eval_iters
+              ratio = delta_ns / refresh_ns
+              results[str(H)] = {
+                  'delta_ns': delta_ns,
+                  'full_refresh_ns': refresh_ns,
+                  'delta_over_refresh': ratio,
+                  'eval_ns': eval_ns,
+                  'checksums': [int(dsum), int(rsum), int(esum)],
+              }
+              print(H, results[str(H)])
+
+          # Sparse updates should materially beat rescanning every active feature; this is a
+          # substrate invariant, not a claim yet about whole-search NPS.
+          assert results['128']['delta_over_refresh'] < 0.50, results['128']
+          Path('v14-runtime-results/performance.json').write_text(json.dumps(results, indent=2))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v14-nnue-runtime-substrate-${{ github.sha }}
+          path: v14-runtime-results/
+          retention-days: 30
