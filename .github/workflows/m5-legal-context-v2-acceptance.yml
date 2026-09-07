@@ -1,0 +1,132 @@
+name: M5 legality-context v2 acceptance
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    if: github.head_ref == 'm5/legal-context-v2-acceptance'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: Verify exact experiment source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          cargo run --quiet --release -p chess-bench | tee production-bench.txt
+          grep -Fx 'signature 0x4c3bbe8701fbbb68' production-bench.txt
+
+      - name: Materialize exact screened legality-context candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/apply_legal_context_v2.py
+          cargo fmt
+          git diff --check
+          git diff --binary > candidate.patch
+          echo '7ec38e07794f87b5d9144bc167cb2f8f424917cfe7110d89b8fd0d2f992f03e0  candidate.patch' | sha256sum --check --strict
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          cargo run --quiet --release -p chess-bench | tee candidate-bench.txt
+          grep -Fx 'signature 0x4c3bbe8701fbbb68' candidate-bench.txt
+
+      - name: Build exact candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          CARGO_TARGET_DIR="$PWD/target-candidate" cargo build --release -p chess-uci
+          test -x target-candidate/release/chess-uci
+          sha256sum target-candidate/release/chess-uci | tee candidate-engine.sha256
+
+      - name: Build exact production reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          REFERENCE_SHA=169fb5d424d90ebc45577ecaabe2a8fa0b4c1c10
+          git fetch --quiet origin "$REFERENCE_SHA"
+          git worktree add --detach .qualification/reference "$REFERENCE_SHA"
+          CARGO_TARGET_DIR="$PWD/target-reference" cargo run --quiet --release -p chess-bench --manifest-path .qualification/reference/Cargo.toml | tee reference-bench.txt
+          grep -Fx 'signature 0x4c3bbe8701fbbb68' reference-bench.txt
+          CARGO_TARGET_DIR="$PWD/target-reference" cargo build --release -p chess-uci --manifest-path .qualification/reference/Cargo.toml
+          test -x target-reference/release/chess-uci
+          sha256sum target-reference/release/chess-uci | tee reference-engine.sha256
+          echo "$REFERENCE_SHA" | tee reference-main.sha
+
+      - name: Build pinned Fastchess 1.8.2-alpha
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = 'f618e34540f94f4719ad3817950618dabe441318'
+          make -C .qualification/fastchess-src -j2
+          test -x .qualification/fastchess-src/fastchess
+
+      - name: Run fresh paired 200-game acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/acceptance
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/target-candidate/release/chess-uci" name=legal-context-v2-accept option.Hash=32 \
+            -engine cmd="$PWD/target-reference/release/chess-uci" name=production-main option.Hash=32 \
+            -each tc=1+0.01 \
+            -openings file=match/openings/m3-uho-lichess-100-v1.epd format=epd order=random \
+            -srand 20261117 \
+            -rounds 100 -repeat -concurrency 1 -maxmoves 300 \
+            -ratinginterval 20 \
+            -pgnout file=.qualification/acceptance/games.pgn notation=uci append=false nodes=true nps=true \
+            -log file=.qualification/acceptance/uci.log level=info engine=true append=false \
+            | tee .qualification/acceptance/fastchess.stdout.log
+
+      - name: Record immutable evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/acceptance
+          cp production-bench.txt .qualification/acceptance/production-bench.txt || true
+          cp candidate-bench.txt .qualification/acceptance/candidate-bench.txt || true
+          cp reference-bench.txt .qualification/acceptance/reference-bench.txt || true
+          cp candidate.patch .qualification/acceptance/candidate.patch || true
+          cp candidate-engine.sha256 .qualification/acceptance/candidate-engine.sha256 || true
+          cp reference-engine.sha256 .qualification/acceptance/reference-engine.sha256 || true
+          cp reference-main.sha .qualification/acceptance/reference-main.sha || true
+          sha256sum candidate.patch | tee .qualification/acceptance/candidate-patch.sha256 || true
+          cat > .qualification/acceptance/evidence.txt <<EOF
+          experiment=legality-context-v2-acceptance
+          experiment_head=${GITHUB_HEAD_SHA:-unknown}
+          screened_patch_sha256=7ec38e07794f87b5d9144bc167cb2f8f424917cfe7110d89b8fd0d2f992f03e0
+          games=200
+          tc=1+0.01
+          seed=20261117
+          opening_sha256=599a45efb446e91952d13e79bc7fec8de319e332036a54552a3e8e4af91f9cf1
+          expected_signature=0x4c3bbe8701fbbb68
+          fastchess_commit=f618e34540f94f4719ad3817950618dabe441318
+          reference_sha=169fb5d424d90ebc45577ecaabe2a8fa0b4c1c10
+          EOF
+
+      - name: Upload complete acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m5-legal-context-v2-acceptance-${{ github.sha }}
+          path: .qualification/acceptance/
+          retention-days: 30
