@@ -57,7 +57,7 @@ text = replace_once(
     r'''fn minor_confinement(position: &Position, color: Color) -> (i32, i32) {
     let own_occupancy = position.occupancy(color);
     let occupied = position.occupied();
-    let mut enemy_pawn_attacks = chess_core::Bitboard::empty();
+    let mut enemy_pawn_attacks = chess_core::Bitboard::EMPTY;
     for pawn in position.pieces(color.opposite(), PieceKind::Pawn) {
         enemy_pawn_attacks |= pawn_attacks(color.opposite(), pawn);
     }
