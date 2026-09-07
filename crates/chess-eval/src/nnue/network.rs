@@ -5,11 +5,13 @@
 //! compatibility, quantized arithmetic and model provenance testable before incremental accumulators
 //! make the learned path hot.
 
+pub mod accumulator;
+
 use core::fmt;
 
 use chess_core::{Color, Position};
 
-use super::{FEATURE_COUNT, FEATURE_SET_ID, FeatureIndex, active_features};
+use super::{FEATURE_COUNT, FEATURE_SET_ID, FeatureFrame, FeatureIndex, active_features};
 
 const MAGIC: [u8; 8] = *b"CHNNUE1\0";
 const FORMAT_VERSION: u16 = 1;
@@ -26,7 +28,7 @@ pub const SUPPORTED_HIDDEN: [usize; 3] = [32, 64, 128];
 /// Parsed immutable integer network.
 ///
 /// Heap allocation happens only when a network file is loaded. Full inference itself allocates no
-/// heap memory, and NNUE-3 will reuse the exact weight layout for incremental accumulators.
+/// heap memory, and NNUE-3 reuses the exact weight layout for incremental accumulators.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Network {
     hidden: usize,
@@ -165,21 +167,60 @@ impl Network {
     /// Full-refresh integer evaluation from the side-to-move perspective.
     ///
     /// This is the slow correctness/reference path. It reconstructs both sparse perspective feature
-    /// sets directly from the board and then forms two hidden accumulators on the stack. NNUE-3 will
-    /// prove its incremental accumulator produces exactly the same score.
+    /// sets directly from the board and then forms two hidden accumulators on the stack. NNUE-3 proves
+    /// its incremental accumulator produces exactly the same score.
     #[must_use]
     pub fn evaluate_full(&self, position: &Position) -> Option<i32> {
-        let white = active_features(position, Color::White)?;
-        let black = active_features(position, Color::Black)?;
-
         let mut white_acc = [0_i32; MAX_HIDDEN];
         let mut black_acc = [0_i32; MAX_HIDDEN];
-        self.rebuild_accumulator(white.as_slice(), &mut white_acc);
-        self.rebuild_accumulator(black.as_slice(), &mut black_acc);
+        self.rebuild_perspective(position, Color::White, &mut white_acc)?;
+        self.rebuild_perspective(position, Color::Black, &mut black_acc)?;
+        Some(self.score_accumulators(&white_acc, &black_acc, position.side_to_move()))
+    }
 
-        let (us, them) = match position.side_to_move() {
-            Color::White => (&white_acc[..self.hidden], &black_acc[..self.hidden]),
-            Color::Black => (&black_acc[..self.hidden], &white_acc[..self.hidden]),
+    fn rebuild_perspective(
+        &self,
+        position: &Position,
+        perspective: Color,
+        target: &mut [i32; MAX_HIDDEN],
+    ) -> Option<FeatureFrame> {
+        let features = active_features(position, perspective)?;
+        self.rebuild_accumulator(features.as_slice(), target);
+        Some(features.frame())
+    }
+
+    fn rebuild_accumulator(&self, features: &[FeatureIndex], target: &mut [i32; MAX_HIDDEN]) {
+        for (neuron, slot) in target[..self.hidden].iter_mut().enumerate() {
+            *slot = i32::from(self.input_bias[neuron]);
+        }
+        target[self.hidden..].fill(0);
+        for &feature in features {
+            self.apply_feature_row(target, feature, 1);
+        }
+    }
+
+    fn apply_feature_row(
+        &self,
+        target: &mut [i32; MAX_HIDDEN],
+        feature: FeatureIndex,
+        direction: i32,
+    ) {
+        debug_assert!(direction == -1 || direction == 1);
+        let base = usize::from(feature.raw()) * self.hidden;
+        for (neuron, slot) in target[..self.hidden].iter_mut().enumerate() {
+            *slot += direction * i32::from(self.input_weights[base + neuron]);
+        }
+    }
+
+    fn score_accumulators(
+        &self,
+        white: &[i32; MAX_HIDDEN],
+        black: &[i32; MAX_HIDDEN],
+        side_to_move: Color,
+    ) -> i32 {
+        let (us, them) = match side_to_move {
+            Color::White => (&white[..self.hidden], &black[..self.hidden]),
+            Color::Black => (&black[..self.hidden], &white[..self.hidden]),
         };
 
         let mut sum = i64::from(self.output_bias);
@@ -191,19 +232,7 @@ impl Network {
         }
 
         let scaled = sum / i64::from(self.output_scale);
-        Some(scaled.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32)
-    }
-
-    fn rebuild_accumulator(&self, features: &[FeatureIndex], target: &mut [i32; MAX_HIDDEN]) {
-        for (neuron, slot) in target[..self.hidden].iter_mut().enumerate() {
-            *slot = i32::from(self.input_bias[neuron]);
-        }
-        for &feature in features {
-            let base = usize::from(feature.raw()) * self.hidden;
-            for (neuron, slot) in target[..self.hidden].iter_mut().enumerate() {
-                *slot += i32::from(self.input_weights[base + neuron]);
-            }
-        }
+        scaled.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
     }
 }
 
