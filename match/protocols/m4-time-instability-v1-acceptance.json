@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "protocol_id": "m4-time-instability-v1-acceptance",
+  "runner": "fastchess",
+  "games": 200,
+  "time_control": "1+0.01",
+  "concurrency": 1,
+  "seed": 20260907,
+  "max_moves": 300,
+  "opening_format": "epd",
+  "openings_required": true,
+  "opening_suite_id": "m3-uho-lichess-100-v1",
+  "opening_sha256": "599a45efb446e91952d13e79bc7fec8de319e332036a54552a3e8e4af91f9cf1",
+  "paired_colour_reversal": true,
+  "ponder": false,
+  "tablebases": false,
+  "evaluation_adjudication": false,
+  "notes": "Clean exact-source 200-game acceptance for instability-aware own-clock time management v1 over production E4. Candidate search SHA-256 must be 25526a892b48f027d7503737f6fe5cc874c4de0a75139ff716e4f53fa769be57 and engine SHA-256 c8bf85cdd96b6cdba0d34c995ba6e4c7df4d4edd2f7846ece0f5db05c8bb277f before the match begins."
+}
