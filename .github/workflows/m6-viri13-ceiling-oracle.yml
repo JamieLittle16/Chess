@@ -62,6 +62,10 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
+          # GitHub invokes bash with -e even when the body does not request it. Disable that
+          # injected errexit so a broken reference invocation is captured as evidence instead of
+          # aborting before the raw output/status reaches the artifact.
+          set +e
           : > .qualification/viri13/oracle-parity.txt
           : > .qualification/viri13/reference-raw.txt
           failures=0
