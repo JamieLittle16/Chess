@@ -284,19 +284,19 @@ mod tests {
 
     #[test]
     fn pinned_recapture_is_not_counted_as_legal() {
-        // After Bxd7+, the black rook on e7 geometrically attacks d7 but cannot recapture: moving
-        // off the e-file would expose the black king on e8 to the white rook on e1. A second white
-        // rook on d1 protects d7, so the king itself cannot provide an alternative recapture.
+        // After Bxd5, the black knight on e7 geometrically attacks d5 but cannot recapture: moving
+        // off the e-file would expose the black king on e8 to the separate white rook on e1. The
+        // king itself is too far from d5 to provide an alternative recapture.
         let position =
-            Position::from_fen("4k3/3qr3/8/8/6B1/8/8/K2RR3 w - - 0 1").expect("valid FEN");
-        let g4 = Square::from_file_rank(6, 3).expect("g4");
-        let d7 = Square::from_file_rank(3, 6).expect("d7");
+            Position::from_fen("4k3/4n3/8/3q4/8/8/6B1/K3R3 w - - 0 1").expect("valid FEN");
+        let g2 = Square::from_file_rank(6, 1).expect("g2");
+        let d5 = Square::from_file_rank(3, 4).expect("d5");
         let mv = position
             .legal_moves()
             .iter()
             .copied()
-            .find(|mv| mv.from() == g4 && mv.to() == d7)
-            .expect("Bxd7 is legal");
+            .find(|mv| mv.from() == g2 && mv.to() == d5)
+            .expect("Bxd5 is legal");
         assert!(see(&position, mv) >= 800);
     }
 
