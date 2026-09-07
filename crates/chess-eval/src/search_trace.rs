@@ -54,7 +54,9 @@ fn configure() -> Option<TraceState> {
         .unwrap_or_else(|_| panic!("{TRACE_GROUP_ENV} is required when {TRACE_FILE_ENV} is set"));
     assert!(!group.is_empty(), "{TRACE_GROUP_ENV} must not be empty");
     assert!(
-        !group.contains(['\t', '\n', '\r']),
+        !group
+            .chars()
+            .any(|character| matches!(character, '\t' | '\n' | '\r')),
         "{TRACE_GROUP_ENV} must be one TSV field"
     );
 
