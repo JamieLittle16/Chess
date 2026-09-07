@@ -1,6 +1,6 @@
 use chess_core::{
-    Bitboard, ChessMove, Color, MoveKind, PieceKind, Position, Square, bishop_attacks, king_attacks,
-    knight_attacks, pawn_attacks, rook_attacks,
+    Bitboard, ChessMove, Color, MoveKind, PieceKind, Position, Square, bishop_attacks,
+    king_attacks, knight_attacks, pawn_attacks, rook_attacks,
 };
 
 const SEE_VALUES: [i32; 6] = [100, 320, 330, 500, 900, 20_000];
@@ -69,13 +69,12 @@ pub(super) fn see(position: &Position, mv: ChessMove) -> i32 {
         };
 
         depth += 1;
-        let promotion_gain = if attacker.kind == PieceKind::Pawn
-            && pawn_promotes_on(side, target.rank())
-        {
-            SEE_VALUES[PieceKind::Queen.index()] - SEE_VALUES[PieceKind::Pawn.index()]
-        } else {
-            0
-        };
+        let promotion_gain =
+            if attacker.kind == PieceKind::Pawn && pawn_promotes_on(side, target.rank()) {
+                SEE_VALUES[PieceKind::Queen.index()] - SEE_VALUES[PieceKind::Pawn.index()]
+            } else {
+                0
+            };
         gains[depth] = SEE_VALUES[occupant_kind.index()] + promotion_gain - gains[depth - 1];
 
         boards[occupant_side.index()][occupant_kind.index()] &= !target_bit;
@@ -147,7 +146,8 @@ fn least_legal_attacker(
             let index = candidates.trailing_zeros() as u8;
             candidates &= candidates - 1;
             let square = Square::from_index(index).expect("bit index is on board");
-            let resulting_kind = if kind == PieceKind::Pawn && pawn_promotes_on(side, target.rank()) {
+            let resulting_kind = if kind == PieceKind::Pawn && pawn_promotes_on(side, target.rank())
+            {
                 PieceKind::Queen
             } else {
                 kind
@@ -201,14 +201,10 @@ fn capture_keeps_king_safe(
     !square_attacked(king, side.opposite(), next_occupied, &next)
 }
 
-fn square_attacked(
-    target: Square,
-    attacker: Color,
-    occupied: u64,
-    boards: &[[u64; 6]; 2],
-) -> bool {
+fn square_attacked(target: Square, attacker: Color, occupied: u64, boards: &[[u64; 6]; 2]) -> bool {
     let side = attacker.index();
-    if pawn_attacks(attacker.opposite(), target).raw() & boards[side][PieceKind::Pawn.index()] != 0 {
+    if pawn_attacks(attacker.opposite(), target).raw() & boards[side][PieceKind::Pawn.index()] != 0
+    {
         return true;
     }
     if knight_attacks(target).raw() & boards[side][PieceKind::Knight.index()] != 0 {
@@ -238,7 +234,9 @@ fn captured_piece(position: &Position, mv: ChessMove, us: Color) -> Option<(Piec
         let square = Square::from_file_rank(mv.to().file(), rank)?;
         Some((PieceKind::Pawn, square))
     } else {
-        position.piece_at(mv.to()).map(|piece| (piece.kind(), mv.to()))
+        position
+            .piece_at(mv.to())
+            .map(|piece| (piece.kind(), mv.to()))
     }
 }
 
@@ -252,7 +250,7 @@ const fn pawn_promotes_on(color: Color, rank: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use chess_core::{Position, Square};
+    use chess_core::{MoveKind, Position, Square};
 
     use super::see;
 
@@ -286,15 +284,40 @@ mod tests {
 
     #[test]
     fn pinned_recapture_is_not_counted_as_legal() {
-        let position = Position::from_fen("4k3/4r3/8/8/4q3/8/4R3/4K3 w - - 0 1").expect("valid FEN");
-        let e2 = Square::from_file_rank(4, 1).expect("e2");
-        let e4 = Square::from_file_rank(4, 3).expect("e4");
+        let position =
+            Position::from_fen("4k3/4n3/8/3q4/8/8/6B1/K3R3 w - - 0 1").expect("valid FEN");
+        let g2 = Square::from_file_rank(6, 1).expect("g2");
+        let d5 = Square::from_file_rank(3, 4).expect("d5");
         let mv = position
             .legal_moves()
             .iter()
             .copied()
-            .find(|mv| mv.from() == e2 && mv.to() == e4)
-            .expect("Rxe4 is legal");
-        assert!(see(&position, mv) > 0);
+            .find(|mv| mv.from() == g2 && mv.to() == d5)
+            .expect("Bxd5 is legal");
+        assert!(see(&position, mv) >= 800);
+    }
+
+    #[test]
+    fn en_passant_removes_the_off_target_captured_pawn() {
+        let position = Position::from_fen("k7/8/8/4KPp1/8/8/8/8 w - g6 0 1").expect("valid FEN");
+        let mv = position
+            .legal_moves()
+            .iter()
+            .copied()
+            .find(|mv| mv.kind() == MoveKind::EnPassant)
+            .expect("en-passant is legal");
+        assert_eq!(see(&position, mv), 100);
+    }
+
+    #[test]
+    fn quiet_promotion_counts_the_material_transformation() {
+        let position = Position::from_fen("7k/P7/8/8/8/8/8/K7 w - - 0 1").expect("valid FEN");
+        let mv = position
+            .legal_moves()
+            .iter()
+            .copied()
+            .find(|mv| mv.kind() == MoveKind::PromoteQueen)
+            .expect("queen promotion is legal");
+        assert_eq!(see(&position, mv), 800);
     }
 }
