@@ -18,8 +18,9 @@ enum Stage {
 /// capture/promotion score, and untouched quiets follow in generator order. Lazy selection means a
 /// beta cutoff avoids scoring/sorting moves that are never searched.
 ///
-/// The Search v2 experiment can supply a quiet scorer without changing the accepted default path:
-/// ties preserve generator order, and the ordinary `next` call uses an all-zero scorer.
+/// Search v2 can opt into `next_scored` for a lazily ranked quiet stage. The ordinary `next` path is
+/// intentionally kept identical to the accepted implementation so feature-off builds pay no scan or
+/// history overhead at all.
 pub(super) struct MovePicker<'a> {
     moves: &'a mut [ChessMove],
     tt_move: Option<ChessMove>,
@@ -45,16 +46,83 @@ impl<'a> MovePicker<'a> {
         }
     }
 
-    /// Select the next move with the accepted generator-order policy for remaining quiets.
+    /// Select the next move using the accepted generator-order policy for ordinary quiets.
     pub(super) fn next(&mut self, position: &Position) -> Option<ChessMove> {
-        self.next_scored(position, |_| 0)
+        loop {
+            match self.stage {
+                Stage::Tt => {
+                    self.stage = Stage::Tactical;
+                    if let Some(tt_move) = self.tt_move
+                        && let Some(index) = self.moves[self.cursor..]
+                            .iter()
+                            .position(|&mv| mv == tt_move)
+                            .map(|offset| self.cursor + offset)
+                    {
+                        self.moves.swap(self.cursor, index);
+                        let mv = self.moves[self.cursor];
+                        self.cursor += 1;
+                        return Some(mv);
+                    }
+                }
+                Stage::Tactical => {
+                    let mut best_index = None;
+                    let mut best_score = i32::MIN;
+                    for index in self.cursor..self.moves.len() {
+                        let mv = self.moves[index];
+                        if !is_tactical(mv) {
+                            continue;
+                        }
+                        let score = tactical_score(position, mv);
+                        if score > best_score {
+                            best_score = score;
+                            best_index = Some(index);
+                        }
+                    }
+
+                    if let Some(index) = best_index {
+                        self.moves.swap(self.cursor, index);
+                        let mv = self.moves[self.cursor];
+                        self.cursor += 1;
+                        return Some(mv);
+                    }
+                    self.stage = Stage::Killer;
+                }
+                Stage::Killer => {
+                    while self.killer_index < self.killers.len() {
+                        let killer = self.killers[self.killer_index];
+                        self.killer_index += 1;
+                        if let Some(killer) = killer
+                            && !is_tactical(killer)
+                            && let Some(index) = self.moves[self.cursor..]
+                                .iter()
+                                .position(|&mv| mv == killer)
+                                .map(|offset| self.cursor + offset)
+                        {
+                            self.moves.swap(self.cursor, index);
+                            let mv = self.moves[self.cursor];
+                            self.cursor += 1;
+                            return Some(mv);
+                        }
+                    }
+                    self.stage = Stage::Quiet;
+                }
+                Stage::Quiet => {
+                    if self.cursor < self.moves.len() {
+                        let mv = self.moves[self.cursor];
+                        self.cursor += 1;
+                        return Some(mv);
+                    }
+                    self.stage = Stage::Done;
+                }
+                Stage::Done => return None,
+            }
+        }
     }
 
-    /// Select the next move while lazily ranking only the quiets that are actually requested.
+    /// Select the next move while lazily ranking only the ordinary quiets that are requested.
     ///
-    /// TT, tactical and killer stages are identical to `next`. When the picker reaches ordinary
-    /// quiets it selects the highest-scoring remaining move in-place. Equal scores retain the
-    /// original order, so an all-zero scorer is behaviorally identical to the accepted path.
+    /// TT, tactical and killer stages are identical to `next`. Equal quiet scores preserve current
+    /// move-buffer order. This method is compiled into candidate builds only when Search v2 needs it.
     pub(super) fn next_scored<F>(
         &mut self,
         position: &Position,
