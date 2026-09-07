@@ -1,0 +1,125 @@
+name: V14 128-wide NNUE search-cost probe
+
+on:
+  push:
+    branches: [analysis/v14-nnue-search-cost-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cost:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Reconstruct exact V13 control and score-disabled cost candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum -c -
+          rm -rf /tmp/v13-control /tmp/v14-cost
+          mkdir -p /tmp/v13-control /tmp/v14-cost
+          unzip -q /tmp/v13.zip -d /tmp/v13-control
+          unzip -q /tmp/v13.zip -d /tmp/v14-cost
+          for DIR in /tmp/v13-control /tmp/v14-cost; do
+            patch "$DIR/experiments/numba_search.py" < .analysis/v13_jit_refactor.patch
+            DIR="$DIR" python - <<'PY'
+          import os
+          from pathlib import Path
+          p = Path(os.environ['DIR']) / 'experiments/numba_search.py'
+          s = p.read_text()
+          old = '    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          new = '    correction = correction // 6\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          assert s.count(old) == 1
+          p.write_text(s.replace(old, new, 1))
+          PY
+            python scripts/patch_v13_legality_context.py "$DIR/experiments/numba_core.py"
+            python scripts/patch_v13_qsearch_tactical.py "$DIR/experiments/numba_core.py" "$DIR/experiments/numba_search.py"
+          done
+          echo '0306e8145a453d91b9b5ac92e9980931510d9e18f8ba598a7548d08b85165c35  /tmp/v13-control/experiments/numba_core.py' | sha256sum -c -
+          echo '401f6580028a72361286bd99bee1f0022c74e6c8a65da8acd47448835a1ff360  /tmp/v13-control/experiments/numba_search.py' | sha256sum -c -
+          python scripts/patch_v14_nnue_search_cost.py /tmp/v14-cost/experiments/numba_search.py
+          python -m py_compile /tmp/v14-cost/experiments/numba_search.py
+          cmp /tmp/v13-control/experiments/numba_core.py /tmp/v14-cost/experiments/numba_core.py
+          cmp /tmp/v13-control/experiments/v13_residual.i16 /tmp/v14-cost/experiments/v13_residual.i16
+          grep -Fq 'NNUE_COST_HIDDEN = 128' /tmp/v14-cost/experiments/numba_search.py
+          grep -Fq 'correction = correction // 6' /tmp/v14-cost/experiments/numba_search.py
+      - name: Prove exact signatures and measure whole-search cost
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p v14-nnue-cost-results
+          cat >/tmp/search_cost_worker.py <<'PY'
+          import json, sys, time
+          import chess
+          import numpy as np
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful
+
+          for line in sys.stdin:
+              q = json.loads(line)
+              b = chess.Board(q['fen']); e = encode_position(b)
+              history = np.empty(0, dtype=np.uint64)
+              t0 = time.perf_counter_ns()
+              out = iterative_search_stateful(e.board, e.side, e.castling, e.ep_square, b.halfmove_clock, history, 0, int(q['nodes']))
+              t1 = time.perf_counter_ns()
+              print(json.dumps({'move': int(out[0]), 'score': int(out[1]), 'depth': int(out[2]), 'nodes': int(out[3]), 'ns': t1-t0}), flush=True)
+          PY
+          python - <<'PY'
+          import json, os, statistics, subprocess, sys
+          from pathlib import Path
+
+          roots = [x.strip() for x in open('match/openings/m3-uho-lichess-100-v1.epd') if x.strip()][:24]
+          NODES = 50000
+          REPS = 3
+
+          def start(path):
+              env = os.environ.copy(); env['PYTHONPATH'] = path
+              return subprocess.Popen([sys.executable, '/tmp/search_cost_worker.py'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1, env=env)
+          def ask(p, fen, nodes):
+              p.stdin.write(json.dumps({'fen': fen, 'nodes': nodes})+'\n'); p.stdin.flush()
+              return json.loads(p.stdout.readline())
+
+          base = start('/tmp/v13-control'); cand = start('/tmp/v14-cost')
+          ratios=[]; rep_data=[]
+          try:
+              ask(base, roots[0], 500); ask(cand, roots[0], 500)
+              for rep in range(REPS):
+                  base_nodes=base_ns=cand_nodes=cand_ns=0
+                  for fen in roots:
+                      # Alternate order by repetition to reduce thermal/order bias.
+                      if rep & 1:
+                          c=ask(cand, fen, NODES); b=ask(base, fen, NODES)
+                      else:
+                          b=ask(base, fen, NODES); c=ask(cand, fen, NODES)
+                      bs=(b['move'], b['score'], b['depth'], b['nodes'])
+                      cs=(c['move'], c['score'], c['depth'], c['nodes'])
+                      assert bs == cs, (rep, fen, bs, cs)
+                      base_nodes += b['nodes']; base_ns += b['ns']
+                      cand_nodes += c['nodes']; cand_ns += c['ns']
+                  base_nps=base_nodes/(base_ns/1e9); cand_nps=cand_nodes/(cand_ns/1e9)
+                  ratio=cand_nps/base_nps; ratios.append(ratio)
+                  row={'rep':rep,'base_nps':base_nps,'candidate_nps':cand_nps,'ratio':ratio}
+                  rep_data.append(row); print(row)
+          finally:
+              for p in (base,cand): p.terminate(); p.wait()
+
+          summary={'candidate':'score-disabled Chess768 H128 accumulator carry','control':'exact-final-V13','positions':len(roots),'nodes_per_position':NODES,'repetitions':REPS,'exact_signatures':True,'ratios':ratios,'median_nps_ratio':statistics.median(ratios),'rep_data':rep_data}
+          print(json.dumps(summary,indent=2))
+          Path('v14-nnue-cost-results/search-cost.json').write_text(json.dumps(summary,indent=2))
+          # This is diagnostic, not an acceptance threshold. Fail only for a catastrophic surprise.
+          assert summary['median_nps_ratio'] >= 0.70, summary
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v14-nnue-search-cost-${{ github.sha }}
+          path: v14-nnue-cost-results/
+          retention-days: 30
