@@ -1,0 +1,53 @@
+name: M4 promote accepted late-quiet futility v1
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  materialize-and-verify:
+    if: github.head_ref == 'm4/promote-late-quiet-futility-v1'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - name: Materialize exact accepted source
+        run: |
+          set -euo pipefail
+          EXPECTED=cfe561488407366ace7ade6319651d518d788af56442ed93a87919d1cccd1c38
+          CURRENT=$(sha256sum crates/chess-search/src/lib.rs | cut -d' ' -f1)
+          if [[ "$CURRENT" != "$EXPECTED" ]]; then
+            python3 tools/apply_late_quiet_futility_v1_over_lmr.py
+            cargo fmt --all
+          fi
+          echo "$EXPECTED  crates/chess-search/src/lib.rs" | sha256sum --check --strict
+          git diff --check
+      - name: Verify exact accepted source
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --all-features
+          cargo test -p chess-search --test draw_strategy
+      - name: Commit materialized source if needed
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- crates/chess-search/src/lib.rs; then
+            echo 'Exact accepted search source already committed.'
+            exit 0
+          fi
+          git config user.name 'Jamie Little'
+          git config user.email '160879046+JamieLittle16@users.noreply.github.com'
+          git add crates/chess-search/src/lib.rs
+          git commit -m 'm4: materialize accepted late-quiet futility v1'
+          git push origin HEAD:${{ github.head_ref }}
