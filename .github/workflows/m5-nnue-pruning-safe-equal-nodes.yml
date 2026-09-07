@@ -1,0 +1,138 @@
+name: M5 residual NNUE pruning-safe equal-nodes
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  pruning-safe:
+    if: github.head_ref == 'm5/nnue-incremental-ab-v1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Keep accepted classical evaluator as futility-pruning oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('crates/chess-search/src/lib.rs')
+          text = path.read_text(encoding='utf-8')
+          old_import = 'use chess_eval::evaluate;'
+          old_static = '''            Some(evaluate(position))
+          } else {
+              None
+          };'''
+          new_import = 'use chess_eval::{evaluate, evaluate_classical};'
+          new_static = '''            Some(evaluate_classical(position))
+          } else {
+              None
+          };'''
+          if text.count(old_import) != 1:
+              raise SystemExit('expected exactly one chess_eval::evaluate import')
+          if text.count(old_static) != 1:
+              raise SystemExit('expected exactly one RFP static-eval site')
+          text = text.replace(old_import, new_import, 1).replace(old_static, new_static, 1)
+          path.write_text(text, encoding='utf-8')
+          PY
+          cargo fmt --check
+          cargo test --workspace --release
+      - name: Build one shared patched release engine binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release -p chess-uci
+          test -x target/release/chess-uci
+          sha256sum target/release/chess-uci | tee engine.sha256
+      - name: Download frozen validation-selected residual model
+        uses: actions/download-artifact@v4
+        with:
+          name: m5-nnue-residual-v1-0da545630ea1408f61e8c10d03252bdd8c11eeca
+          path: .qualification/residual
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34147825482
+      - name: Verify exact screened model
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODEL=$(find "$PWD/.qualification/residual" -type f -name 'nnue-residual-32-v1.nnue' -print -quit)
+          test -n "$MODEL"
+          echo "7e156b6b7d18bdbfd61f98c9257b493918d9d19bfe94bbcadef401fc6835bc5b  $MODEL" | sha256sum --check --strict
+          echo "RESIDUAL_MODEL=$MODEL" >> "$GITHUB_ENV"
+      - name: Build pinned Fastchess 1.8.2-alpha
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = 'f618e34540f94f4719ad3817950618dabe441318'
+          make -C .qualification/fastchess-src -j2
+          test -x .qualification/fastchess-src/fastchess
+      - name: Create same-binary candidate and reference launchers
+        shell: bash
+        run: |
+          set -euo pipefail
+          ENGINE="$PWD/target/release/chess-uci"
+          MODEL="$RESIDUAL_MODEL"
+          mkdir -p .qualification/launchers .qualification/pruning-safe
+          cat > .qualification/launchers/candidate.sh <<EOF
+          #!/usr/bin/env bash
+          export CHESS_EXPERIMENTAL_RESIDUAL_NNUE='$MODEL'
+          exec '$ENGINE'
+          EOF
+          cat > .qualification/launchers/reference.sh <<EOF
+          #!/usr/bin/env bash
+          unset CHESS_EXPERIMENTAL_RESIDUAL_NNUE
+          exec '$ENGINE'
+          EOF
+          chmod +x .qualification/launchers/candidate.sh .qualification/launchers/reference.sh
+      - name: Run paired 100-game pruning-safe equal-nodes screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/.qualification/launchers/candidate.sh" name=residual-pruning-safe nodes=25000 option.Hash=32 \
+            -engine cmd="$PWD/.qualification/launchers/reference.sh" name=classical nodes=25000 option.Hash=32 \
+            -openings file=match/openings/m3-uho-lichess-100-v1.epd format=epd order=random \
+            -srand 20261019 \
+            -rounds 50 -repeat -concurrency 1 -maxmoves 300 \
+            -ratinginterval 20 \
+            -pgnout file=.qualification/pruning-safe/games.pgn notation=uci append=false nodes=true nps=true \
+            -log file=.qualification/pruning-safe/uci.log level=info engine=true append=false \
+            | tee .qualification/pruning-safe/fastchess.stdout.log
+      - name: Record immutable experiment identities
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/pruning-safe
+          cp engine.sha256 .qualification/pruning-safe/engine.sha256 || true
+          cat > .qualification/pruning-safe/evidence.txt <<EOF
+          model_sha256=7e156b6b7d18bdbfd61f98c9257b493918d9d19bfe94bbcadef401fc6835bc5b
+          residual_scale=33/16
+          pruning_static_eval=accepted_classical
+          leaf_static_eval=classical_plus_residual
+          nodes_per_move=25000
+          games=100
+          seed=20261019
+          opening_sha256=599a45efb446e91952d13e79bc7fec8de319e332036a54552a3e8e4af91f9cf1
+          fastchess_commit=f618e34540f94f4719ad3817950618dabe441318
+          EOF
+      - name: Upload pruning-safe evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m5-nnue-pruning-safe-${{ github.sha }}
+          path: .qualification/pruning-safe/
+          retention-days: 30
