@@ -1,0 +1,188 @@
+--- /tmp/v13old/experiments/numba_search.py	2026-09-07 19:50:03.000000000 +0000
++++ /tmp/v13bestcmp/experiments/numba_search.py	2026-09-07 22:13:22.000000000 +0000
+@@ -65,6 +65,8 @@
+     ROOK,
+     WHITE,
+     generate_legal_moves_into_with_king,
++    generate_legal_tactical_moves_into_with_king,
++    has_any_legal_move_with_king,
+     is_square_attacked,
+     make_move_inplace,
+     move_from,
+@@ -412,9 +414,83 @@
+             correction = RESIDUAL_CLAMP
+         elif correction < -RESIDUAL_CLAMP:
+             correction = -RESIDUAL_CLAMP
++    correction = correction // 6
+     return score + correction
+ 
+ 
++@njit(cache=False, inline="never")
++def _advance_residual_state_into(
++    board: np.ndarray,
++    side: int,
++    move: int,
++    parent: np.ndarray,
++    child: np.ndarray,
++) -> None:
++    """Update the learned residual without duplicating its large body into every search caller."""
++    from_square = move_from(move)
++    to_square = move_to(move)
++    promotion = move_promotion(move)
++    moving_signed = int(board[from_square])
++    moving_piece = abs(moving_signed)
++
++    captured_square = to_square
++    captured_signed = int(board[to_square])
++    if move & FLAG_EP:
++        captured_square = to_square - 8 * side
++        captured_signed = int(board[captured_square])
++
++    rook_from = -1
++    rook_to = -1
++    if move & FLAG_CASTLE:
++        if to_square == 6:
++            rook_from, rook_to = 7, 5
++        elif to_square == 2:
++            rook_from, rook_to = 0, 3
++        elif to_square == 62:
++            rook_from, rook_to = 63, 61
++        else:
++            rook_from, rook_to = 56, 59
++
++    # Learned V13 residual. Ordinary moves update two scalar perspective sums with only a
++    # handful of weight lookups. If the moving side's own king changes frame, rebuild only that
++    # perspective from the virtual child position; the opponent perspective still uses a delta.
++    white_king_parent = int(parent[EVAL_WHITE_KING])
++    black_king_parent = int(parent[EVAL_BLACK_KING])
++    placed_signed = side * promotion if promotion else moving_signed
++
++    # White perspective.
++    if moving_piece == KING and side == WHITE:
++        child[EVAL_RESIDUAL_WHITE] = _rebuild_residual_after_move(
++            board, side, move, WHITE, to_square
++        )
++    else:
++        total = int(parent[EVAL_RESIDUAL_WHITE])
++        total -= int(RESIDUAL_WEIGHTS[_residual_feature_index(WHITE, white_king_parent, moving_signed, from_square)])
++        if captured_signed != EMPTY:
++            total -= int(RESIDUAL_WEIGHTS[_residual_feature_index(WHITE, white_king_parent, captured_signed, captured_square)])
++        total += int(RESIDUAL_WEIGHTS[_residual_feature_index(WHITE, white_king_parent, placed_signed, to_square)])
++        if move & FLAG_CASTLE:
++            total -= int(RESIDUAL_WEIGHTS[_residual_feature_index(WHITE, white_king_parent, side * ROOK, rook_from)])
++            total += int(RESIDUAL_WEIGHTS[_residual_feature_index(WHITE, white_king_parent, side * ROOK, rook_to)])
++        child[EVAL_RESIDUAL_WHITE] = total
++
++    # Black perspective.
++    if moving_piece == KING and side != WHITE:
++        child[EVAL_RESIDUAL_BLACK] = _rebuild_residual_after_move(
++            board, side, move, -WHITE, to_square
++        )
++    else:
++        total = int(parent[EVAL_RESIDUAL_BLACK])
++        total -= int(RESIDUAL_WEIGHTS[_residual_feature_index(-WHITE, black_king_parent, moving_signed, from_square)])
++        if captured_signed != EMPTY:
++            total -= int(RESIDUAL_WEIGHTS[_residual_feature_index(-WHITE, black_king_parent, captured_signed, captured_square)])
++        total += int(RESIDUAL_WEIGHTS[_residual_feature_index(-WHITE, black_king_parent, placed_signed, to_square)])
++        if move & FLAG_CASTLE:
++            total -= int(RESIDUAL_WEIGHTS[_residual_feature_index(-WHITE, black_king_parent, side * ROOK, rook_from)])
++            total += int(RESIDUAL_WEIGHTS[_residual_feature_index(-WHITE, black_king_parent, side * ROOK, rook_to)])
++        child[EVAL_RESIDUAL_BLACK] = total
++
++
+ @njit(cache=False, inline="always")
+ def _advance_eval_state_into(
+     board: np.ndarray,
+@@ -429,8 +505,6 @@
+     child[EVAL_BLACK_BISHOPS] = parent[EVAL_BLACK_BISHOPS]
+     child[EVAL_WHITE_KING] = parent[EVAL_WHITE_KING]
+     child[EVAL_BLACK_KING] = parent[EVAL_BLACK_KING]
+-    child[EVAL_RESIDUAL_WHITE] = parent[EVAL_RESIDUAL_WHITE]
+-    child[EVAL_RESIDUAL_BLACK] = parent[EVAL_RESIDUAL_BLACK]
+ 
+     from_square = move_from(move)
+     to_square = move_to(move)
+@@ -485,45 +559,7 @@
+         child[EVAL_BASE] -= _base_contribution(rook_signed, rook_from)
+         child[EVAL_BASE] += _base_contribution(rook_signed, rook_to)
+ 
+-    # Learned V13 residual. Ordinary moves update two scalar perspective sums with only a
+-    # handful of weight lookups. If the moving side's own king changes frame, rebuild only that
+-    # perspective from the virtual child position; the opponent perspective still uses a delta.
+-    white_king_parent = int(parent[EVAL_WHITE_KING])
+-    black_king_parent = int(parent[EVAL_BLACK_KING])
+-    placed_signed = side * promotion if promotion else moving_signed
+-
+-    # White perspective.
+-    if moving_piece == KING and side == WHITE:
+-        child[EVAL_RESIDUAL_WHITE] = _rebuild_residual_after_move(
+-            board, side, move, WHITE, to_square
+-        )
+-    else:
+-        total = int(parent[EVAL_RESIDUAL_WHITE])
+-        total -= int(RESIDUAL_WEIGHTS[_residual_feature_index(WHITE, white_king_parent, moving_signed, from_square)])
+-        if captured_signed != EMPTY:
+-            total -= int(RESIDUAL_WEIGHTS[_residual_feature_index(WHITE, white_king_parent, captured_signed, captured_square)])
+-        total += int(RESIDUAL_WEIGHTS[_residual_feature_index(WHITE, white_king_parent, placed_signed, to_square)])
+-        if move & FLAG_CASTLE:
+-            total -= int(RESIDUAL_WEIGHTS[_residual_feature_index(WHITE, white_king_parent, side * ROOK, rook_from)])
+-            total += int(RESIDUAL_WEIGHTS[_residual_feature_index(WHITE, white_king_parent, side * ROOK, rook_to)])
+-        child[EVAL_RESIDUAL_WHITE] = total
+-
+-    # Black perspective.
+-    if moving_piece == KING and side != WHITE:
+-        child[EVAL_RESIDUAL_BLACK] = _rebuild_residual_after_move(
+-            board, side, move, -WHITE, to_square
+-        )
+-    else:
+-        total = int(parent[EVAL_RESIDUAL_BLACK])
+-        total -= int(RESIDUAL_WEIGHTS[_residual_feature_index(-WHITE, black_king_parent, moving_signed, from_square)])
+-        if captured_signed != EMPTY:
+-            total -= int(RESIDUAL_WEIGHTS[_residual_feature_index(-WHITE, black_king_parent, captured_signed, captured_square)])
+-        total += int(RESIDUAL_WEIGHTS[_residual_feature_index(-WHITE, black_king_parent, placed_signed, to_square)])
+-        if move & FLAG_CASTLE:
+-            total -= int(RESIDUAL_WEIGHTS[_residual_feature_index(-WHITE, black_king_parent, side * ROOK, rook_from)])
+-            total += int(RESIDUAL_WEIGHTS[_residual_feature_index(-WHITE, black_king_parent, side * ROOK, rook_to)])
+-        child[EVAL_RESIDUAL_BLACK] = total
+-
++    _advance_residual_state_into(board, side, move, parent, child)
+ 
+ @njit(cache=False, inline="always")
+ def _repetition_piece_index(signed_piece: int) -> int:
+@@ -1023,17 +1059,29 @@
+ 
+     pseudo = pseudo_stack[ply]
+     moves = move_stack[ply]
+-    count = _legal_moves_for_state(
+-        board, side, castling, ep_square, pseudo, moves, eval_stack[ply]
+-    )
+-    if count == 0:
+-        return (-MATE + ply if checked else 0), False
+     if checked:
++        count = _legal_moves_for_state(
++            board, side, castling, ep_square, pseudo, moves, eval_stack[ply]
++        )
++        if count == 0:
++            return -MATE + ply, False
+         _order_moves(board, moves, count, -1, score_stack[ply])
+     else:
+-        count = _order_tactical_moves(board, moves, count, -1, score_stack[ply])
++        own_king = int(
++            eval_stack[ply][EVAL_WHITE_KING]
++            if side == WHITE
++            else eval_stack[ply][EVAL_BLACK_KING]
++        )
++        count = generate_legal_tactical_moves_into_with_king(
++            board, side, ep_square, pseudo, moves, own_king
++        )
+         if count == 0:
+-            return alpha, False
++            if has_any_legal_move_with_king(
++                board, side, castling, ep_square, pseudo, own_king
++            ):
++                return alpha, False
++            return 0, False
++        _order_moves(board, moves, count, -1, score_stack[ply])
+ 
+     for index in range(count):
+         move = int(moves[index])
