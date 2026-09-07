@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "protocol_id": "m4-null-move-v2-screening",
+  "runner": "fastchess",
+  "games": 100,
+  "time_control": "1+0.01",
+  "concurrency": 1,
+  "seed": 20260909,
+  "max_moves": 300,
+  "opening_format": "epd",
+  "openings_required": true,
+  "opening_suite_id": "m3-uho-lichess-100-v1",
+  "opening_sha256": "599a45efb446e91952d13e79bc7fec8de319e332036a54552a3e8e4af91f9cf1",
+  "paired_colour_reversal": true,
+  "ponder": false,
+  "tablebases": false,
+  "evaluation_adjudication": false,
+  "notes": "Draw-safe NMP v2 over E4 main. Reuses v1 reversible null transition and synthetic draw/TT isolation exactly. Adaptive R=2/3: R3 at depth>=7 or depth>=6 with >=180cp static beta margin; otherwise R2. Deep marginal R3 fail-highs at depth>=8 and <160cp margin receive a real-position no-null verification search. Null-window only, not in check, mate-band excluded, heavy/two-minor material guard, no nested nulls or synthetic killer recording."
+}
