@@ -5,7 +5,10 @@
 //! copied from another engine. Runtime evaluation remains allocation-free: iterate the existing
 //! piece bitboards, perform table lookups, and interpolate one middle-game/end-game score pair.
 
+mod joint_tapered_psqt_v1;
 pub mod nnue;
+
+use std::sync::OnceLock;
 
 use chess_core::{Color, PieceKind, Position};
 
@@ -25,6 +28,8 @@ const ROOK_SEMI_OPEN_FILE_MG_BONUS: i32 = 8;
 const ROOK_SEMI_OPEN_FILE_EG_BONUS: i32 = 6;
 const FILE_A: u64 = 0x0101_0101_0101_0101;
 
+static EXPERIMENTAL_JOINT_TAPERED_PSQT_V1: OnceLock<bool> = OnceLock::new();
+
 /// Return the material owned by one side in centipawn-like units.
 #[must_use]
 pub fn material(position: &Position, color: Color) -> i32 {
@@ -36,11 +41,25 @@ pub fn material(position: &Position, color: Color) -> i32 {
 
 /// Evaluate a position from the side-to-move perspective.
 ///
-/// Positive values favour the player to move; negative values favour their opponent. The tapered
-/// score interpolates between middle-game and end-game piece-square preferences using remaining
-/// non-pawn material. Black reuses the same tables by vertically mirroring each square.
+/// With no experiment variable this takes the exact accepted E1+E4 classical path. The draft M5
+/// screen may set `CHESS_EXPERIMENTAL_JOINT_TAPERED_PSQT_V1=1` before process startup to use one
+/// jointly fitted but still allocation-free tapered correction model.
 #[must_use]
 pub fn evaluate(position: &Position) -> i32 {
+    let enabled = EXPERIMENTAL_JOINT_TAPERED_PSQT_V1.get_or_init(|| {
+        std::env::var("CHESS_EXPERIMENTAL_JOINT_TAPERED_PSQT_V1")
+            .is_ok_and(|value| value == "1")
+    });
+    if *enabled {
+        evaluate_joint_tapered_psqt_v1(position)
+    } else {
+        evaluate_classical(position)
+    }
+}
+
+/// Exact accepted E1+E4 evaluator retained as the immutable experiment control.
+#[must_use]
+pub fn evaluate_classical(position: &Position) -> i32 {
     let mut middle_game = 0_i32;
     let mut end_game = 0_i32;
     let mut phase = 0_i32;
@@ -73,6 +92,54 @@ pub fn evaluate(position: &Position) -> i32 {
         Color::White => white_minus_black,
         Color::Black => -white_minus_black,
     }
+}
+
+fn evaluate_joint_tapered_psqt_v1(position: &Position) -> i32 {
+    let mut middle_game = 0_i32;
+    let mut end_game = 0_i32;
+    let mut phase = 0_i32;
+
+    for color in Color::ALL {
+        let sign = if color == Color::White { 1 } else { -1 };
+        let (structure_middle_game, structure_end_game) = piece_structure(position, color);
+        let (correction_middle_game, correction_end_game) =
+            joint_tapered_psqt_v1::structure_correction(position, color);
+        middle_game += sign * (structure_middle_game + correction_middle_game);
+        end_game += sign * (structure_end_game + correction_end_game);
+
+        for kind in PieceKind::ALL {
+            let mut pieces = position.pieces(color, kind);
+            let count = pieces.count() as i32;
+            let material = count * PIECE_VALUES[kind.index()];
+            middle_game += sign * material;
+            end_game += sign * material;
+            phase += count * PHASE_WEIGHTS[kind.index()];
+
+            while let Some(square) = pieces.pop_lsb() {
+                let relative_index = relative_square_index(color, square.file(), square.rank());
+                let (correction_middle_game, correction_end_game) =
+                    joint_tapered_psqt_v1::piece_square_correction(
+                        kind,
+                        color,
+                        square.file(),
+                        square.rank(),
+                    );
+                middle_game += sign
+                    * (i32::from(MG_PSQT[kind.index()][relative_index])
+                        + correction_middle_game);
+                end_game += sign
+                    * (i32::from(EG_PSQT[kind.index()][relative_index]) + correction_end_game);
+            }
+        }
+    }
+
+    let phase = phase.min(MAX_PHASE);
+    let white_minus_black = (middle_game * phase + end_game * (MAX_PHASE - phase)) / MAX_PHASE;
+    let oriented = match position.side_to_move() {
+        Color::White => white_minus_black,
+        Color::Black => -white_minus_black,
+    };
+    oriented.saturating_add(joint_tapered_psqt_v1::TEMPO_CORRECTION)
 }
 
 fn piece_structure(position: &Position, color: Color) -> (i32, i32) {
@@ -137,8 +204,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
     let file_centrality = 7 - file_distance;
 
     match piece {
-        // Pawns gain more from safe advancement in the endgame. A tiny central-file bonus nudges
-        // healthy central occupation without attempting to model pawn structure yet.
         0 => {
             let advance = if end_game {
                 match rank {
@@ -163,7 +228,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
             };
             advance + file_centrality / 2
         }
-        // Knights are the strongest centralisation signal in v1.
         1 => {
             if end_game {
                 centre * 3 - 18
@@ -171,7 +235,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
                 centre * 4 - 24
             }
         }
-        // Bishops prefer activity but are less sensitive to central squares than knights.
         2 => {
             if end_game {
                 centre * 2 - 6
@@ -179,8 +242,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
                 centre * 2 - 8
             }
         }
-        // Rooks get a modest seventh-rank/activity signal. File structure is deliberately deferred
-        // to a separate experiment so E1 remains a pure placement baseline.
         3 => {
             let seventh = if rank == 6 { 14 } else { 0 };
             if end_game {
@@ -189,8 +250,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
                 seventh + rank
             }
         }
-        // Queen placement is intentionally weakly weighted to avoid paying for brittle opening
-        // assumptions before development/king-safety terms exist.
         4 => {
             if end_game {
                 centre * 2 - 8
@@ -198,8 +257,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
                 centre - 8
             }
         }
-        // Middle-game kings prefer the home rank and castled files. End-game kings reverse that
-        // preference and are rewarded for centralisation.
         5 => {
             if end_game {
                 centre * 4 - 24
@@ -225,11 +282,12 @@ const fn abs_i32(value: i32) -> i32 {
 mod tests {
     use chess_core::{Color, Position};
 
-    use super::{evaluate, piece_structure};
+    use super::{evaluate, evaluate_classical, piece_structure};
 
     #[test]
     fn starting_position_is_positionally_equal() {
         assert_eq!(evaluate(&Position::startpos()), 0);
+        assert_eq!(evaluate_classical(&Position::startpos()), 0);
     }
 
     #[test]
