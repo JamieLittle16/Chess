@@ -1,0 +1,148 @@
+name: V13 diverse residual v2
+
+on:
+  push:
+    branches:
+      - analysis/v13-diverse-residual-v2
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  train-diverse-residual:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install analysis dependencies
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy scipy scikit-learn
+      - name: Download immutable accepted Rust games
+        uses: actions/download-artifact@v4
+        with:
+          name: m4-static-legality-v1-acceptance-1f44bb9d867c5c8166e1590324c41b66a44ea924
+          path: .qualification/frozen-games
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34136520700
+      - name: Verify Rust games
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '429c8c40f79782de1355ffa14c3c6a07d440b348fb4e0937af76150781e3df8e  .qualification/frozen-games/games.pgn' | sha256sum --check --strict
+      - name: Download current Stockfish UHO Lichess book
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 --output .qualification/uho.zip \
+            https://github.com/official-stockfish/books/raw/master/UHO_Lichess_4852_v1.epd.zip
+          sha256sum .qualification/uho.zip | tee .qualification/uho.sha256
+          unzip -l .qualification/uho.zip | tail -20
+      - name: Deterministically sample 20000 independent UHO roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import random, zipfile
+          from pathlib import Path
+          src=Path('.qualification/uho.zip')
+          out=Path('.qualification/uho-sample-20000.epd')
+          rng=random.Random(20260907)
+          k=20000
+          sample=[]
+          seen=0
+          with zipfile.ZipFile(src) as z:
+              names=[n for n in z.namelist() if n.lower().endswith('.epd')]
+              if len(names)!=1:
+                  raise SystemExit(f'expected one EPD in archive, got {names!r}')
+              with z.open(names[0]) as f:
+                  for raw in f:
+                      line=raw.decode('utf-8','strict').strip()
+                      if not line or line.startswith('#'):
+                          continue
+                      seen += 1
+                      if len(sample) < k:
+                          sample.append(line)
+                      else:
+                          j=rng.randrange(seen)
+                          if j < k:
+                              sample[j]=line
+          if len(sample) != k:
+              raise SystemExit(f'only sampled {len(sample)} from {seen}')
+          out.write_text('\n'.join(sample)+'\n', encoding='utf-8')
+          print({'source_positions':seen,'sample':len(sample)})
+          PY
+          sha256sum .qualification/uho-sample-20000.epd
+      - name: Fetch pinned Stockfish 19
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/stockfish
+          curl --fail --location --retry 3 --output .qualification/stockfish.tar.gz \
+            https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  .qualification/stockfish.tar.gz' | sha256sum --check --strict
+          tar -xzf .qualification/stockfish.tar.gz -C .qualification/stockfish
+          STOCKFISH_BIN=$(find "$PWD/.qualification/stockfish" -type f -name 'stockfish*' -perm -111 -print -quit)
+          test -n "$STOCKFISH_BIN"
+          echo "STOCKFISH_BIN=$STOCKFISH_BIN" >> "$GITHUB_ENV"
+      - name: Label independent UHO sample
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/generate_nnue_teacher_data.py \
+            --stockfish "$STOCKFISH_BIN" --epd .qualification/uho-sample-20000.epd \
+            --nodes 8000 --threads 1 --hash-mb 64 --stride 1 \
+            --min-ply 0 --max-ply 10000 --max-positions 20000 \
+            --validation-permille 100 --holdout-permille 100 \
+            --split-salt 'Chess/v13-diverse-residual-v2' --output-dir teacher-uho
+      - name: Label sparse reached-game positions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/generate_nnue_teacher_data.py \
+            --stockfish "$STOCKFISH_BIN" --pgn .qualification/frozen-games/games.pgn \
+            --nodes 8000 --threads 1 --hash-mb 64 --stride 3 \
+            --min-ply 8 --max-ply 180 --max-positions 7000 \
+            --validation-permille 100 --holdout-permille 100 \
+            --split-salt 'Chess/v13-diverse-residual-v2' --output-dir teacher-games
+      - name: Combine teacher corpus and verify split isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir teacher-combined
+          cat teacher-uho/teacher.jsonl teacher-games/teacher.jsonl > teacher-combined/teacher.jsonl
+          python - <<'PY'
+          import json, hashlib
+          from collections import defaultdict, Counter
+          from pathlib import Path
+          p=Path('teacher-combined/teacher.jsonl')
+          rec=[json.loads(x) for x in p.read_text().splitlines() if x.strip()]
+          gs=defaultdict(set); sc=Counter()
+          for r in rec:
+              gs[r['group']].add(r['split']); sc[r['split']]+=1
+          bad={g:s for g,s in gs.items() if len(s)>1}
+          if bad: raise SystemExit(f'split leakage: {len(bad)} groups')
+          print({'records':len(rec),'groups':len(gs),'splits':dict(sc),'sha256':hashlib.sha256(p.read_bytes()).hexdigest()})
+          PY
+      - name: Train quantized residual grid
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/train_v13_linear_residual.py \
+            --teacher teacher-combined/teacher.jsonl --output-dir residual \
+            --alphas 30,100,300,1000,3000 \
+            --clamps 100,150,200,250,300,400,600,0
+          cp teacher-uho/manifest.json residual/uho-manifest.json
+          cp teacher-games/manifest.json residual/games-manifest.json
+          cp .qualification/uho.sha256 residual/uho-archive.sha256
+          sha256sum residual/weights.i16 residual/model.json residual/report.json > residual/SHA256SUMS
+          cat residual/model.json
+      - name: Upload diverse residual
+        uses: actions/upload-artifact@v4
+        with:
+          name: v13-diverse-residual-v2-${{ github.sha }}
+          path: residual/
+          retention-days: 30
