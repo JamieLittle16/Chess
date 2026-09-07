@@ -1,0 +1,153 @@
+name: V13 large width-32 NNUE teacher
+
+on:
+  push:
+    branches:
+      - analysis/v13-nnue-large-teacher
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  train-large-32:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Install analysis dependency
+        run: python -m pip install --disable-pip-version-check -r tools/requirements-analysis.txt
+      - name: Download immutable accepted 200-game source
+        uses: actions/download-artifact@v4
+        with:
+          name: m4-static-legality-v1-acceptance-1f44bb9d867c5c8166e1590324c41b66a44ea924
+          path: .qualification/frozen-games
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34136520700
+      - name: Verify frozen game source
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '429c8c40f79782de1355ffa14c3c6a07d440b348fb4e0937af76150781e3df8e  .qualification/frozen-games/games.pgn' | sha256sum --check --strict
+      - name: Fetch pinned Stockfish 19
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/stockfish
+          curl --fail --location --retry 3 \
+            --output .qualification/stockfish.tar.gz \
+            https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  .qualification/stockfish.tar.gz' | sha256sum --check --strict
+          tar -xzf .qualification/stockfish.tar.gz -C .qualification/stockfish
+          STOCKFISH_BIN=$(find "$PWD/.qualification/stockfish" -type f -name 'stockfish*' -perm -111 -print -quit)
+          test -n "$STOCKFISH_BIN"
+          echo "STOCKFISH_BIN=$STOCKFISH_BIN" >> "$GITHUB_ENV"
+      - name: Label dense reached positions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/generate_nnue_teacher_data.py \
+            --stockfish "$STOCKFISH_BIN" \
+            --pgn .qualification/frozen-games/games.pgn \
+            --nodes 8000 \
+            --threads 1 \
+            --hash-mb 64 \
+            --stride 1 \
+            --min-ply 8 \
+            --max-ply 180 \
+            --max-positions 22000 \
+            --validation-permille 100 \
+            --holdout-permille 100 \
+            --split-salt 'Chess/v13-large-width32-v1' \
+            --output-dir teacher-games
+      - name: Label all frozen UHO roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/generate_nnue_teacher_data.py \
+            --stockfish "$STOCKFISH_BIN" \
+            --epd match/openings/m3-uho-lichess-100-v1.epd \
+            --nodes 25000 \
+            --threads 1 \
+            --hash-mb 64 \
+            --stride 1 \
+            --min-ply 0 \
+            --max-ply 0 \
+            --max-positions 100 \
+            --validation-permille 100 \
+            --holdout-permille 100 \
+            --split-salt 'Chess/v13-large-width32-v1' \
+            --output-dir teacher-roots
+      - name: Combine teacher corpus
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir teacher-combined
+          cat teacher-games/teacher.jsonl teacher-roots/teacher.jsonl > teacher-combined/teacher.jsonl
+          cp teacher-games/manifest.json teacher-combined/games-manifest.json
+          cp teacher-roots/manifest.json teacher-combined/roots-manifest.json
+          python - <<'PY'
+          import hashlib, json
+          from collections import Counter, defaultdict
+          from pathlib import Path
+          p = Path('teacher-combined/teacher.jsonl')
+          records = [json.loads(line) for line in p.open(encoding='utf-8') if line.strip()]
+          group_splits = defaultdict(set)
+          split_counts = Counter()
+          for r in records:
+              group_splits[r['group']].add(r['split'])
+              split_counts[r['split']] += 1
+          leaked = {g: sorted(v) for g, v in group_splits.items() if len(v) != 1}
+          if leaked:
+              raise SystemExit(f'root split leakage: {leaked}')
+          manifest = {
+              'schema_version': 1,
+              'corpus_id': 'v13-large-width32-v1',
+              'records': len(records),
+              'groups': len(group_splits),
+              'split_counts': dict(split_counts),
+              'sha256': hashlib.sha256(p.read_bytes()).hexdigest(),
+              'source_artifact_id': 10024462155,
+              'stockfish': '19',
+              'nodes_reached': 8000,
+              'nodes_roots': 25000,
+          }
+          Path('teacher-combined/corpus-manifest.json').write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n')
+          print(json.dumps(manifest, indent=2, sort_keys=True))
+          PY
+      - name: Train width 32
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/train_nnue_reference.py \
+            --teacher teacher-combined/teacher.jsonl \
+            --teacher-id 'v13-large-width32-v1' \
+            --output-dir nnue-32 \
+            --hidden 32 \
+            --epochs 8 \
+            --learning-rate 0.00012 \
+            --seed 20260907 \
+            --target-clip-cp 1800
+          cat nnue-32/training-metadata.json
+          cat nnue-32/export-manifest.json
+      - name: Measure exact network cost
+        shell: bash
+        run: |
+          set -euo pipefail
+          NETWORK=nnue-32/nnue-32-v1.nnue
+          cargo run --release --quiet -p chess-eval --example nnue_smoke -- "$NETWORK" > nnue-32/smoke.txt
+          cargo run --release --quiet -p chess-eval --example nnue_cost -- "$NETWORK" 160 | tee nnue-32/cost.json
+          cp teacher-combined/corpus-manifest.json nnue-32/corpus-manifest.json
+      - name: Upload trained V13 probe
+        uses: actions/upload-artifact@v4
+        with:
+          name: v13-large-width32-${{ github.sha }}
+          path: nnue-32/
+          retention-days: 30
