@@ -1,6 +1,6 @@
 use chess_core::{
-    Bitboard, Color, PieceKind, Position, bishop_attacks, king_attacks, knight_attacks,
-    pawn_attacks, queen_attacks, rook_attacks,
+    Bitboard, Color, PieceKind, Position, Square, bishop_attacks, king_attacks, knight_attacks,
+    queen_attacks, rook_attacks,
 };
 
 use super::{MAX_PHASE, PHASE_WEIGHTS};
@@ -24,7 +24,10 @@ const PAWN_THREATS: usize = 18;
 const CENTRAL_PAWN_CONTROL: usize = 19;
 const CENTRAL_OCCUPANCY: usize = 20;
 
+const FILE_A: u64 = 0x0101_0101_0101_0101;
+const FILE_H: u64 = 0x8080_8080_8080_8080;
 const CENTRAL_16: u64 = 0x0000_3c3c_3c3c_0000;
+const PASSED_PAWN_MASKS: [[u64; 64]; 2] = generate_passed_pawn_masks();
 
 /// Two frozen fits over the same small structural feature set.
 ///
@@ -84,6 +87,7 @@ impl JointClassicalVariant {
 struct SideFeatures {
     values: [i32; FEATURE_COUNT],
     attacks: Bitboard,
+    king_ring: Bitboard,
 }
 
 /// Return the frozen v2 correction from the side-to-move perspective.
@@ -93,10 +97,6 @@ struct SideFeatures {
 /// move generation; no legal-move list is constructed.
 pub(crate) fn residual(position: &Position, variant: JointClassicalVariant) -> i32 {
     let occupied = position.occupied();
-    let own_occupied = [
-        occupied_by(position, Color::White),
-        occupied_by(position, Color::Black),
-    ];
     let pawn_attack_maps = [
         pawn_attack_union(position, Color::White),
         pawn_attack_union(position, Color::Black),
@@ -106,7 +106,7 @@ pub(crate) fn residual(position: &Position, variant: JointClassicalVariant) -> i
         position,
         Color::White,
         occupied,
-        own_occupied[Color::White.index()],
+        position.occupancy(Color::White),
         pawn_attack_maps[Color::White.index()],
         pawn_attack_maps[Color::Black.index()],
     );
@@ -114,13 +114,13 @@ pub(crate) fn residual(position: &Position, variant: JointClassicalVariant) -> i
         position,
         Color::Black,
         occupied,
-        own_occupied[Color::Black.index()],
+        position.occupancy(Color::Black),
         pawn_attack_maps[Color::Black.index()],
         pawn_attack_maps[Color::White.index()],
     );
 
-    white.values[KING_RING_PRESSURE] = king_ring_pressure(position, Color::White, black.attacks);
-    black.values[KING_RING_PRESSURE] = king_ring_pressure(position, Color::Black, white.attacks);
+    white.values[KING_RING_PRESSURE] = (white.king_ring & black.attacks).count() as i32;
+    black.values[KING_RING_PRESSURE] = (black.king_ring & white.attacks).count() as i32;
 
     let mg_weights = variant.middle_game_weights();
     let eg_weights = variant.end_game_weights();
@@ -175,7 +175,7 @@ fn analyze_side(
         if own_pawn_attacks.contains(square) {
             result.values[SUPPORTED_PAWNS] += 1;
         }
-        if is_passed_pawn(square.file(), square.rank(), color, enemy_pawns) {
+        if is_passed_pawn(square, color, enemy_pawns) {
             let relative_rank = relative_rank(color, square.rank());
             if (2..=6).contains(&relative_rank) {
                 result.values[PASSED_RANK_2 + usize::from(relative_rank - 2)] += 1;
@@ -183,56 +183,51 @@ fn analyze_side(
         }
     }
 
-    let enemy_pawn_raw = enemy_pawn_attacks.raw();
-    for (kind, feature) in [
-        (PieceKind::Knight, SAFE_MOBILITY_KNIGHT),
-        (PieceKind::Bishop, SAFE_MOBILITY_BISHOP),
-        (PieceKind::Rook, SAFE_MOBILITY_ROOK),
-        (PieceKind::Queen, SAFE_MOBILITY_QUEEN),
-    ] {
-        for square in position.pieces(color, kind) {
-            let attacks = match kind {
-                PieceKind::Knight => knight_attacks(square),
-                PieceKind::Bishop => bishop_attacks(square, occupied),
-                PieceKind::Rook => rook_attacks(square, occupied),
-                PieceKind::Queen => queen_attacks(square, occupied),
-                PieceKind::Pawn | PieceKind::King => Bitboard::EMPTY,
-            };
-            result.attacks = result.attacks | attacks;
-            let safe = attacks.raw() & !own_occupied.raw() & !enemy_pawn_raw;
-            result.values[feature] += safe.count_ones() as i32;
+    let safe_target_mask = !own_occupied.raw() & !enemy_pawn_attacks.raw();
+
+    for square in position.pieces(color, PieceKind::Knight) {
+        let attacks = knight_attacks(square);
+        result.attacks = result.attacks | attacks;
+        result.values[SAFE_MOBILITY_KNIGHT] +=
+            (attacks.raw() & safe_target_mask).count_ones() as i32;
+        if is_minor_outpost(square, color, own_pawn_attacks, enemy_pawn_attacks) {
+            result.values[MINOR_OUTPOSTS] += 1;
         }
     }
 
-    // Add leaper/pawn/king attacks to the union used only for king-ring pressure. Slider attacks
-    // were already accumulated while computing mobility, so no duplicate slider work is paid.
-    result.attacks = result.attacks | own_pawn_attacks;
-    for square in position.pieces(color, PieceKind::Knight) {
-        result.attacks = result.attacks | knight_attacks(square);
-    }
-    if let Some(king) = position.king_square(color) {
-        result.attacks = result.attacks | king_attacks(king);
+    for square in position.pieces(color, PieceKind::Bishop) {
+        let attacks = bishop_attacks(square, occupied);
+        result.attacks = result.attacks | attacks;
+        result.values[SAFE_MOBILITY_BISHOP] +=
+            (attacks.raw() & safe_target_mask).count_ones() as i32;
+        if is_minor_outpost(square, color, own_pawn_attacks, enemy_pawn_attacks) {
+            result.values[MINOR_OUTPOSTS] += 1;
+        }
     }
 
     for square in position.pieces(color, PieceKind::Rook) {
+        let attacks = rook_attacks(square, occupied);
+        result.attacks = result.attacks | attacks;
+        result.values[SAFE_MOBILITY_ROOK] +=
+            (attacks.raw() & safe_target_mask).count_ones() as i32;
         if relative_rank(color, square.rank()) == 6 {
             result.values[ROOK_SEVENTH] += 1;
         }
     }
 
-    for kind in [PieceKind::Knight, PieceKind::Bishop] {
-        for square in position.pieces(color, kind) {
-            let rank = relative_rank(color, square.rank());
-            if (3..=5).contains(&rank)
-                && own_pawn_attacks.contains(square)
-                && !enemy_pawn_attacks.contains(square)
-            {
-                result.values[MINOR_OUTPOSTS] += 1;
-            }
-        }
+    for square in position.pieces(color, PieceKind::Queen) {
+        let attacks = queen_attacks(square, occupied);
+        result.attacks = result.attacks | attacks;
+        result.values[SAFE_MOBILITY_QUEEN] +=
+            (attacks.raw() & safe_target_mask).count_ones() as i32;
     }
 
+    result.attacks = result.attacks | own_pawn_attacks;
     if let Some(king) = position.king_square(color) {
+        let king_attacks = king_attacks(king);
+        result.attacks = result.attacks | king_attacks;
+        result.king_ring = king_attacks.with(king);
+
         let king_file = i32::from(king.file());
         let king_rank = i32::from(king.rank());
         let forward = if color == Color::White { 1 } else { -1 };
@@ -257,16 +252,14 @@ fn analyze_side(
         }
     }
 
-    let enemy_non_pawns = [
-        (PieceKind::Knight, 3_i32),
-        (PieceKind::Bishop, 3),
-        (PieceKind::Rook, 5),
-        (PieceKind::Queen, 9),
-    ];
-    for (kind, weight) in enemy_non_pawns {
-        result.values[PAWN_THREATS] +=
-            (own_pawn_attacks & position.pieces(color.opposite(), kind)).count() as i32 * weight;
-    }
+    result.values[PAWN_THREATS] =
+        (own_pawn_attacks & position.pieces(color.opposite(), PieceKind::Knight)).count() as i32 * 3
+            + (own_pawn_attacks & position.pieces(color.opposite(), PieceKind::Bishop)).count() as i32
+                * 3
+            + (own_pawn_attacks & position.pieces(color.opposite(), PieceKind::Rook)).count() as i32
+                * 5
+            + (own_pawn_attacks & position.pieces(color.opposite(), PieceKind::Queen)).count() as i32
+                * 9;
 
     result.values[CENTRAL_PAWN_CONTROL] = (own_pawn_attacks.raw() & CENTRAL_16).count_ones() as i32;
     result.values[CENTRAL_OCCUPANCY] = (own_occupied.raw() & CENTRAL_16).count_ones() as i32;
@@ -275,38 +268,62 @@ fn analyze_side(
 }
 
 #[inline]
-fn occupied_by(position: &Position, color: Color) -> Bitboard {
-    let mut occupied = Bitboard::EMPTY;
-    for kind in PieceKind::ALL {
-        occupied = occupied | position.pieces(color, kind);
-    }
-    occupied
+fn is_minor_outpost(
+    square: Square,
+    color: Color,
+    own_pawn_attacks: Bitboard,
+    enemy_pawn_attacks: Bitboard,
+) -> bool {
+    let rank = relative_rank(color, square.rank());
+    (3..=5).contains(&rank)
+        && own_pawn_attacks.contains(square)
+        && !enemy_pawn_attacks.contains(square)
 }
 
 #[inline]
 fn pawn_attack_union(position: &Position, color: Color) -> Bitboard {
-    let mut attacks = Bitboard::EMPTY;
-    for square in position.pieces(color, PieceKind::Pawn) {
-        attacks = attacks | pawn_attacks(color, square);
-    }
-    attacks
+    let pawns = position.pieces(color, PieceKind::Pawn).raw();
+    let attacks = match color {
+        Color::White => ((pawns & !FILE_A) << 7) | ((pawns & !FILE_H) << 9),
+        Color::Black => ((pawns & !FILE_H) >> 7) | ((pawns & !FILE_A) >> 9),
+    };
+    Bitboard::from_raw(attacks)
 }
 
-fn is_passed_pawn(file: u8, rank: u8, color: Color, enemy_pawns: Bitboard) -> bool {
-    for enemy in enemy_pawns {
-        let enemy_file = enemy.file();
-        if enemy_file.abs_diff(file) > 1 {
-            continue;
+#[inline]
+fn is_passed_pawn(square: Square, color: Color, enemy_pawns: Bitboard) -> bool {
+    enemy_pawns.raw()
+        & PASSED_PAWN_MASKS[color.index()][usize::from(square.index())]
+        == 0
+}
+
+const fn generate_passed_pawn_masks() -> [[u64; 64]; 2] {
+    let mut masks = [[0_u64; 64]; 2];
+    let mut square = 0_usize;
+    while square < 64 {
+        let file = (square & 7) as i32;
+        let rank = (square >> 3) as i32;
+        let mut target_file = file - 1;
+        while target_file <= file + 1 {
+            if target_file >= 0 && target_file < 8 {
+                let mut white_rank = rank + 1;
+                while white_rank < 8 {
+                    masks[Color::White as usize][square] |=
+                        1_u64 << ((white_rank * 8 + target_file) as u32);
+                    white_rank += 1;
+                }
+                let mut black_rank = rank - 1;
+                while black_rank >= 0 {
+                    masks[Color::Black as usize][square] |=
+                        1_u64 << ((black_rank * 8 + target_file) as u32);
+                    black_rank -= 1;
+                }
+            }
+            target_file += 1;
         }
-        let ahead = match color {
-            Color::White => enemy.rank() > rank,
-            Color::Black => enemy.rank() < rank,
-        };
-        if ahead {
-            return false;
-        }
+        square += 1;
     }
-    true
+    masks
 }
 
 #[inline]
@@ -317,17 +334,15 @@ const fn relative_rank(color: Color, rank: u8) -> u8 {
     }
 }
 
-fn king_ring_pressure(position: &Position, color: Color, enemy_attacks: Bitboard) -> i32 {
-    position.king_square(color).map_or(0, |king| {
-        let ring = king_attacks(king).with(king);
-        (ring & enemy_attacks).count() as i32
-    })
-}
-
 fn phase(position: &Position) -> i32 {
     let mut phase = 0_i32;
     for color in Color::ALL {
-        for kind in PieceKind::ALL {
+        for kind in [
+            PieceKind::Knight,
+            PieceKind::Bishop,
+            PieceKind::Rook,
+            PieceKind::Queen,
+        ] {
             phase += position.pieces(color, kind).count() as i32 * PHASE_WEIGHTS[kind.index()];
         }
     }
@@ -336,9 +351,9 @@ fn phase(position: &Position) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use chess_core::Position;
+    use chess_core::{Bitboard, Color, PieceKind, Position, pawn_attacks};
 
-    use super::{JointClassicalVariant, residual};
+    use super::{JointClassicalVariant, pawn_attack_union, residual};
 
     #[test]
     fn start_position_only_receives_the_fitted_tempo() {
@@ -355,6 +370,24 @@ mod tests {
             residual(&healthy, JointClassicalVariant::WdlResidual),
             residual(&doubled, JointClassicalVariant::WdlResidual)
         );
+    }
+
+    #[test]
+    fn pawn_attack_union_matches_square_table_oracle() {
+        for fen in [
+            "4k3/8/8/3p4/4P3/8/8/4K3 w - - 0 1",
+            "4k3/7p/8/8/8/8/P7/4K3 w - - 0 1",
+            "4k3/pppppppp/8/8/8/8/PPPPPPPP/4K3 w - - 0 1",
+        ] {
+            let position = Position::from_fen(fen).expect("valid FEN");
+            for color in Color::ALL {
+                let mut oracle = Bitboard::EMPTY;
+                for square in position.pieces(color, PieceKind::Pawn) {
+                    oracle = oracle | pawn_attacks(color, square);
+                }
+                assert_eq!(pawn_attack_union(&position, color), oracle);
+            }
+        }
     }
 
     #[test]
