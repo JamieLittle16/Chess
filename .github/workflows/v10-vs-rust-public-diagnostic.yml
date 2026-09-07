@@ -1,0 +1,157 @@
+name: V10 vs Rust public diagnostic
+
+on:
+  push:
+    branches:
+      - analysis/v10-vs-rust-public-20260907
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostic:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: fast-a
+            start: 0
+            count: 6
+            base_ms: 2500
+            inc_ms: 50
+            nodes: 10000
+          - name: fast-b
+            start: 6
+            count: 6
+            base_ms: 2500
+            inc_ms: 50
+            nodes: 10000
+          - name: fast-c
+            start: 12
+            count: 6
+            base_ms: 2500
+            inc_ms: 50
+            nodes: 10000
+          - name: fast-d
+            start: 18
+            count: 6
+            base_ms: 2500
+            inc_ms: 50
+            nodes: 10000
+          - name: slow-a
+            start: 24
+            count: 3
+            base_ms: 8000
+            inc_ms: 100
+            nodes: 25000
+          - name: slow-b
+            start: 27
+            count: 3
+            base_ms: 8000
+            inc_ms: 100
+            nodes: 25000
+
+    steps:
+      - name: Checkout pinned diagnostic branch
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.98.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python runtime and Stockfish
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install chess==1.11.2 numpy==2.5.2 numba==0.67.0
+          sudo apt-get update -qq
+          sudo apt-get install -y stockfish
+
+      - name: Reconstruct and verify uploaded V10
+        run: |
+          cat .analysis/v10_payload_*.b64 | base64 -d > /tmp/v10.zip
+          echo '408518b038e63940beb4d3e1c3a7d58062dd36b3bdba675ffef7c3752fb8f772  /tmp/v10.zip' | sha256sum -c -
+          rm -rf /tmp/v10
+          mkdir -p /tmp/v10
+          unzip -q /tmp/v10.zip -d /tmp/v10
+          test -f /tmp/v10/agent.py
+          test -f /tmp/v10/experiments/numba_core.py
+          test -f /tmp/v10/experiments/numba_search.py
+
+      - name: Build pinned Rust UCI engine
+        run: cargo build --release -p chess-uci
+
+      - name: Smoke-test engines
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUST_ENGINE=target/release/chess-uci
+          test -x "$RUST_ENGINE"
+          printf 'uci\nisready\nquit\n' | "$RUST_ENGINE" | tee /tmp/rust-uci.txt
+          grep -q 'uciok' /tmp/rust-uci.txt
+          grep -q 'readyok' /tmp/rust-uci.txt
+          STOCKFISH="$(command -v stockfish || true)"
+          if [ -z "$STOCKFISH" ] && [ -x /usr/games/stockfish ]; then STOCKFISH=/usr/games/stockfish; fi
+          test -x "$STOCKFISH"
+          python tools/v9_agent_runner.py /tmp/v10 <<'EOF' >/tmp/v10-smoke.json
+          {"fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1","time_left_ms":2000}
+          EOF
+          grep -q '"ready": true' /tmp/v10-smoke.json
+          grep -q '"move":' /tmp/v10-smoke.json
+
+      - name: Run paired games and Stockfish diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          STOCKFISH="$(command -v stockfish || true)"
+          if [ -z "$STOCKFISH" ]; then STOCKFISH=/usr/games/stockfish; fi
+          OUT="analysis-results/${{ matrix.name }}"
+          mkdir -p "$OUT"
+          python tools/v9_rust_diagnostic.py \
+            --agent /tmp/v10 \
+            --runner tools/v9_agent_runner.py \
+            --engine target/release/chess-uci \
+            --stockfish "$STOCKFISH" \
+            --openings match/openings/m3-uho-lichess-100-v1.epd \
+            --opening-start ${{ matrix.start }} \
+            --opening-count ${{ matrix.count }} \
+            --base-ms ${{ matrix.base_ms }} \
+            --increment-ms ${{ matrix.inc_ms }} \
+            --analysis-nodes ${{ matrix.nodes }} \
+            --out-dir "$OUT" | tee "$OUT/run.log"
+
+          {
+            echo "rust_sha=44c1e16d3713cdca1ff1bd71f7596ef3b5804037"
+            echo "workflow_sha=$GITHUB_SHA"
+            echo "candidate=Little-Gambit-V10-FINAL(1).zip"
+            echo "v10_zip_sha256=408518b038e63940beb4d3e1c3a7d58062dd36b3bdba675ffef7c3752fb8f772"
+            echo "shard=${{ matrix.name }}"
+            echo "opening_start=${{ matrix.start }}"
+            echo "opening_count=${{ matrix.count }}"
+            echo "base_ms=${{ matrix.base_ms }}"
+            echo "increment_ms=${{ matrix.inc_ms }}"
+            echo "analysis_nodes=${{ matrix.nodes }}"
+            python --version
+            rustc --version
+            "$STOCKFISH" <<<'quit' | head -n 1 || true
+            python -m pip show chess numpy numba | grep -E '^(Name|Version):'
+          } > "$OUT/provenance.txt"
+
+      - name: Upload diagnostic shard
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v10-vs-rust-${{ matrix.name }}
+          path: analysis-results/${{ matrix.name }}
+          if-no-files-found: error
+          retention-days: 7
