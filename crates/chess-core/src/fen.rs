@@ -1,6 +1,6 @@
-use core::fmt;
+use core::fmt::{self, Write as _};
 
-use crate::{CastlingRights, Color, Piece, Position, Square};
+use crate::{CastlingRights, Color, Piece, PieceKind, Position, Square};
 
 pub const STARTPOS_FEN: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
@@ -39,6 +39,93 @@ impl fmt::Display for FenError {
 }
 
 impl std::error::Error for FenError {}
+
+impl Position {
+    /// Serialize the complete position as canonical six-field FEN.
+    ///
+    /// This is intentionally the inverse of [`Position::from_fen`]: all rule-relevant state and
+    /// both clocks are preserved, while board runs and castling symbols use canonical ordering.
+    /// Search hot paths should not call this; it exists for protocol boundaries, diagnostics and
+    /// offline corpus generation.
+    #[must_use]
+    pub fn to_fen(&self) -> String {
+        let mut output = String::with_capacity(96);
+
+        for rank in (0_u8..8).rev() {
+            if rank != 7 {
+                output.push('/');
+            }
+            let mut empty = 0_u8;
+            for file in 0_u8..8 {
+                let square = Square::from_file_rank(file, rank).expect("board coordinates are valid");
+                if let Some(piece) = self.piece_at(square) {
+                    if empty != 0 {
+                        output.push(char::from(b'0' + empty));
+                        empty = 0;
+                    }
+                    output.push(piece_fen_char(piece));
+                } else {
+                    empty += 1;
+                }
+            }
+            if empty != 0 {
+                output.push(char::from(b'0' + empty));
+            }
+        }
+
+        output.push(' ');
+        output.push(match self.side_to_move() {
+            Color::White => 'w',
+            Color::Black => 'b',
+        });
+        output.push(' ');
+
+        let rights = self.castling_rights();
+        if rights == CastlingRights::NONE {
+            output.push('-');
+        } else {
+            for (flag, symbol) in [
+                (CastlingRights::WHITE_KING, 'K'),
+                (CastlingRights::WHITE_QUEEN, 'Q'),
+                (CastlingRights::BLACK_KING, 'k'),
+                (CastlingRights::BLACK_QUEEN, 'q'),
+            ] {
+                if rights.contains(flag) {
+                    output.push(symbol);
+                }
+            }
+        }
+
+        output.push(' ');
+        match self.en_passant() {
+            Some(square) => write!(output, "{square}").expect("writing to String cannot fail"),
+            None => output.push('-'),
+        }
+        write!(
+            output,
+            " {} {}",
+            self.halfmove_clock(),
+            self.fullmove_number()
+        )
+        .expect("writing to String cannot fail");
+        output
+    }
+}
+
+fn piece_fen_char(piece: Piece) -> char {
+    let lower = match piece.kind() {
+        PieceKind::Pawn => 'p',
+        PieceKind::Knight => 'n',
+        PieceKind::Bishop => 'b',
+        PieceKind::Rook => 'r',
+        PieceKind::Queen => 'q',
+        PieceKind::King => 'k',
+    };
+    match piece.color() {
+        Color::White => lower.to_ascii_uppercase(),
+        Color::Black => lower,
+    }
+}
 
 pub(crate) fn parse(fen: &str) -> Result<Position, FenError> {
     let mut fields = fen.split_whitespace();
@@ -180,6 +267,7 @@ mod tests {
         assert_eq!(position.halfmove_clock(), 0);
         assert_eq!(position.fullmove_number(), 1);
         assert!(position.structural_invariants_hold());
+        assert_eq!(position.to_fen(), STARTPOS_FEN);
 
         let e1 = Square::from_file_rank(4, 0).expect("e1");
         assert_eq!(
@@ -208,5 +296,15 @@ mod tests {
         assert_eq!(position.fullmove_number(), 10);
         assert_eq!(position.halfmove_clock(), 4);
         assert!(position.structural_invariants_hold());
+        assert_eq!(position.to_fen(), fen);
+        assert_eq!(Position::from_fen(&position.to_fen()), Ok(position));
+    }
+
+    #[test]
+    fn serializer_preserves_en_passant_and_partial_castling_rights() {
+        let fen = "4k2r/8/8/3pP3/8/8/8/R3K3 w Qk d6 17 42";
+        let position = Position::from_fen(fen).expect("valid FEN");
+        assert_eq!(position.to_fen(), fen);
+        assert_eq!(Position::from_fen(&position.to_fen()), Ok(position));
     }
 }
