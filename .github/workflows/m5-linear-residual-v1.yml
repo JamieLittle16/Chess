@@ -1,0 +1,279 @@
+name: M5 Rust linear residual v1
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  train-and-screen:
+    if: github.head_ref == 'm5/linear-residual-v1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install pinned analysis dependencies
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy scipy scikit-learn
+
+      - name: Verify exact production baseline and build classical-eval oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          cargo run --quiet --release -p chess-bench | tee production-bench.txt
+          grep -Fx 'signature 0x4c3bbe8701fbbb68' production-bench.txt
+          cargo build --release -p chess-eval --example eval_fens
+          test -x target/release/examples/eval_fens
+          sha256sum target/release/examples/eval_fens | tee baseline-eval-oracle.sha256
+
+      - name: Download immutable accepted production games
+        uses: actions/download-artifact@v4
+        with:
+          name: m4-static-legality-v1-acceptance-1f44bb9d867c5c8166e1590324c41b66a44ea924
+          path: .qualification/frozen-games
+          repository: JamieLittle16/Chess
+          run-id: '34136520700'
+          github-token: ${{ github.token }}
+
+      - name: Verify accepted game source
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '429c8c40f79782de1355ffa14c3c6a07d440b348fb4e0937af76150781e3df8e  .qualification/frozen-games/games.pgn' | sha256sum --check --strict
+
+      - name: Fetch pinned Stockfish 19 and development books
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/stockfish .qualification/books
+          curl --fail --location --retry 3 --output .qualification/stockfish.tar.gz \
+            https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  .qualification/stockfish.tar.gz' | sha256sum --check --strict
+          tar -xzf .qualification/stockfish.tar.gz -C .qualification/stockfish
+          STOCKFISH_BIN=$(find "$PWD/.qualification/stockfish" -type f -name 'stockfish*' -perm -111 -print -quit)
+          test -n "$STOCKFISH_BIN"
+          echo "STOCKFISH_BIN=$STOCKFISH_BIN" >> "$GITHUB_ENV"
+          BASE=https://github.com/official-stockfish/books/raw/master
+          curl --fail --location --retry 3 -o .qualification/books/uho.zip "$BASE/UHO_Lichess_4852_v1.epd.zip"
+          curl --fail --location --retry 3 -o .qualification/books/popular.zip "$BASE/popularpos_lichess_v3.epd.zip"
+          curl --fail --location --retry 3 -o .qualification/books/endgames.zip "$BASE/endgames.epd.zip"
+          sha256sum .qualification/books/*.zip | tee .qualification/books/SHA256SUMS
+          "$STOCKFISH_BIN" bench 1 1 10 default depth >/dev/null
+
+      - name: Deterministically sample static and diversity roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import random, zipfile
+          from pathlib import Path
+
+          root = Path('.qualification/books')
+
+          def sample(name, count, seed, output):
+              rng = random.Random(seed)
+              chosen = []
+              seen = 0
+              with zipfile.ZipFile(root / f'{name}.zip') as archive:
+                  epds = [n for n in archive.namelist() if n.lower().endswith('.epd')]
+                  if len(epds) != 1:
+                      raise SystemExit(f'{name}: expected one EPD, got {epds!r}')
+                  with archive.open(epds[0]) as handle:
+                      for raw in handle:
+                          line = raw.decode('utf-8', 'strict').strip()
+                          if not line or line.startswith('#'):
+                              continue
+                          seen += 1
+                          if len(chosen) < count:
+                              chosen.append(line)
+                          else:
+                              slot = rng.randrange(seen)
+                              if slot < count:
+                                  chosen[slot] = line
+              if len(chosen) != count:
+                  raise SystemExit(f'{name}: requested {count}, found {seen}')
+              Path(output).write_text('\n'.join(chosen) + '\n')
+              print(name, output, {'source': seen, 'sample': len(chosen)})
+
+          sample('uho', 30000, 202609071, '.qualification/books/static-uho.epd')
+          sample('popular', 20000, 202609072, '.qualification/books/static-popular.epd')
+          sample('endgames', 10000, 202609073, '.qualification/books/static-endgames.epd')
+          sample('uho', 20000, 202609074, '.qualification/books/diverse-uho.epd')
+          PY
+          sha256sum .qualification/books/*.epd | tee .qualification/books/SAMPLE_SHA256SUMS
+
+      - name: Build 60k Stockfish-static teacher
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/generate_static_eval_teacher.py \
+            --stockfish "$STOCKFISH_BIN" \
+            --epd .qualification/books/static-uho.epd \
+            --epd .qualification/books/static-popular.epd \
+            --epd .qualification/books/static-endgames.epd \
+            --split-salt 'Chess/rust-linear-residual-static-v1' \
+            --validation-permille 100 --holdout-permille 100 \
+            --output teacher-static/teacher.jsonl
+
+      - name: Build dense reached-game teacher
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/generate_nnue_teacher_data.py \
+            --stockfish "$STOCKFISH_BIN" --pgn .qualification/frozen-games/games.pgn \
+            --nodes 8000 --threads 1 --hash-mb 64 --stride 1 \
+            --min-ply 8 --max-ply 180 --max-positions 22000 \
+            --validation-permille 100 --holdout-permille 100 \
+            --split-salt 'Chess/rust-linear-residual-reached-v1' --output-dir teacher-alpha-games
+          python scripts/generate_nnue_teacher_data.py \
+            --stockfish "$STOCKFISH_BIN" --epd match/openings/m3-uho-lichess-100-v1.epd \
+            --nodes 25000 --threads 1 --hash-mb 64 --stride 1 \
+            --min-ply 0 --max-ply 0 --max-positions 100 \
+            --validation-permille 100 --holdout-permille 100 \
+            --split-salt 'Chess/rust-linear-residual-reached-v1' --output-dir teacher-alpha-roots
+          mkdir teacher-alpha
+          cat teacher-alpha-games/teacher.jsonl teacher-alpha-roots/teacher.jsonl > teacher-alpha/teacher.jsonl
+
+      - name: Build diverse root-plus-game teacher
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/generate_nnue_teacher_data.py \
+            --stockfish "$STOCKFISH_BIN" --epd .qualification/books/diverse-uho.epd \
+            --nodes 8000 --threads 1 --hash-mb 64 --stride 1 \
+            --min-ply 0 --max-ply 10000 --max-positions 20000 \
+            --validation-permille 100 --holdout-permille 100 \
+            --split-salt 'Chess/rust-linear-residual-diverse-v1' --output-dir teacher-diverse-uho
+          python scripts/generate_nnue_teacher_data.py \
+            --stockfish "$STOCKFISH_BIN" --pgn .qualification/frozen-games/games.pgn \
+            --nodes 8000 --threads 1 --hash-mb 64 --stride 3 \
+            --min-ply 8 --max-ply 180 --max-positions 7000 \
+            --validation-permille 100 --holdout-permille 100 \
+            --split-salt 'Chess/rust-linear-residual-diverse-v1' --output-dir teacher-diverse-games
+          mkdir teacher-diverse
+          cat teacher-diverse-uho/teacher.jsonl teacher-diverse-games/teacher.jsonl > teacher-diverse/teacher.jsonl
+
+      - name: Fit exact-Rust residual components
+        shell: bash
+        run: |
+          set -euo pipefail
+          ORACLE="$PWD/target/release/examples/eval_fens"
+          python scripts/train_rust_linear_residual.py \
+            --teacher teacher-static/teacher.jsonl --baseline-engine "$ORACLE" \
+            --output-dir model-static --alphas 30,100,300,1000,3000,10000
+          python scripts/train_rust_linear_residual.py \
+            --teacher teacher-alpha/teacher.jsonl --baseline-engine "$ORACLE" \
+            --output-dir model-alpha300 --alphas 300
+          python scripts/train_rust_linear_residual.py \
+            --teacher teacher-diverse/teacher.jsonl --baseline-engine "$ORACLE" \
+            --output-dir model-diverse --alphas 30,100,300,1000,3000
+          mkdir -p .qualification/residual
+          cp model-static/report.json .qualification/residual/static-report.json
+          cp model-alpha300/report.json .qualification/residual/alpha300-report.json
+          cp model-diverse/report.json .qualification/residual/diverse-report.json
+          sha256sum model-*/weights.i16 model-*/model.json | tee .qualification/residual/component-SHA256SUMS
+
+      - name: Materialize 70/15/15 restrained residual candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/apply_rust_linear_residual_v1.py \
+            --static-model model-static --alpha300-model model-alpha300 --diverse-model model-diverse \
+            --repo . --provenance .qualification/residual/provenance.json
+          cargo fmt
+          git diff --check
+          git diff --binary > .qualification/residual/candidate.patch
+          sha256sum .qualification/residual/candidate.patch | tee .qualification/residual/candidate-patch.sha256
+
+      - name: Candidate correctness and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          cargo run --quiet --release -p chess-bench | tee .qualification/residual/candidate-bench.txt
+          CARGO_TARGET_DIR="$PWD/target-candidate" cargo build --release -p chess-uci
+          cp target-candidate/release/chess-uci candidate-engine
+          sha256sum candidate-engine | tee .qualification/residual/candidate-engine.sha256
+
+      - name: Build exact experiment-start production reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          REFERENCE_SHA=169fb5d424d90ebc45577ecaabe2a8fa0b4c1c10
+          git fetch --quiet origin "$REFERENCE_SHA"
+          git worktree add --detach .qualification/reference "$REFERENCE_SHA"
+          CARGO_TARGET_DIR="$PWD/target-reference" cargo run --quiet --release -p chess-bench --manifest-path .qualification/reference/Cargo.toml | tee .qualification/residual/reference-bench.txt
+          grep -Fx 'signature 0x4c3bbe8701fbbb68' .qualification/residual/reference-bench.txt
+          CARGO_TARGET_DIR="$PWD/target-reference" cargo build --release -p chess-uci --manifest-path .qualification/reference/Cargo.toml
+          cp target-reference/release/chess-uci reference-engine
+          sha256sum reference-engine | tee .qualification/residual/reference-engine.sha256
+          echo "$REFERENCE_SHA" | tee .qualification/residual/reference-main.sha
+
+      - name: Build pinned Fastchess 1.8.2-alpha
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = 'f618e34540f94f4719ad3817950618dabe441318'
+          make -C .qualification/fastchess-src -j2
+
+      - name: Run paired 100-game equal-node screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/residual/equal-nodes
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/candidate-engine" name=linear-residual-v1 nodes=25000 option.Hash=32 \
+            -engine cmd="$PWD/reference-engine" name=production-main nodes=25000 option.Hash=32 \
+            -openings file=match/openings/m3-uho-lichess-100-v1.epd format=epd order=random \
+            -srand 20261129 \
+            -rounds 50 -repeat -concurrency 1 -maxmoves 300 \
+            -ratinginterval 20 \
+            -pgnout file=.qualification/residual/equal-nodes/games.pgn notation=uci append=false nodes=true nps=true \
+            -log file=.qualification/residual/equal-nodes/uci.log level=info engine=true append=false \
+            | tee .qualification/residual/equal-nodes/fastchess.stdout.log
+
+      - name: Record experiment identity
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/residual
+          cat > .qualification/residual/evidence.txt <<EOF
+          experiment=rust-linear-residual-v1
+          production_reference=169fb5d424d90ebc45577ecaabe2a8fa0b4c1c10
+          python_transfer_structure=static7000-alpha3001500-diverse1500-clamp400-denom3
+          equal_nodes_per_move=25000
+          equal_node_games=100
+          equal_node_seed=20261129
+          opening_sha256=599a45efb446e91952d13e79bc7fec8de319e332036a54552a3e8e4af91f9cf1
+          fastchess_commit=f618e34540f94f4719ad3817950618dabe441318
+          EOF
+          cp .qualification/books/SHA256SUMS .qualification/residual/book-SHA256SUMS || true
+          cp .qualification/books/SAMPLE_SHA256SUMS .qualification/residual/sample-SHA256SUMS || true
+
+      - name: Upload complete residual evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m5-rust-linear-residual-v1-${{ github.sha }}
+          path: .qualification/residual/
+          retention-days: 30
