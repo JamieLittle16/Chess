@@ -347,14 +347,8 @@ mod tests {
     #[test]
     fn start_position_only_receives_the_fitted_tempo() {
         let position = Position::startpos();
-        assert_eq!(
-            residual(&position, JointClassicalVariant::CpResidual),
-            77
-        );
-        assert_eq!(
-            residual(&position, JointClassicalVariant::WdlResidual),
-            71
-        );
+        assert_eq!(residual(&position, JointClassicalVariant::CpResidual), 77);
+        assert_eq!(residual(&position, JointClassicalVariant::WdlResidual), 71);
     }
 
     #[test]
