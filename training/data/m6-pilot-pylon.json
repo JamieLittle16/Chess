@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "id": "m6-pilot-pylon-v1",
+  "purpose": "research-pilot-only",
+  "source": {
+    "provider": "huggingface",
+    "repo_id": "official-stockfish/master-binpacks",
+    "repo_type": "dataset",
+    "revision": "8987f266dd27b8a2942ef10a7e502e77273d8fa5",
+    "filename": "training_data_pylon.binpack"
+  },
+  "content": {
+    "bytes": 14366468016,
+    "sha256": "0fa28b2f3844b7b0e8b8a2f5bcc3adb47bc0c29a5370f0c35e3845500df19b58",
+    "format": "stockfish-binpack"
+  },
+  "license": {
+    "identifier": "ODbL-1.0",
+    "source_card": "https://huggingface.co/datasets/official-stockfish/master-binpacks",
+    "distribution_policy": "research-pilot-only-until-derived-model-licensing-is-reviewed"
+  },
+  "training": {
+    "trainer": "training/bullet-m6-a",
+    "first_architecture": "Chess768-dual-512-SCReLU",
+    "default_training_samples": 200015872,
+    "role": "broad-primary-corpus"
+  }
+}
