@@ -61,10 +61,8 @@ impl Args {
             args.next()
                 .ok_or_else(|| usage("missing output directory"))?,
         );
-        let hidden_size = parse_hidden_size(
-            args.next()
-                .ok_or_else(|| usage("missing hidden size"))?,
-        )?;
+        let hidden_size =
+            parse_hidden_size(args.next().ok_or_else(|| usage("missing hidden size"))?)?;
         let superbatches = parse_optional_usize(args.next(), DEFAULT_SUPERBATCHES, "superbatches")?;
         let batches_per_superbatch = parse_optional_usize(
             args.next(),
