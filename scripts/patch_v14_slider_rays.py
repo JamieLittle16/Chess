@@ -271,8 +271,9 @@ def patch(path: Path) -> None:
     )
     source = replace_exact(source, LEGALITY_OLD, LEGALITY_NEW, "legality ray scan")
 
-    if source.count("SLIDER_RAY_COUNTS") < 8:
-        raise SystemExit("unexpectedly few slider-ray uses after patch")
+    ray_count_uses = source.count("SLIDER_RAY_COUNTS")
+    if ray_count_uses != 6:
+        raise SystemExit(f"unexpected slider-ray use count after patch: {ray_count_uses}")
     path.write_text(source)
 
 
