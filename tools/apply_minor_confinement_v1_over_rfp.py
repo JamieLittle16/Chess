@@ -59,7 +59,7 @@ text = replace_once(
     let occupied = position.occupied();
     let mut enemy_pawn_attacks = chess_core::Bitboard::EMPTY;
     for pawn in position.pieces(color.opposite(), PieceKind::Pawn) {
-        enemy_pawn_attacks |= pawn_attacks(color.opposite(), pawn);
+        enemy_pawn_attacks = enemy_pawn_attacks | pawn_attacks(color.opposite(), pawn);
     }
 
     let mut middle_game = 0_i32;
