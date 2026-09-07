@@ -28,33 +28,25 @@ const PASSED_PAWN_MASKS: [[u64; 64]; 2] = generate_passed_pawn_masks();
 /// material evaluator remains the prior; these values are corrections only. The fit used alpha=100
 /// and rounded each coefficient to the nearest centipawn-like integer after fitting.
 const MG_PSQT: [i16; 192] = [
-    0, 0, 0, 0, 5, 14, 25, -57, -19, 54, -36, -21, 4, 14, 2, 20,
-    -14, 0, -27, -7, -1, -1, 10, -17, 3, 14, -22, 6, 0, 0, 0, 0,
-    -4, -12, 21, -31, 0, 2, -14, 2, -20, 10, 6, -1, -28, -7, 48, -15,
-    9, 27, -6, 21, 8, 29, 6, 19, -5, 0, 10, -7, 0, 0, 9, 1,
-    -7, -2, -22, -5, -4, 32, -12, -15, 5, -18, -3, 24, 4, 31, -33, -18,
-    -2, 8, 15, -2, 10, 31, -23, -10, 16, -1, -2, -2, -1, 0, 2, 12,
-    -19, 17, 1, -6, -22, 2, 20, -5, -63, -4, 24, -19, 19, 1, -1, -15,
-    -20, 13, 10, 4, 14, -4, 48, -3, 21, -16, 3, 1, 10, -3, 2, -15,
-    -14, 8, -13, -37, -17, 8, 1, -35, 8, 2, -9, -21, -12, 51, 4, 8,
-    46, -18, 22, 1, -2, 1, -9, 6, -4, 8, 32, 17, -13, 12, 21, 21,
-    -11, 22, -33, 46, -25, 14, 13, 2, -3, -24, -6, -10, -6, -7, 2, 2,
-    -1, 1, 3, 5, -4, 5, 6, 4, 0, 3, 4, 1, -2, 0, 0, 0,
+    0, 0, 0, 0, 5, 14, 25, -57, -19, 54, -36, -21, 4, 14, 2, 20, -14, 0, -27, -7, -1, -1, 10, -17,
+    3, 14, -22, 6, 0, 0, 0, 0, -4, -12, 21, -31, 0, 2, -14, 2, -20, 10, 6, -1, -28, -7, 48, -15, 9,
+    27, -6, 21, 8, 29, 6, 19, -5, 0, 10, -7, 0, 0, 9, 1, -7, -2, -22, -5, -4, 32, -12, -15, 5, -18,
+    -3, 24, 4, 31, -33, -18, -2, 8, 15, -2, 10, 31, -23, -10, 16, -1, -2, -2, -1, 0, 2, 12, -19,
+    17, 1, -6, -22, 2, 20, -5, -63, -4, 24, -19, 19, 1, -1, -15, -20, 13, 10, 4, 14, -4, 48, -3,
+    21, -16, 3, 1, 10, -3, 2, -15, -14, 8, -13, -37, -17, 8, 1, -35, 8, 2, -9, -21, -12, 51, 4, 8,
+    46, -18, 22, 1, -2, 1, -9, 6, -4, 8, 32, 17, -13, 12, 21, 21, -11, 22, -33, 46, -25, 14, 13, 2,
+    -3, -24, -6, -10, -6, -7, 2, 2, -1, 1, 3, 5, -4, 5, 6, 4, 0, 3, 4, 1, -2, 0, 0, 0,
 ];
 
 const EG_PSQT: [i16; 192] = [
-    0, 0, 0, 0, -11, 39, 88, -5, -33, 44, -34, 16, 25, -4, 10, -52,
-    8, 26, 17, -82, 40, -10, 12, -30, 43, 90, 0, 20, 0, 0, 0, 0,
-    -3, 7, 18, -22, -5, 7, -11, 8, -9, 2, -6, 0, -17, -2, 4, -5,
-    8, 3, -5, 18, 2, -1, 8, 16, -1, 8, 6, -21, -1, 0, 6, -2,
-    -15, -5, 6, 2, -5, -14, -32, 6, 11, -19, -17, -11, 4, 18, -10, -12,
-    5, 33, -13, 1, 14, 13, 8, -29, 6, 6, -3, 4, -1, -2, 6, 3,
-    -30, 26, 38, -10, -4, 2, -4, -10, -20, 6, -11, -4, 13, 34, 9, -16,
-    23, 6, -4, 2, 32, 12, 19, -3, 41, 10, 11, 16, 33, 25, 17, -10,
-    -14, 3, -7, -12, -4, 3, -13, -15, 7, -7, -18, -22, 4, 46, 16, 7,
-    23, 9, 26, 33, -8, 0, 6, 31, 5, 28, 30, 52, 17, 35, 36, 45,
-    -3, -5, -33, -40, -55, 12, 14, -14, -21, -26, 9, -4, -52, -8, 13, 3,
-    -2, 6, 52, 29, -42, 33, 60, 27, 0, 9, 26, 31, -24, 3, -1, 0,
+    0, 0, 0, 0, -11, 39, 88, -5, -33, 44, -34, 16, 25, -4, 10, -52, 8, 26, 17, -82, 40, -10, 12,
+    -30, 43, 90, 0, 20, 0, 0, 0, 0, -3, 7, 18, -22, -5, 7, -11, 8, -9, 2, -6, 0, -17, -2, 4, -5, 8,
+    3, -5, 18, 2, -1, 8, 16, -1, 8, 6, -21, -1, 0, 6, -2, -15, -5, 6, 2, -5, -14, -32, 6, 11, -19,
+    -17, -11, 4, 18, -10, -12, 5, 33, -13, 1, 14, 13, 8, -29, 6, 6, -3, 4, -1, -2, 6, 3, -30, 26,
+    38, -10, -4, 2, -4, -10, -20, 6, -11, -4, 13, 34, 9, -16, 23, 6, -4, 2, 32, 12, 19, -3, 41, 10,
+    11, 16, 33, 25, 17, -10, -14, 3, -7, -12, -4, 3, -13, -15, 7, -7, -18, -22, 4, 46, 16, 7, 23,
+    9, 26, 33, -8, 0, 6, 31, 5, 28, 30, 52, 17, 35, 36, 45, -3, -5, -33, -40, -55, 12, 14, -14,
+    -21, -26, 9, -4, -52, -8, 13, 3, -2, 6, 52, 29, -42, 33, 60, 27, 0, 9, 26, 31, -24, 3, -1, 0,
 ];
 
 const MG_CHEAP: [i16; FEATURE_COUNT] = [
@@ -117,9 +109,7 @@ fn cheap_features(position: &Position, color: Color) -> [i32; FEATURE_COUNT] {
 
     for square in pawns {
         let file = usize::from(square.file());
-        if (file == 0 || file_counts[file - 1] == 0)
-            && (file == 7 || file_counts[file + 1] == 0)
-        {
+        if (file == 0 || file_counts[file - 1] == 0) && (file == 7 || file_counts[file + 1] == 0) {
             values[ISOLATED_PAWNS] += 1;
         }
         if own_pawn_attacks.contains(square) {
@@ -176,17 +166,17 @@ fn cheap_features(position: &Position, color: Color) -> [i32; FEATURE_COUNT] {
         }
     }
 
-    values[PAWN_THREATS] =
-        (own_pawn_attacks & position.pieces(color.opposite(), PieceKind::Knight)).count() as i32 * 3
-            + (own_pawn_attacks & position.pieces(color.opposite(), PieceKind::Bishop)).count() as i32
-                * 3
-            + (own_pawn_attacks & position.pieces(color.opposite(), PieceKind::Rook)).count() as i32
-                * 5
-            + (own_pawn_attacks & position.pieces(color.opposite(), PieceKind::Queen)).count() as i32
-                * 9;
+    values[PAWN_THREATS] = (own_pawn_attacks & position.pieces(color.opposite(), PieceKind::Knight))
+        .count() as i32
+        * 3
+        + (own_pawn_attacks & position.pieces(color.opposite(), PieceKind::Bishop)).count() as i32
+            * 3
+        + (own_pawn_attacks & position.pieces(color.opposite(), PieceKind::Rook)).count() as i32
+            * 5
+        + (own_pawn_attacks & position.pieces(color.opposite(), PieceKind::Queen)).count() as i32
+            * 9;
     values[CENTRAL_PAWN_CONTROL] = (own_pawn_attacks.raw() & CENTRAL_16).count_ones() as i32;
-    values[CENTRAL_OCCUPANCY] =
-        (position.occupancy(color).raw() & CENTRAL_16).count_ones() as i32;
+    values[CENTRAL_OCCUPANCY] = (position.occupancy(color).raw() & CENTRAL_16).count_ones() as i32;
 
     if position.pieces(color, PieceKind::Bishop).count() >= 2 {
         values[BISHOP_PAIR] = 1;
@@ -221,9 +211,7 @@ fn pawn_attack_union(position: &Position, color: Color) -> Bitboard {
 
 #[inline]
 fn is_passed_pawn(square: Square, color: Color, enemy_pawns: Bitboard) -> bool {
-    enemy_pawns.raw()
-        & PASSED_PAWN_MASKS[color.index()][usize::from(square.index())]
-        == 0
+    enemy_pawns.raw() & PASSED_PAWN_MASKS[color.index()][usize::from(square.index())] == 0
 }
 
 const fn generate_passed_pawn_masks() -> [[u64; 64]; 2] {
