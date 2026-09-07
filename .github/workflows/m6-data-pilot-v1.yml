@@ -1,0 +1,83 @@
+name: M6 data pilot v1
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  provenance-tooling:
+    if: github.head_ref == 'm6/data-pilot-v1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Compile fetcher
+        run: python -m py_compile scripts/fetch_m6_training_data.py
+
+      - name: Validate immutable pilot manifest without downloading 14 GB
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/fetch_m6_training_data.py \
+            --manifest training/data/m6-pilot-pylon.json \
+            --print-manifest \
+            > /tmp/m6-pilot-manifest.txt
+          grep -Fq '8987f266dd27b8a2942ef10a7e502e77273d8fa5' /tmp/m6-pilot-manifest.txt
+          grep -Fq '0fa28b2f3844b7b0e8b8a2f5bcc3adb47bc0c29a5370f0c35e3845500df19b58' /tmp/m6-pilot-manifest.txt
+          grep -Fq '14366468016' /tmp/m6-pilot-manifest.txt
+          grep -Fq 'ODbL-1.0' /tmp/m6-pilot-manifest.txt
+
+      - name: Prove verifier and lock format on a synthetic local manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'm6-data-verifier-fixture\n' > /tmp/fixture.bin
+          SIZE=$(wc -c < /tmp/fixture.bin)
+          SHA=$(sha256sum /tmp/fixture.bin | awk '{print $1}')
+          python - "$SIZE" "$SHA" <<'PY'
+          import json
+          import sys
+          size = int(sys.argv[1])
+          sha = sys.argv[2]
+          manifest = {
+              "schema_version": 1,
+              "id": "fixture",
+              "purpose": "test",
+              "source": {
+                  "provider": "huggingface",
+                  "repo_id": "fixture/repo",
+                  "repo_type": "dataset",
+                  "revision": "deadbeef",
+                  "filename": "fixture.bin",
+              },
+              "content": {"bytes": size, "sha256": sha, "format": "fixture"},
+              "license": {
+                  "identifier": "fixture-license",
+                  "source_card": "fixture",
+                  "distribution_policy": "test",
+              },
+              "training": {"trainer": "fixture", "role": "test"},
+          }
+          with open('/tmp/fixture.json', 'w') as handle:
+              json.dump(manifest, handle)
+          PY
+          python scripts/fetch_m6_training_data.py \
+            --manifest /tmp/fixture.json \
+            --verify-only /tmp/fixture.bin \
+            --lock /tmp/fixture.lock.json
+          python - <<'PY'
+          import json
+          lock = json.load(open('/tmp/fixture.lock.json'))
+          assert lock['manifest_id'] == 'fixture'
+          assert len(lock['manifest_sha256']) == 64
+          assert len(lock['data_sha256']) == 64
+          PY
