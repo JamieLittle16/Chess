@@ -124,7 +124,8 @@ fn main() {
 
 fn blend_score(classical: i32, nnue: i32, nnue_steps: usize) -> i32 {
     let classical_steps = BLEND_STEPS - nnue_steps;
-    let numerator = i64::from(classical) * classical_steps as i64 + i64::from(nnue) * nnue_steps as i64;
+    let numerator =
+        i64::from(classical) * classical_steps as i64 + i64::from(nnue) * nnue_steps as i64;
     (numerator / BLEND_STEPS as i64) as i32
 }
 
