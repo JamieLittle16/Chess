@@ -1,0 +1,87 @@
+name: V13 verified LMR sweep
+
+on:
+  push:
+    branches:
+      - analysis/v13-lmr-sweep-20260907
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  arena:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: mild, d3: 9, i3: 10, d2: 6, i2: 7, d1: 3, i1: 3, seed: 99401 }
+          - { name: aggressive, d3: 8, i3: 10, d2: 5, i2: 6, d1: 3, i1: 3, seed: 99402 }
+          - { name: conservative, d3: 10, i3: 14, d2: 7, i2: 10, d1: 4, i1: 5, seed: 99403 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Reconstruct equal quarter-residual candidate and control
+        shell: bash
+        env:
+          D3: ${{ matrix.d3 }}
+          I3: ${{ matrix.i3 }}
+          D2: ${{ matrix.d2 }}
+          I2: ${{ matrix.i2 }}
+          D1: ${{ matrix.d1 }}
+          I1: ${{ matrix.i1 }}
+        run: |
+          set -euo pipefail
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum -c -
+          rm -rf /tmp/cand /tmp/base
+          mkdir /tmp/base
+          unzip -q /tmp/v13.zip -d /tmp/base
+          patch /tmp/base/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/base/experiments/numba_search.py'); s=p.read_text()
+          old='    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          new='    correction = correction // 4\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          assert s.count(old)==1,s.count(old)
+          p.write_text(s.replace(old,new,1))
+          PY
+          cp -a /tmp/base /tmp/cand
+          python - <<'PY'
+          import os,re
+          from pathlib import Path
+          p=Path('/tmp/cand/experiments/numba_search.py'); s=p.read_text()
+          pat=r'def _lmr_v3_reduction\(depth: int, move_index: int\) -> int:\n    """Accepted Rust adaptive verified-LMR schedule, zero-based move index\."""\n    if depth >= 9 and move_index >= 12:\n        return 3\n    if depth >= 6 and move_index >= 8:\n        return 2\n    if depth >= 3 and move_index >= 4:\n        return 1\n    return 0'
+          rep=(f'def _lmr_v3_reduction(depth: int, move_index: int) -> int:\n'
+               f'    """Screened adaptive verified-LMR schedule."""\n'
+               f'    if depth >= {int(os.environ["D3"])} and move_index >= {int(os.environ["I3"])}:\n        return 3\n'
+               f'    if depth >= {int(os.environ["D2"])} and move_index >= {int(os.environ["I2"])}:\n        return 2\n'
+               f'    if depth >= {int(os.environ["D1"])} and move_index >= {int(os.environ["I1"])}:\n        return 1\n'
+               f'    return 0')
+          s,n=re.subn(pat,rep,s,count=1)
+          assert n==1,n
+          p.write_text(s)
+          PY
+          python -m py_compile /tmp/base/agent.py /tmp/base/experiments/*.py /tmp/cand/agent.py /tmp/cand/experiments/*.py
+          grep -n -A12 -B2 'Screened adaptive verified-LMR' /tmp/cand/experiments/numba_search.py
+      - name: Fixed-node direct A/B
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          /usr/bin/time -f 'ARENA_WALL_SEC=%e MAX_RSS_KB=%M' \
+            python -u .v13/v13_arena.py /tmp/cand /tmp/base 20000 20 '${{ matrix.seed }}' 220 \
+              match/openings/m3-uho-lichess-100-v1.epd 60 \
+            | tee results/${{ matrix.name }}.log
+          grep '^FINAL ' results/${{ matrix.name }}.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v13-lmr-${{ matrix.name }}-${{ github.sha }}
+          path: results/${{ matrix.name }}.log
+          retention-days: 7
