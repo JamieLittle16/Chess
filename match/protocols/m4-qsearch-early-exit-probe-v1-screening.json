@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "protocol_id": "m4-qsearch-early-exit-probe-v1-screening",
+  "runner": "fastchess",
+  "games": 100,
+  "time_control": "1+0.01",
+  "concurrency": 1,
+  "seed": 20261010,
+  "max_moves": 300,
+  "opening_format": "epd",
+  "openings_required": true,
+  "opening_suite_id": "m3-uho-lichess-100-v1",
+  "opening_sha256": "599a45efb446e91952d13e79bc7fec8de319e332036a54552a3e8e4af91f9cf1",
+  "paired_colour_reversal": true,
+  "ponder": false,
+  "tablebases": false,
+  "evaluation_adjudication": false,
+  "notes": "100-game equal-time screen for semantics-neutral qsearch early-exit legal probing over production main@70484195439dc79d3610e36bcac88feb801a7721. At the local qsearch ceiling and non-check stand-pat beta cutoffs, use the accepted early legal-existence probe to preserve mate/stalemate precedence without constructing/filtering a complete move list that will not be searched. Qsearch depth, tactical set, scores and ordering remain unchanged."
+}
