@@ -207,12 +207,7 @@ pub fn feature_update_for_move(
     if let Some(captured_square) = captured_square(position, moving.color(), mv)
         && let Some(captured) = position.piece_at(captured_square)
     {
-        delta.push_removed(feature_index(
-            frame,
-            perspective,
-            captured,
-            captured_square,
-        ));
+        delta.push_removed(feature_index(frame, perspective, captured, captured_square));
     }
 
     let resulting_piece = mv
@@ -313,14 +308,10 @@ mod tests {
     fn start_position_has_bounded_sorted_features_for_both_perspectives() {
         let position = Position::startpos();
         for perspective in Color::ALL {
-            let features = active_features(&position, perspective).expect("start position has king");
+            let features =
+                active_features(&position, perspective).expect("start position has king");
             assert_eq!(features.len(), 32);
-            assert!(
-                features
-                    .as_slice()
-                    .windows(2)
-                    .all(|pair| pair[0] < pair[1])
-            );
+            assert!(features.as_slice().windows(2).all(|pair| pair[0] < pair[1]));
             assert!(
                 features
                     .as_slice()
@@ -332,10 +323,9 @@ mod tests {
 
     #[test]
     fn color_swapped_vertical_mirror_has_identical_relative_features() {
-        let white = Position::from_fen("4k3/8/8/8/8/8/3P4/4K3 w - - 0 1")
-            .expect("valid position");
-        let black = Position::from_fen("4k3/3p4/8/8/8/8/8/4K3 b - - 0 1")
-            .expect("valid mirrored position");
+        let white = Position::from_fen("4k3/8/8/8/8/8/3P4/4K3 w - - 0 1").expect("valid position");
+        let black =
+            Position::from_fen("4k3/3p4/8/8/8/8/8/4K3 b - - 0 1").expect("valid mirrored position");
         assert_eq!(
             active_features(&white, Color::White),
             active_features(&black, Color::Black)
@@ -388,17 +378,13 @@ mod tests {
         );
     }
 
-    fn assert_special_move(
-        fen: &str,
-        from: Square,
-        to: Square,
-        required_kind: Option<MoveKind>,
-    ) {
+    fn assert_special_move(fen: &str, from: Square, to: Square, required_kind: Option<MoveKind>) {
         let mut position = Position::from_fen(fen).expect("valid special position");
         let mv = find_move(&position, from, to, required_kind);
         for perspective in Color::ALL {
             let before = active_features(&position, perspective).expect("king before");
-            let update = feature_update_for_move(&position, mv, perspective).expect("feature update");
+            let update =
+                feature_update_for_move(&position, mv, perspective).expect("feature update");
             let undo = position.make_move(mv);
             let after = active_features(&position, perspective).expect("king after");
             position.unmake_move(mv, undo);
