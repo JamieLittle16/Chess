@@ -1,0 +1,83 @@
+name: V13 TT capacity sweep
+
+on:
+  push:
+    branches:
+      - analysis/v13-tt-capacity-sweep-20260907
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  arena:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: tt17-a, bits: 17, start: 0, seed: 99101 }
+          - { name: tt17-b, bits: 17, start: 20, seed: 99102 }
+          - { name: tt19-a, bits: 19, start: 0, seed: 99201 }
+          - { name: tt19-b, bits: 19, start: 20, seed: 99202 }
+          - { name: tt20-a, bits: 20, start: 0, seed: 99301 }
+          - { name: tt20-b, bits: 20, start: 20, seed: 99302 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: analysis/v13-linear-residual
+          path: arena-src
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition dependencies
+        run: python -m pip install --disable-pip-version-check numba==0.67.0 numpy==2.5.2 chess==1.11.2
+      - name: Reconstruct control and candidate
+        shell: bash
+        env:
+          BITS: ${{ matrix.bits }}
+        run: |
+          set -euo pipefail
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum -c -
+          rm -rf /tmp/base /tmp/cand; mkdir /tmp/base /tmp/cand
+          unzip -q /tmp/v13.zip -d /tmp/base; unzip -q /tmp/v13.zip -d /tmp/cand
+          patch /tmp/base/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          patch /tmp/cand/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          for DIR in /tmp/base /tmp/cand; do
+            DIR="$DIR" python - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path(os.environ['DIR'])/'experiments/numba_search.py'; s=p.read_text()
+          old='    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          new='    correction = correction // 4\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          assert s.count(old)==1; p.write_text(s.replace(old,new,1))
+          PY
+            python scripts/patch_v13_legality_context.py "$DIR/experiments/numba_core.py"
+          done
+          BITS="$BITS" python - <<'PY'
+          import os,re
+          from pathlib import Path
+          p=Path('/tmp/cand/experiments/numba_search.py'); s=p.read_text(); bits=int(os.environ['BITS'])
+          s,n=re.subn(r'TT_BITS = 18\n',f'TT_BITS = {bits}\n',s,count=1); assert n==1
+          p.write_text(s)
+          PY
+          python -m py_compile /tmp/base/agent.py /tmp/base/experiments/*.py /tmp/cand/agent.py /tmp/cand/experiments/*.py
+      - name: Fixed-node paired arena
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p v13-results
+          /usr/bin/time -f 'ARENA_WALL_SEC=%e MAX_RSS_KB=%M' \
+            python -u arena-src/.v13/v13_arena.py /tmp/cand /tmp/base 20000 20 '${{ matrix.seed }}' 220 \
+              match/openings/m3-uho-lichess-100-v1.epd '${{ matrix.start }}' \
+            | tee 'v13-results/${{ matrix.name }}.log'
+          grep '^FINAL ' 'v13-results/${{ matrix.name }}.log'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v13-tt-${{ matrix.name }}-${{ github.sha }}
+          path: v13-results/
+          retention-days: 7
