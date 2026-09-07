@@ -1,0 +1,98 @@
+name: M5 search-leaf corpus certification
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  corpus:
+    if: github.head_ref == 'm5/search-leaf-corpus-v1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: Verify tracing-disabled production identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          cargo run --quiet --release -p chess-bench | tee production-bench.txt
+          grep -Fx 'signature 0x4c3bbe8701fbbb68' production-bench.txt
+
+      - name: Build exact traced engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          CARGO_TARGET_DIR="$PWD/target-trace" cargo build --release -p chess-uci --features search-trace
+          test -x target-trace/release/chess-uci
+          mkdir -p corpus-results
+          sha256sum target-trace/release/chess-uci | tee corpus-results/traced-engine.sha256
+          sha256sum match/openings/m3-uho-lichess-100-v1.epd | tee corpus-results/openings.sha256
+
+      - name: Collect deterministic corpus A
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/collect_search_leaf_corpus.py \
+            --engine target-trace/release/chess-uci \
+            --openings match/openings/m3-uho-lichess-100-v1.epd \
+            --roots 32 \
+            --nodes 8000 \
+            --stride 8 \
+            --output corpus-results/corpus-a.tsv \
+            --manifest corpus-results/manifest-a.json \
+            | tee corpus-results/collect-a.stdout.txt
+
+      - name: Collect deterministic corpus B
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/collect_search_leaf_corpus.py \
+            --engine target-trace/release/chess-uci \
+            --openings match/openings/m3-uho-lichess-100-v1.epd \
+            --roots 32 \
+            --nodes 8000 \
+            --stride 8 \
+            --output corpus-results/corpus-b.tsv \
+            --manifest corpus-results/manifest-b.json \
+            | tee corpus-results/collect-b.stdout.txt
+
+      - name: Certify determinism, uniqueness and engine FEN round-trips
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmp corpus-results/corpus-a.tsv corpus-results/corpus-b.tsv
+          cmp corpus-results/manifest-a.json corpus-results/manifest-b.json
+
+          RECORDS=$(wc -l < corpus-results/corpus-a.tsv)
+          test "$RECORDS" -ge 500
+          test "$(cut -f1 corpus-results/corpus-a.tsv | sort -u | wc -l)" -ge 16
+          test -z "$(cut -f2- corpus-results/corpus-a.tsv | sort | uniq -d)"
+
+          cargo run --quiet --release -p chess-core --example fen_roundtrip \
+            < corpus-results/corpus-a.tsv
+
+          sha256sum corpus-results/corpus-a.tsv corpus-results/manifest-a.json \
+            | tee corpus-results/certified.sha256
+          printf 'records=%s\n' "$RECORDS" | tee corpus-results/certification.txt
+          printf 'roots=32\nnodes_per_root=8000\ntrace_stride=8\n' \
+            >> corpus-results/certification.txt
+
+      - name: Upload certified corpus
+        uses: actions/upload-artifact@v4
+        with:
+          name: m5-search-leaf-corpus-${{ github.sha }}
+          path: corpus-results/
+          retention-days: 30
