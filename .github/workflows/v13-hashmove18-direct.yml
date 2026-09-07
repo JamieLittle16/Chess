@@ -1,0 +1,65 @@
+name: V13 hash move 18 direct A/B
+
+on:
+  push:
+    branches:
+      - analysis/v13-hashmove18-direct-20260907
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  arena:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Reconstruct quarter HASH16 base and HASH18 candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum -c -
+          rm -rf /tmp/base /tmp/cand
+          mkdir /tmp/base
+          unzip -q /tmp/v13.zip -d /tmp/base
+          patch /tmp/base/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/base/experiments/numba_search.py'); s=p.read_text()
+          old='    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          new='    correction = correction // 4\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          assert s.count(old)==1,s.count(old)
+          p.write_text(s.replace(old,new,1))
+          PY
+          cp -a /tmp/base /tmp/cand
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          p=Path('/tmp/cand/experiments/numba_search.py'); s=p.read_text()
+          s,n=re.subn(r'^HASH_MOVE_BITS = 16$', 'HASH_MOVE_BITS = 18', s, count=1, flags=re.M)
+          assert n==1,n
+          p.write_text(s)
+          PY
+          python -m py_compile /tmp/base/agent.py /tmp/base/experiments/*.py /tmp/cand/agent.py /tmp/cand/experiments/*.py
+      - name: 40k-node direct confirmation
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          /usr/bin/time -f 'ARENA_WALL_SEC=%e MAX_RSS_KB=%M' \
+            python -u .v13/v13_arena.py /tmp/cand /tmp/base 40000 20 99801 220 \
+              match/openings/m3-uho-lichess-100-v1.epd 40 \
+            | tee results/hash18-vs-hash16.log
+          grep '^FINAL ' results/hash18-vs-hash16.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v13-hashmove18-direct-${{ github.sha }}
+          path: results/hash18-vs-hash16.log
+          retention-days: 14
