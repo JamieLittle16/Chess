@@ -6,7 +6,7 @@
 
 use chess_core::{ChessMove, Position, generate_legal_moves_mut};
 
-use super::{INFINITY, MAX_SEARCH_PLY, NeverStop, Searcher, is_rule_draw};
+use super::{HistoryTables, INFINITY, MAX_SEARCH_PLY, NeverStop, Searcher, is_rule_draw};
 
 /// One legal root move with its exact score at the requested nominal search depth.
 ///
@@ -55,6 +55,7 @@ impl Searcher {
         self.nodes = 0;
         self.tt_hits = 0;
         self.killers = [[None; 2]; MAX_SEARCH_PLY];
+        self.history = HistoryTables::default();
 
         let repetition_key = position.repetition_key().raw();
         let moves = generate_legal_moves_mut(position);
@@ -62,9 +63,6 @@ impl Searcher {
             return Vec::new();
         }
 
-        // At a claimable root draw every legal continuation is dominated by the available draw for
-        // objective purposes. Keep deterministic generator order and do not pretend one move has a
-        // different searched value merely because we declined the claim while analysing it.
         if is_rule_draw(position, repetition_key, prior_history, &[]) {
             let count = max_candidates.min(moves.len());
             return (0..count)
