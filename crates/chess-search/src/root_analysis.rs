@@ -94,13 +94,7 @@ impl Searcher {
                 )
                 .expect("NeverStop cannot interrupt root-candidate analysis");
             position.unmake_move(mv, undo);
-            ranked.push((
-                order,
-                RootCandidate {
-                    mv,
-                    score: -child,
-                },
-            ));
+            ranked.push((order, RootCandidate { mv, score: -child }));
         }
 
         ranked.sort_by(|(left_order, left), (right_order, right)| {
@@ -135,10 +129,18 @@ mod tests {
 
         assert_eq!(candidates.len(), 5);
         assert_eq!(position, original);
-        assert!(candidates.windows(2).all(|pair| pair[0].score >= pair[1].score));
+        assert!(
+            candidates
+                .windows(2)
+                .all(|pair| pair[0].score >= pair[1].score)
+        );
         for (index, candidate) in candidates.iter().enumerate() {
             assert!(legal.contains(&candidate.mv));
-            assert!(!candidates[..index].iter().any(|seen| seen.mv == candidate.mv));
+            assert!(
+                !candidates[..index]
+                    .iter()
+                    .any(|seen| seen.mv == candidate.mv)
+            );
         }
     }
 
@@ -165,8 +167,16 @@ mod tests {
         let original = position.clone();
         let mut searcher = Searcher::with_tt_entries(64);
 
-        assert!(searcher.analyze_root_candidates(&mut position, 0, 4).is_empty());
-        assert!(searcher.analyze_root_candidates(&mut position, 2, 0).is_empty());
+        assert!(
+            searcher
+                .analyze_root_candidates(&mut position, 0, 4)
+                .is_empty()
+        );
+        assert!(
+            searcher
+                .analyze_root_candidates(&mut position, 2, 0)
+                .is_empty()
+        );
         assert_eq!(position, original);
     }
 }
