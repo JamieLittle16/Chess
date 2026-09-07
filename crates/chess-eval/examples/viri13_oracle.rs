@@ -150,8 +150,10 @@ fn read_i16s(bytes: &[u8], cursor: &mut usize, count: usize) -> Result<Box<[i16]
         .get(*cursor..end)
         .ok_or_else(|| "truncated network payload".to_owned())?;
     let values = slice
-        .chunks_exact(2)
-        .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| i16::from_le_bytes(*pair))
         .collect::<Vec<_>>()
         .into_boxed_slice();
     *cursor = end;
