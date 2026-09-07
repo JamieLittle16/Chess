@@ -1,0 +1,184 @@
+name: V13 direct tactical qsearch
+
+on:
+  push:
+    branches:
+      - analysis/v13-qsearch-tactical-20260907
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_TOOLCHAIN: 1.98.1
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: 169fb5d424d90ebc45577ecaabe2a8fa0b4c1c10
+          path: rust-ref
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact Python runtime and Stockfish
+        run: |
+          python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+          sudo apt-get update -qq
+          sudo apt-get install -y stockfish
+      - name: Reconstruct quarter-legality control and qsearch candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum -c -
+          rm -rf /tmp/v13-base /tmp/v13-cand
+          mkdir /tmp/v13-base /tmp/v13-cand
+          unzip -q /tmp/v13.zip -d /tmp/v13-base
+          unzip -q /tmp/v13.zip -d /tmp/v13-cand
+          patch /tmp/v13-base/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          patch /tmp/v13-cand/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          for DIR in /tmp/v13-base /tmp/v13-cand; do
+            DIR="$DIR" python - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path(os.environ['DIR'])/'experiments/numba_search.py'; s=p.read_text()
+          old='    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          new='    correction = correction // 4\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          assert s.count(old)==1,s.count(old)
+          p.write_text(s.replace(old,new,1))
+          PY
+            python scripts/patch_v13_legality_context.py "$DIR/experiments/numba_core.py"
+          done
+          python scripts/patch_v13_qsearch_tactical.py /tmp/v13-cand/experiments/numba_core.py /tmp/v13-cand/experiments/numba_search.py
+          python -m py_compile /tmp/v13-base/agent.py /tmp/v13-base/experiments/*.py /tmp/v13-cand/agent.py /tmp/v13-cand/experiments/*.py
+      - name: Tactical sequence and legal-existence parity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import importlib.util, random, sys
+          import chess
+          import numpy as np
+          def load(name,path):
+              spec=importlib.util.spec_from_file_location(name,path); m=importlib.util.module_from_spec(spec); sys.modules[name]=m; spec.loader.exec_module(m); return m
+          mod=load('v13_qt_core','/tmp/v13-cand/experiments/numba_core.py')
+          def test(board):
+              e=mod.encode_position(board)
+              pseudo=np.empty(256,dtype=np.int32); legal=np.empty(256,dtype=np.int32); tp=np.empty(256,dtype=np.int32); tl=np.empty(256,dtype=np.int32)
+              king=board.king(board.turn); king=-1 if king is None else int(king)
+              n=mod.generate_legal_moves_into_with_king(e.board,e.side,e.castling,e.ep_square,pseudo,legal,king)
+              expected=[]
+              for raw in legal[:n]:
+                  mv=int(raw); to=mod.move_to(mv)
+                  if (mv & mod.FLAG_EP) or int(e.board[to]) != mod.EMPTY or mod.move_promotion(mv) != 0:
+                      expected.append(mv)
+              tn=mod.generate_legal_tactical_moves_into_with_king(e.board,e.side,e.ep_square,tp,tl,king)
+              actual=[int(x) for x in tl[:tn]]
+              assert actual==expected,(board.fen(),[mod.move_to_uci(x) for x in expected],[mod.move_to_uci(x) for x in actual])
+              assert bool(mod.has_any_legal_move_with_king(e.board,e.side,e.castling,e.ep_square,tp,king)) == any(True for _ in board.legal_moves),board.fen()
+          directed=[
+              chess.STARTING_FEN,
+              '7k/5Q2/7K/8/8/8/8/8 b - - 0 1',
+              '7k/5Q2/6K1/8/8/8/8/8 b - - 0 1',
+              'k3r3/8/8/8/8/8/4R3/4K3 w - - 0 1',
+              'k7/8/8/4KPpr/8/8/8/8 w - g6 0 1',
+          ]
+          checked=0
+          for fen in directed: test(chess.Board(fen)); checked+=1
+          rng=random.Random(20260907)
+          for game in range(100):
+              board=chess.Board()
+              for ply in range(120):
+                  test(board); checked+=1
+                  moves=list(board.legal_moves)
+                  if not moves: break
+                  board.push(moves[rng.randrange(len(moves))])
+          print('tactical/legal parity positions',checked)
+          assert checked >= 10000
+          PY
+      - name: Exact fixed-node search parity and throughput
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/v13-worker.py <<'PY'
+          import json,sys,chess,numpy as np
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful
+          for line in sys.stdin:
+              try:
+                  q=json.loads(line); board=chess.Board(q['fen']); e=encode_position(board)
+                  h=np.empty(0,dtype=np.uint64)
+                  out=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,board.halfmove_clock,h,0,int(q['nodes']))
+                  print(json.dumps({'move':int(out[0]),'score':int(out[1]),'depth':int(out[2]),'nodes':int(out[3])}),flush=True)
+              except Exception as exc:
+                  print(json.dumps({'error':repr(exc)}),flush=True)
+          PY
+          python - <<'PY'
+          import json,os,subprocess,sys,time,statistics
+          roots=[line.strip() for line in open('match/openings/m3-uho-lichess-100-v1.epd') if line.strip() and not line.startswith('#')][:40]
+          def start(path):
+              env=os.environ.copy(); env['PYTHONPATH']=path
+              return subprocess.Popen([sys.executable,'/tmp/v13-worker.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,bufsize=1,env=env)
+          def ask(proc,fen,nodes):
+              proc.stdin.write(json.dumps({'fen':fen,'nodes':nodes})+'\n'); proc.stdin.flush(); line=proc.stdout.readline()
+              if not line: raise RuntimeError(proc.stderr.read()[-4000:])
+              out=json.loads(line)
+              if 'error' in out: raise RuntimeError(out)
+              return out
+          base=start('/tmp/v13-base'); cand=start('/tmp/v13-cand')
+          try:
+              ask(base,roots[0],300); ask(cand,roots[0],300)
+              ratios=[]
+              for rep in range(3):
+                  order=roots if rep%2==0 else list(reversed(roots))
+                  tb=time.perf_counter(); br=[ask(base,fen,30000) for fen in order]; bs=time.perf_counter()-tb
+                  tc=time.perf_counter(); cr=[ask(cand,fen,30000) for fen in order]; cs=time.perf_counter()-tc
+                  for i,(a,b) in enumerate(zip(br,cr)): assert a==b,(rep,i,a,b)
+                  ratios.append(bs/cs)
+                  print('rep',rep,'base_s',bs,'cand_s',cs,'speedup',bs/cs)
+          finally:
+              base.terminate(); cand.terminate(); base.wait(); cand.wait()
+          med=statistics.median(ratios)
+          print('fixed-node signatures identical',len(roots)*3,'median speedup',med)
+          assert med > 1.01,ratios
+          PY
+      - name: Build pinned Rust opponent
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd rust-ref
+          test "$(git rev-parse HEAD)" = '169fb5d424d90ebc45577ecaabe2a8fa0b4c1c10'
+          RUSTUP_TOOLCHAIN=1.98.1 cargo build --release -p chess-uci
+      - name: Paired reality screen vs production Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          STOCKFISH="$(command -v stockfish || true)"; [ -n "$STOCKFISH" ] || STOCKFISH=/usr/games/stockfish
+          OUT=analysis-results/quarter-legality-qsearch; mkdir -p "$OUT"
+          python tools/v9_rust_diagnostic.py \
+            --agent /tmp/v13-cand --runner tools/v9_agent_runner.py \
+            --engine rust-ref/target/release/chess-uci --stockfish "$STOCKFISH" \
+            --openings match/openings/m3-uho-lichess-100-v1.epd \
+            --opening-start 30 --opening-count 6 --base-ms 2500 --increment-ms 50 \
+            --analysis-nodes 10000 --out-dir "$OUT" | tee "$OUT/run.log"
+      - name: Package exact candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=analysis-results/quarter-legality-qsearch
+          (cd /tmp/v13-cand && zip -qr "$GITHUB_WORKSPACE/$OUT/Little-Gambit-V13-quarter-legality-qsearch.zip" .)
+          sha256sum "$OUT/Little-Gambit-V13-quarter-legality-qsearch.zip" > "$OUT/CANDIDATE_SHA256.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v13-quarter-legality-qsearch-${{ github.sha }}
+          path: analysis-results/quarter-legality-qsearch
+          retention-days: 14
