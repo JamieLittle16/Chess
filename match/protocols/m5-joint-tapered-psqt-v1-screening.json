@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "protocol_id": "m5-joint-tapered-psqt-v1-screening",
+  "runner": "fastchess",
+  "games": 100,
+  "time_control": "1+0.01",
+  "concurrency": 1,
+  "seed": 20261025,
+  "max_moves": 300,
+  "opening_format": "epd",
+  "openings_required": true,
+  "opening_suite_id": "m3-uho-lichess-100-v1",
+  "opening_sha256": "599a45efb446e91952d13e79bc7fec8de319e332036a54552a3e8e4af91f9cf1",
+  "paired_colour_reversal": true,
+  "hash_mb": 32,
+  "ponder": false,
+  "tablebases": false,
+  "evaluation_adjudication": false,
+  "notes": "Equal-wall-clock screen of frozen joint tapered PSQT v1 over exact main@2a6172a. Same binary; only CHESS_EXPERIMENTAL_JOINT_TAPERED_PSQT_V1 differs."
+}
