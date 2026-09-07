@@ -1,0 +1,68 @@
+name: V13 Round57 targeted regression
+
+on:
+  push:
+    branches:
+      - analysis/v13-round57-targeted-20260907
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  targeted:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact runtime and Stockfish
+        run: |
+          python -m pip install chess==1.11.2 numpy==2.5.2 numba==0.67.0
+          sudo apt-get update -qq
+          sudo apt-get install -y stockfish
+      - name: Reconstruct JIT-fixed V13
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum -c -
+          rm -rf /tmp/v13 && mkdir -p /tmp/v13
+          unzip -q /tmp/v13.zip -d /tmp/v13
+          patch /tmp/v13/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          echo '276636ffa41a89cf21d3886d330f5158994ac01f534e4a718a15d41a588f4bf0  /tmp/v13/experiments/numba_search.py' | sha256sum -c -
+      - name: Compare V13 and Stockfish on Round57 positions
+        shell: bash
+        run: |
+          set -euo pipefail
+          STOCKFISH="$(command -v stockfish || true)"
+          if [ -z "$STOCKFISH" ]; then STOCKFISH=/usr/games/stockfish; fi
+          export STOCKFISH
+          timeout 90s python tools/v9_agent_runner.py /tmp/v13 <<'EOF' > /tmp/v13-targeted.jsonl
+          {"fen":"rn1q1rk1/pb1pbppp/1p2pn2/2p5/2PP4/5NP1/PP2PPBP/RNBQR1K1 w - - 0 8","time_left_ms":120000}
+          {"fen":"3r2k1/pq3ppp/1p2pn2/3rN3/P7/RP3PP1/1Q2R1KP/8 w - - 3 24","time_left_ms":120000}
+          {"fen":"3r2k1/pq3p1p/1p2p1p1/1P2R3/P6P/R1Q2PP1/3r2K1/8 w - - 1 31","time_left_ms":120000}
+          EOF
+          cat /tmp/v13-targeted.jsonl
+          python - <<'PY'
+          import chess, chess.engine, json, os
+          fens=[
+          'rn1q1rk1/pb1pbppp/1p2pn2/2p5/2PP4/5NP1/PP2PPBP/RNBQR1K1 w - - 0 8',
+          '3r2k1/pq3ppp/1p2pn2/3rN3/P7/RP3PP1/1Q2R1KP/8 w - - 3 24',
+          '3r2k1/pq3p1p/1p2p1p1/1P2R3/P6P/R1Q2PP1/3r2K1/8 w - - 1 31']
+          lines=[json.loads(x) for x in open('/tmp/v13-targeted.jsonl') if x.strip()]
+          moves=[x.get('move') for x in lines if 'move' in x]
+          eng=chess.engine.SimpleEngine.popen_uci(os.environ['STOCKFISH'])
+          eng.configure({'Threads':1,'Hash':256})
+          for i,(fen,mv) in enumerate(zip(fens,moves),1):
+              b=chess.Board(fen)
+              infos=eng.analyse(b,chess.engine.Limit(nodes=120000),multipv=3)
+              def cp(info): return info['score'].pov(b.turn).score(mate_score=100000)
+              best=infos[0]['pv'][0]
+              played=chess.Move.from_uci(mv)
+              pinfo=eng.analyse(b,chess.engine.Limit(nodes=120000),root_moves=[played])
+              print('CASE',i,'V13',mv,b.san(played),'SF',best.uci(),b.san(best),'best_cp',cp(infos[0]),'v13_cp',cp(pinfo),'loss',max(0,cp(infos[0])-cp(pinfo)))
+          eng.quit()
+          PY
