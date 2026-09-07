@@ -7,7 +7,7 @@
 use std::{
     env,
     fs::{File, OpenOptions},
-    io::{BufWriter, Write},
+    io::Write,
     sync::{
         Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
@@ -26,7 +26,11 @@ struct TraceState {
     group: String,
     stride: u64,
     seen: AtomicU64,
-    output: Mutex<BufWriter<File>>,
+    // Keep the raw file rather than a BufWriter: this state is static and Rust intentionally does
+    // not run static destructors at process exit. A buffered writer could therefore retain the
+    // final records forever in userspace. Trace builds are offline-only and already sample by
+    // stride, so one direct file write per retained record is the safer contract.
+    output: Mutex<File>,
 }
 
 pub(crate) fn observe(position: &Position) {
@@ -82,6 +86,6 @@ fn configure() -> Option<TraceState> {
         group,
         stride,
         seen: AtomicU64::new(0),
-        output: Mutex::new(BufWriter::new(file)),
+        output: Mutex::new(file),
     })
 }
