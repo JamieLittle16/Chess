@@ -54,15 +54,8 @@ struct Args {
 impl Args {
     fn parse() -> Result<Self, String> {
         let mut args = env::args().skip(1);
-        let format = DataFormat::parse(
-            &args
-                .next()
-                .ok_or_else(|| usage("missing data format"))?,
-        )?;
-        let data_path = PathBuf::from(
-            args.next()
-                .ok_or_else(|| usage("missing data path"))?,
-        );
+        let format = DataFormat::parse(&args.next().ok_or_else(|| usage("missing data format"))?)?;
+        let data_path = PathBuf::from(args.next().ok_or_else(|| usage("missing data path"))?);
         let output_dir = PathBuf::from(
             args.next()
                 .ok_or_else(|| usage("missing output directory"))?,
@@ -138,7 +131,10 @@ fn main() {
 fn run() -> Result<(), String> {
     let args = Args::parse()?;
     if !args.data_path.is_file() {
-        return Err(format!("training data does not exist: {}", args.data_path.display()));
+        return Err(format!(
+            "training data does not exist: {}",
+            args.data_path.display()
+        ));
     }
     std::fs::create_dir_all(&args.output_dir)
         .map_err(|error| format!("could not create output directory: {error}"))?;
@@ -212,12 +208,8 @@ fn run() -> Result<(), String> {
         DataFormat::Viri => {
             use loader::viribinpack::{Filter, ViriBinpackLoader, ViriFilter};
             let filter = ViriFilter::Builtin(Filter::default());
-            let loader = ViriBinpackLoader::new(
-                data_path,
-                args.buffer_size_mb,
-                args.loader_threads,
-                filter,
-            );
+            let loader =
+                ViriBinpackLoader::new(data_path, args.buffer_size_mb, args.loader_threads, filter);
             trainer.run(&schedule, &settings, &loader);
         }
         DataFormat::Stockfish => {
@@ -231,12 +223,8 @@ fn run() -> Result<(), String> {
                     && entry.pos.piece_at(entry.mv.to()).piece_type() == PieceType::None
             }
 
-            let loader = SfBinpackLoader::new(
-                data_path,
-                args.buffer_size_mb,
-                args.loader_threads,
-                filter,
-            );
+            let loader =
+                SfBinpackLoader::new(data_path, args.buffer_size_mb, args.loader_threads, filter);
             trainer.run(&schedule, &settings, &loader);
         }
         DataFormat::Bullet => {
