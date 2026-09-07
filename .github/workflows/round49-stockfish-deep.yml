@@ -1,0 +1,61 @@
+name: Round49 Stockfish Deep
+
+on:
+  push:
+    branches:
+      - analysis/round49-stockfish
+
+permissions:
+  contents: read
+
+jobs:
+  deep:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y stockfish
+      - name: Deep critical positions
+        run: |
+          python3 - <<'PY'
+          import os,re,subprocess
+          eng='/usr/games/stockfish' if os.path.exists('/usr/games/stockfish') else 'stockfish'
+          cases=[
+            ('9...c6','c7c6','r1bqk2r/1pp1nppp/1b1p1n2/pP2p3/P1B1P3/2PP1N2/5PPP/RNBQ1RK1 b - - 0 1'),
+            ('15...Ng4','f6g4','r2qk2r/1p2nppp/1b2bn2/pP1p4/P7/BBN2N2/5PPP/R2QR1K1 b - - 0 1'),
+            ('16...Qc7','d8c7','r2qk2r/1p2nppp/1b2b3/pP1p4/P5n1/BBN2N2/4RPPP/R2Q2K1 b - - 0 1'),
+            ('28...Ka7','b8a7','1k1r1n1r/1p4R1/1q2p3/pP1p2Qp/P7/BBN5/6PP/7K b - - 0 1'),
+            ('30...Rc7','c8c7','2r2n1r/kp4R1/1q1Np3/pP1p2Qp/P7/BB6/6PP/7K b - - 0 1'),
+            ('38...Nxe6','f8e6','5n1r/1k6/1p2N3/p2p4/P6p/B3Q3/4B1PP/7K b - - 0 1'),
+          ]
+          p=subprocess.Popen([eng],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1)
+          def c(x): p.stdin.write(x+'\n');p.stdin.flush()
+          def wait(x):
+            while p.stdout.readline().strip()!=x: pass
+          c('uci');wait('uciok');c('setoption name Threads value 1');c('setoption name Hash value 128');c('isready');wait('readyok')
+          sr=re.compile(r' score (cp|mate) (-?\d+)')
+          def run(fen,only=None,nodes=1000000):
+            c('setoption name Clear Hash')
+            c('position fen '+fen)
+            g=f'go nodes {nodes}' + ((' searchmoves '+only) if only else '')
+            c(g); last=None;best=None;pv=''
+            while True:
+              line=p.stdout.readline().strip()
+              if line.startswith('info ') and ' score ' in line:
+                m=sr.search(line)
+                if m:
+                  last=(m.group(1),int(m.group(2)))
+                  q=re.search(r' pv (.+)$',line)
+                  if q: pv=q.group(1)
+              elif line.startswith('bestmove '): best=line.split()[1];break
+            return last,best,pv
+          for label,move,fen in cases:
+            a,b,pv=run(fen)
+            ap,bp,pvp=run(fen,move)
+            print('CASE',label,'played',move)
+            print(' BEST ',a,b,pv)
+            print(' PLAY ',ap,bp,pvp)
+          c('quit')
+          PY
