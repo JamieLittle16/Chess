@@ -1,0 +1,143 @@
+name: M5 current-production Stockfish error mine
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  mine:
+    if: github.head_ref == 'm5/current-production-error-mine'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install pinned analysis dependencies
+        run: python -m pip install --disable-pip-version-check -r tools/requirements-analysis.txt
+
+      - name: Download immutable accepted production-game evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: m4-static-legality-v1-acceptance-1f44bb9d867c5c8166e1590324c41b66a44ea924
+          path: accepted-games
+          repository: JamieLittle16/Chess
+          run-id: '34136520700'
+          github-token: ${{ github.token }}
+
+      - name: Verify exact accepted PGN
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f accepted-games/games.pgn
+          echo '429c8c40f79782de1355ffa14c3c6a07d440b348fb4e0937af76150781e3df8e  accepted-games/games.pgn' | sha256sum --check --strict
+          grep -Fq 'Chess-M4-static-legality-v1-accept@1f44bb9d867c' accepted-games/games.pgn
+
+      - name: Fetch immutable Stockfish 19 release
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .diagnostic/stockfish
+          curl --fail --location --retry 3 \
+            --output .diagnostic/stockfish.tar.gz \
+            https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+          tar -xf .diagnostic/stockfish.tar.gz -C .diagnostic/stockfish
+          STOCKFISH=$(find "$PWD/.diagnostic/stockfish" -type f -name 'stockfish*' -perm -111 -print -quit)
+          test -n "$STOCKFISH"
+          echo "STOCKFISH=$STOCKFISH" >> "$GITHUB_ENV"
+          "$STOCKFISH" bench 1 1 10 default depth >/dev/null
+          sha256sum .diagnostic/stockfish.tar.gz "$STOCKFISH" | tee .diagnostic/stockfish.sha256
+          printf 'quit\n' | "$STOCKFISH" | head -n 1 | tee .diagnostic/stockfish-id.txt
+
+      - name: Mine broad middlegame decision distribution
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/stockfish_error_mining.py \
+            --pgn accepted-games/games.pgn \
+            --engine-name 'Chess-M4-static-legality-v1-accept@1f44bb9d867c' \
+            --stockfish "$STOCKFISH" \
+            --nodes 20000 \
+            --threads 1 \
+            --hash-mb 32 \
+            --min-ply 15 \
+            --max-ply 60 \
+            --output-dir .diagnostic/error-mine \
+            | tee .diagnostic/error-mine.stdout.txt
+
+      - name: Rank actionable error clusters
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from collections import Counter, defaultdict
+          from pathlib import Path
+
+          rows = [json.loads(line) for line in Path('.diagnostic/error-mine/positions.jsonl').read_text().splitlines() if line]
+          severe = [r for r in rows if r['cp_loss'] >= 80]
+          blunders = [r for r in rows if r['cp_loss'] >= 150]
+
+          def cluster(items, fields):
+              counts = Counter(tuple(r[f] for f in fields) for r in items)
+              loss = defaultdict(int)
+              exp = defaultdict(float)
+              for r in items:
+                  key = tuple(r[f] for f in fields)
+                  loss[key] += r['cp_loss']
+                  exp[key] += r['expectation_loss']
+              out = []
+              for key, count in counts.most_common():
+                  out.append({
+                      **{field: value for field, value in zip(fields, key)},
+                      'count': count,
+                      'mean_cp_loss': round(loss[key] / count, 2),
+                      'mean_expectation_loss': round(exp[key] / count, 6),
+                  })
+              return out
+
+          top = sorted(rows, key=lambda r: (r['expectation_loss'], r['cp_loss']), reverse=True)[:100]
+          summary = {
+              'positions': len(rows),
+              'severe_cp_ge_80': len(severe),
+              'blunders_cp_ge_150': len(blunders),
+              'severe_by_phase_and_move_transition': cluster(severe, ['phase', 'played_kind', 'best_kind']),
+              'severe_by_forcing_transition': cluster(severe, ['played_is_forcing', 'best_is_forcing']),
+              'blunders_by_phase_and_move_transition': cluster(blunders, ['phase', 'played_kind', 'best_kind']),
+              'top_100': top,
+          }
+          Path('.diagnostic/actionable-summary.json').write_text(json.dumps(summary, indent=2, sort_keys=True) + '\n')
+          print(json.dumps({k: v for k, v in summary.items() if k != 'top_100'}, indent=2, sort_keys=True))
+          PY
+
+      - name: Record diagnostic identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > .diagnostic/README.txt <<EOF
+          source=accepted mutation-free legality filtering v1 200-game qualification
+          source_run=34136520700
+          source_artifact=10024462155
+          source_pgn_sha256=429c8c40f79782de1355ffa14c3c6a07d440b348fb4e0937af76150781e3df8e
+          target_engine=Chess-M4-static-legality-v1-accept@1f44bb9d867c
+          stockfish_release=sf_19
+          teacher_nodes_per_search=20000
+          threads=1
+          hash_mb=32
+          ply_window=15..60
+          EOF
+
+      - name: Upload immutable diagnostic evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: m5-current-production-error-mine-${{ github.sha }}
+          path: .diagnostic/
+          retention-days: 30
