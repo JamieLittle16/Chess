@@ -43,8 +43,8 @@ jobs:
           if block.count(old_call) != 1:
               raise SystemExit('expected exactly one learned eval call inside RFP block')
           block = block.replace(old_call, 'Some(evaluate_classical(position))', 1)
-          text = text.replace(old_import, new_import, 1)
           text = text[:start] + block + text[end:]
+          text = text.replace(old_import, new_import, 1)
           if text.count('Some(evaluate_classical(position))') != 1:
               raise SystemExit('pruning patch did not produce exactly one classical site')
           path.write_text(text, encoding='utf-8')
