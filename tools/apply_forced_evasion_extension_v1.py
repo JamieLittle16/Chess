@@ -153,34 +153,40 @@ text = replace_once(
     "reuse extension-aware full depth",
 )
 
-# Four recursive negamax calls in the later-move PVS/LMR path all inherit the child's remaining
-# extension budget. Insert the argument immediately after path_len + 1.
-needle = '''                    ply + 1,
+text = replace_once(
+    text,
+    '''                    ply + 1,
                     path_len + 1,
-                    control,'''
-replacement = '''                    ply + 1,
+                    control,''',
+    '''                    ply + 1,
                     path_len + 1,
                     child_extension_budget,
-                    control,'''
-count = text.count(needle)
-if count != 2:
-    raise SystemExit(f"later recursive calls: expected 2 matches, found {count}")
-text = text.replace(needle, replacement)
-
-needle = '''                            ply + 1,
+                    control,''',
+    "reduced scout call",
+)
+text = replace_once(
+    text,
+    '''                        ply + 1,
+                        path_len + 1,
+                        control,''',
+    '''                        ply + 1,
+                        path_len + 1,
+                        child_extension_budget,
+                        control,''',
+    "full-depth scout verification call",
+)
+text = replace_once(
+    text,
+    '''                            ply + 1,
                             path_len + 1,
-                            control,'''
-replacement = '''                            ply + 1,
+                            control,''',
+    '''                            ply + 1,
                             path_len + 1,
                             child_extension_budget,
-                            control,'''
-count = text.count(needle)
-if count != 1:
-    raise SystemExit(f"PVS verification call: expected 1 match, found {count}")
-text = text.replace(needle, replacement)
+                            control,''',
+    "PVS verification call",
+)
 
-# Add the tiny pure policy helper near LMR helpers so its behavior is unit-testable without relying
-# on a fragile tactical FEN.
 marker = '''fn lmr_v3_reduction(depth: u8, move_index: usize) -> u8 {'''
 helper = '''fn forced_evasion_child_depth(
     depth: u8,
@@ -200,7 +206,6 @@ helper = '''fn forced_evasion_child_depth(
 fn lmr_v3_reduction(depth: u8, move_index: usize) -> u8 {'''
 text = replace_once(text, marker, helper, "forced evasion helper")
 
-# Add focused policy regression.
 marker = '''    #[test]
     fn late_quiet_futility_only_prunes_safe_shallow_scout_candidates() {'''
 regression = '''    #[test]
@@ -217,7 +222,6 @@ text = replace_once(text, marker, regression, "forced evasion regression")
 
 path.write_text(text)
 
-# Off-hot-path root analysis calls the same negamax and gets the same one-extension-per-line budget.
 path = Path("crates/chess-search/src/root_analysis.rs")
 text = path.read_text()
 text = replace_once(
