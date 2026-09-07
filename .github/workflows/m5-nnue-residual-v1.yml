@@ -1,0 +1,138 @@
+name: M5 NNUE residual v1
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  residual:
+    if: github.head_ref == 'm5/nnue-search-ab-v1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - name: Install pinned analysis dependency
+        run: python -m pip install --disable-pip-version-check -r tools/requirements-analysis.txt
+      - name: Download immutable NNUE-4 teacher corpus
+        uses: actions/download-artifact@v4
+        with:
+          name: m5-nnue-teacher-v1-fffd0054018bdce2a8b912bc8481465bdcb26ed6
+          path: frozen/teacher
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34146954019
+      - name: Compute exact accepted classical score for every frozen record
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          with Path('frozen/teacher/teacher.jsonl').open(encoding='utf-8') as inp, Path('frozen/fens.txt').open('w', encoding='utf-8') as out:
+              for line in inp:
+                  if line.strip():
+                      out.write(json.loads(line)['fen'] + '\n')
+          PY
+          cargo run --release --quiet -p chess-eval --example classical_eval_batch \
+            < frozen/fens.txt > frozen/classical.txt
+          test "$(wc -l < frozen/fens.txt)" -eq "$(wc -l < frozen/classical.txt)"
+      - name: Build residual teacher without changing frozen split identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          source = Path('frozen/teacher/teacher.jsonl')
+          classical_scores = [int(line) for line in Path('frozen/classical.txt').read_text().splitlines()]
+          records = [json.loads(line) for line in source.open(encoding='utf-8') if line.strip()]
+          if len(records) != len(classical_scores):
+              raise SystemExit('classical score count does not match teacher records')
+
+          usable = 0
+          output = Path('frozen/residual-teacher.jsonl')
+          with output.open('w', encoding='utf-8') as out:
+              for record, classical in zip(records, classical_scores, strict=True):
+                  cp = record.get('teacher_cp')
+                  record['classical_cp'] = classical
+                  if cp is not None:
+                      absolute_target = max(-1800, min(1800, int(cp)))
+                      record['stockfish_target_cp'] = absolute_target
+                      record['teacher_cp'] = absolute_target - classical
+                      usable += 1
+                  out.write(json.dumps(record, sort_keys=True) + '\n')
+
+          manifest = {
+              'schema_version': 1,
+              'target_mode': 'clipped_stockfish_cp_minus_exact_rust_classical',
+              'source_teacher_sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
+              'residual_teacher_sha256': hashlib.sha256(output.read_bytes()).hexdigest(),
+              'records': len(records),
+              'usable_non_mate_records': usable,
+              'absolute_target_clip_cp': 1800,
+          }
+          Path('frozen/residual-manifest.json').write_text(
+              json.dumps(manifest, indent=2, sort_keys=True) + '\n', encoding='utf-8'
+          )
+          print(json.dumps(manifest, indent=2, sort_keys=True))
+          PY
+      - name: Train width-32 residual with validation-selected checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/train_nnue_residual_reference.py \
+            --teacher frozen/residual-teacher.jsonl \
+            --teacher-id 'm5-accepted-games-plus-uho-roots-v1/residual-classical-v1' \
+            --output-dir frozen/residual-32 \
+            --hidden 32 \
+            --epochs 24 \
+            --learning-rate 0.0001 \
+            --seed 20260907 \
+            --target-clip-cp 2000
+          cat frozen/residual-32/training-metadata.json
+      - name: Compare quantized residual correction against untouched classical control
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          with Path('frozen/teacher/teacher.jsonl').open(encoding='utf-8') as inp, Path('frozen/eval.tsv').open('w', encoding='utf-8') as out:
+              for line in inp:
+                  if not line.strip():
+                      continue
+                  record = json.loads(line)
+                  cp = record.get('teacher_cp')
+                  if cp is None:
+                      continue
+                  target = max(-1800, min(1800, int(cp)))
+                  out.write(f"{record['split']}\t{target}\t{record['fen']}\n")
+          PY
+          cargo run --release --quiet -p chess-eval --example nnue_residual_compare -- \
+            frozen/residual-32/nnue-residual-32-v1.nnue frozen/eval.tsv \
+            | tee frozen/residual-compare.json
+      - name: Upload residual evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: m5-nnue-residual-v1-${{ github.sha }}
+          path: |
+            frozen/residual-manifest.json
+            frozen/residual-32/
+            frozen/residual-compare.json
+          retention-days: 30
