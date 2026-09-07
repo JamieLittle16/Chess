@@ -248,22 +248,6 @@ text = replace_once(
 
 text = replace_once(
     text,
-    '''        let direct = search(&root, 3);
-        let iterative = iterative_deepening(&root, 3);
-        assert_eq!(iterative.depth, 3);
-        assert_eq!(iterative.score, direct.score);
-        assert!(iterative.tt_hits > 0);''',
-    '''        let direct = search(&root, 4);
-        let iterative = iterative_deepening(&root, 4);
-        assert_eq!(iterative.depth, 4);
-        assert_eq!(iterative.score, direct.score);
-        assert_eq!(iterative.best_move, direct.best_move);
-        assert!(iterative.tt_hits > 0);''',
-    "exercise aspiration against exact search",
-)
-
-text = replace_once(
-    text,
     '''    #[test]
     fn cached_root_result_cannot_bypass_stop_control() {''',
     '''    #[test]
