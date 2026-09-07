@@ -1,0 +1,118 @@
+name: V13 alternative residual screen
+
+on:
+  push:
+    branches:
+      - analysis/v13-alternative-model-screen-20260907
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  arena:
+    name: ${{ matrix.model }}-${{ matrix.label }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - model: diverse
+            label: uho40
+            start: 40
+            seed: 97000
+            run_id: 34158845488
+            artifact: v13-diverse-residual-v2-b8306a4473fd1d6b1062cc85ce05e02f58226fa0
+            bias: 47
+            clamp: 0
+            weight_sha: 1a2811b625640a1fce59422d55391cb54a4a69dff213b915d6e21055a55862fe
+          - model: diverse
+            label: uho60
+            start: 60
+            seed: 98000
+            run_id: 34158845488
+            artifact: v13-diverse-residual-v2-b8306a4473fd1d6b1062cc85ce05e02f58226fa0
+            bias: 47
+            clamp: 0
+            weight_sha: 1a2811b625640a1fce59422d55391cb54a4a69dff213b915d6e21055a55862fe
+          - model: static
+            label: uho40
+            start: 40
+            seed: 99000
+            run_id: 34159146417
+            artifact: v13-static-teacher-residual-5e0243e7b78e088675fcf2177175d21d31f9be4d
+            bias: 26
+            clamp: 400
+            weight_sha: 00a534b061e276a205b943e5ed932244d7017dff71cc2ca9001f4515216e0a8b
+          - model: static
+            label: uho60
+            start: 60
+            seed: 100000
+            run_id: 34159146417
+            artifact: v13-static-teacher-residual-5e0243e7b78e088675fcf2177175d21d31f9be4d
+            bias: 26
+            clamp: 400
+            weight_sha: 00a534b061e276a205b943e5ed932244d7017dff71cc2ca9001f4515216e0a8b
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install exact competition dependencies
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Download immutable trained model artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: /tmp/model
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: ${{ matrix.run_id }}
+
+      - name: Reconstruct engines and install candidate weights
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash .analysis/reconstruct_v13_jit.sh /tmp/candidate
+          bash .analysis/reconstruct_v12.sh /tmp/v12
+          echo '${{ matrix.weight_sha }}  /tmp/model/weights.i16' | sha256sum -c -
+          cp /tmp/model/weights.i16 /tmp/candidate/experiments/v13_residual.i16
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('/tmp/candidate/experiments/numba_search.py')
+          s = p.read_text()
+          assert 'RESIDUAL_BIAS = 61' in s
+          assert 'RESIDUAL_CLAMP = 600' in s
+          s = s.replace('RESIDUAL_BIAS = 61', 'RESIDUAL_BIAS = ${{ matrix.bias }}', 1)
+          s = s.replace('RESIDUAL_CLAMP = 600', 'RESIDUAL_CLAMP = ${{ matrix.clamp }}', 1)
+          p.write_text(s)
+          PY
+          echo 'candidate model=${{ matrix.model }} bias=${{ matrix.bias }} clamp=${{ matrix.clamp }}'
+          sha256sum /tmp/candidate/experiments/numba_search.py /tmp/candidate/experiments/v13_residual.i16
+          python -m py_compile /tmp/candidate/agent.py /tmp/candidate/experiments/*.py /tmp/v12/agent.py /tmp/v12/experiments/*.py
+
+      - name: Run paired fixed-node arena versus canonical V12
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p arena-results
+          /usr/bin/time -f 'ARENA_WALL_SEC=%e MAX_RSS_KB=%M' \
+            python -u .analysis/v13_v12_arena.py \
+              /tmp/candidate /tmp/v12 20000 20 '${{ matrix.seed }}' 220 \
+              match/openings/m3-uho-lichess-100-v1.epd '${{ matrix.start }}' \
+              | tee arena-results/${{ matrix.model }}-${{ matrix.label }}.log
+          grep '^FINAL ' arena-results/${{ matrix.model }}-${{ matrix.label }}.log
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v13-model-screen-${{ matrix.model }}-${{ matrix.label }}
+          path: arena-results/
+          if-no-files-found: error
+          retention-days: 7
