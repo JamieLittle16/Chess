@@ -26,6 +26,16 @@ jobs:
         run: |
           set -euo pipefail
           python3 tools/apply_aspiration_v1_over_lmr.py
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("crates/chess-search/src/lib.rs")
+          text = path.read_text()
+          old = "        let mut searcher = Searcher::default();\n        searcher.nodes = 1;"
+          new = "        let mut searcher = Searcher { nodes: 1, ..Searcher::default() };"
+          if text.count(old) != 1:
+              raise SystemExit("aspiration test-style fix: expected exactly one match")
+          path.write_text(text.replace(old, new, 1))
+          PY
           cargo fmt --all
           git diff --check
           test -n "$(git diff -- crates/chess-search/src/lib.rs)"
