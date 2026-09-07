@@ -220,10 +220,7 @@ mod tests {
         let history = HistoryTables::default();
         let mut picker = MovePicker::new(&mut moves, None, [Some(killer), None]);
 
-        assert_eq!(
-            picker.next(&position, &history, Color::White),
-            Some(killer)
-        );
+        assert_eq!(picker.next(&position, &history, Color::White), Some(killer));
     }
 
     #[test]
