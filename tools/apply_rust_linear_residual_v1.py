@@ -71,7 +71,7 @@ use crate::nnue::{{FEATURE_COUNT, active_features}};
 const BIAS_CP: i32 = {bias};
 const CLAMP_CP: i32 = {CLAMP_CP};
 const DENOMINATOR: i32 = {DENOMINATOR};
-const WEIGHTS: [i16; FEATURE_COUNT] = [
+static WEIGHTS: [i16; FEATURE_COUNT] = [
 {rust_array(blend)}
 ];
 
