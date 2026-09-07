@@ -1,0 +1,153 @@
+name: V13 null move confirmation
+
+on:
+  push:
+    branches:
+      - analysis/v13-nullmove-confirm-20260907
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_TOOLCHAIN: 1.98.1
+
+jobs:
+  fixed-node:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Reconstruct quarter baseline and R2 phase8 null candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum -c -
+          rm -rf /tmp/base /tmp/cand
+          mkdir /tmp/base
+          unzip -q /tmp/v13.zip -d /tmp/base
+          patch /tmp/base/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/base/experiments/numba_search.py'); s=p.read_text()
+          old='    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          new='    correction = correction // 4\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          assert s.count(old)==1,s.count(old)
+          p.write_text(s.replace(old,new,1))
+          PY
+          cp -a /tmp/base /tmp/cand
+          python scripts/patch_v13_nullmove.py /tmp/cand/experiments/numba_search.py --reduction 2 --min-phase 8
+          python -m py_compile /tmp/base/agent.py /tmp/base/experiments/*.py /tmp/cand/agent.py /tmp/cand/experiments/*.py
+      - name: 40k-node confirmation on new slice
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          /usr/bin/time -f 'ARENA_WALL_SEC=%e MAX_RSS_KB=%M' \
+            python -u .v13/v13_arena.py /tmp/cand /tmp/base 40000 20 99501 220 \
+              match/openings/m3-uho-lichess-100-v1.epd 0 \
+            | tee results/fixed-node.log
+          grep '^FINAL ' results/fixed-node.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v13-nullmove-confirm-fixed-${{ github.sha }}
+          path: results/fixed-node.log
+          retention-days: 14
+
+  rust-screen:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: 169fb5d424d90ebc45577ecaabe2a8fa0b4c1c10
+          path: rust-ref
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install runtime and Stockfish
+        run: |
+          python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+          sudo apt-get update -qq
+          sudo apt-get install -y stockfish
+      - name: Reconstruct quarter + null candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum -c -
+          rm -rf /tmp/v13 && mkdir /tmp/v13
+          unzip -q /tmp/v13.zip -d /tmp/v13
+          patch /tmp/v13/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/v13/experiments/numba_search.py'); s=p.read_text()
+          old='    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          new='    correction = correction // 4\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          assert s.count(old)==1,s.count(old)
+          p.write_text(s.replace(old,new,1))
+          PY
+          python scripts/patch_v13_nullmove.py /tmp/v13/experiments/numba_search.py --reduction 2 --min-phase 8
+          python -m py_compile /tmp/v13/agent.py /tmp/v13/experiments/*.py
+      - name: Build pinned Rust opponent
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd rust-ref
+          test "$(git rev-parse HEAD)" = '169fb5d424d90ebc45577ecaabe2a8fa0b4c1c10'
+          RUSTUP_TOOLCHAIN=1.98.1 cargo build --release -p chess-uci
+      - name: Hard init smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/bin/time -f 'init_wall_s=%e maxrss_kb=%M' -o /tmp/init.txt timeout 90s python tools/v9_agent_runner.py /tmp/v13 <<'EOF' >/tmp/smoke.json
+          {"fen":"r2q1rk1/1bp1bppp/p2p1n2/np2p3/4P3/1BNP1N1P/PPP2PP1/R1BQR1K1 w - - 1 11","time_left_ms":120000}
+          EOF
+          cat /tmp/init.txt /tmp/smoke.json
+          grep -q '"ready": true' /tmp/smoke.json
+          grep -q '"move":' /tmp/smoke.json
+      - name: Pinned Rust screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          STOCKFISH="$(command -v stockfish || true)"; [ -n "$STOCKFISH" ] || STOCKFISH=/usr/games/stockfish
+          OUT=analysis-results/null-r2p8; mkdir -p "$OUT"
+          python tools/v9_rust_diagnostic.py \
+            --agent /tmp/v13 --runner tools/v9_agent_runner.py \
+            --engine rust-ref/target/release/chess-uci --stockfish "$STOCKFISH" \
+            --openings match/openings/m3-uho-lichess-100-v1.epd \
+            --opening-start 88 --opening-count 6 --base-ms 2500 --increment-ms 50 \
+            --analysis-nodes 10000 --out-dir "$OUT" | tee "$OUT/run.log"
+          cp /tmp/init.txt "$OUT/init.txt"
+      - name: Validate, package, expose
+        id: result
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json,os
+          d=json.load(open('analysis-results/null-r2p8/summary.json')); m=d['match']; sf=d['stockfish']['V9']
+          bad={'candidate_crash','candidate_flag','candidate_illegal','candidate_init','rust_crash','rust_flag','rust_illegal','rust_init'}
+          failures={k:v for k,v in m['terminations'].items() if k in bad and v}; assert not failures,failures
+          vals={'w':m['wins'],'d':m['draws'],'l':m['losses'],'s':round(m['score']*1000),'ml':round(sf['mean_loss_cp'] or 0),'b':sf['blunders_200']}
+          with open(os.environ['GITHUB_OUTPUT'],'a') as h:
+            for k,v in vals.items(): h.write(f'{k}={v}\n')
+          print(vals)
+          PY
+          (cd /tmp/v13 && zip -qr "$GITHUB_WORKSPACE/analysis-results/null-r2p8/Little-Gambit-V13-quarter-null-r2p8.zip" .)
+          sha256sum analysis-results/null-r2p8/Little-Gambit-V13-quarter-null-r2p8.zip > analysis-results/null-r2p8/CANDIDATE_SHA256.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v13-nullmove-confirm-rust-W${{ steps.result.outputs.w }}D${{ steps.result.outputs.d }}L${{ steps.result.outputs.l }}-S${{ steps.result.outputs.s }}-ML${{ steps.result.outputs.ml }}-B${{ steps.result.outputs.b }}-${{ github.sha }}
+          path: analysis-results/null-r2p8
+          retention-days: 14
