@@ -1,0 +1,339 @@
+name: V13 best residual ladder
+
+on:
+  push:
+    branches:
+      - analysis/v13-best-residual-ladder-20260907
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  screen:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: old
+            mode: old
+            static_bp: 0
+            alpha_bp: 0
+            diverse_bp: 0
+            clamp: 600
+          - name: static
+            mode: blend
+            static_bp: 10000
+            alpha_bp: 0
+            diverse_bp: 0
+            clamp: 400
+          - name: alpha300
+            mode: blend
+            static_bp: 0
+            alpha_bp: 10000
+            diverse_bp: 0
+            clamp: 0
+          - name: diverse
+            mode: blend
+            static_bp: 0
+            alpha_bp: 0
+            diverse_bp: 10000
+            clamp: 0
+          - name: static85-alpha15
+            mode: blend
+            static_bp: 8500
+            alpha_bp: 1500
+            diverse_bp: 0
+            clamp: 400
+          - name: static70-alpha30
+            mode: blend
+            static_bp: 7000
+            alpha_bp: 3000
+            diverse_bp: 0
+            clamp: 400
+          - name: static85-diverse15
+            mode: blend
+            static_bp: 8500
+            alpha_bp: 0
+            diverse_bp: 1500
+            clamp: 400
+          - name: static70-alpha15-diverse15
+            mode: blend
+            static_bp: 7000
+            alpha_bp: 1500
+            diverse_bp: 1500
+            clamp: 400
+          - name: static70-alpha15-diverse15-c600
+            mode: blend
+            static_bp: 7000
+            alpha_bp: 1500
+            diverse_bp: 1500
+            clamp: 600
+    steps:
+      - name: Check out V13 research branch
+        uses: actions/checkout@v4
+
+      - name: Check out exact production Rust reference
+        uses: actions/checkout@v4
+        with:
+          ref: 169fb5d424d90ebc45577ecaabe2a8fa0b4c1c10
+          path: rust-ref
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install exact Python runtime and Stockfish
+        run: |
+          python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+          sudo apt-get update -qq
+          sudo apt-get install -y stockfish
+
+      - name: Reconstruct exact V13 and apply proven JIT refactor
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum -c -
+          rm -rf /tmp/v13 && mkdir /tmp/v13
+          unzip -q /tmp/v13.zip -d /tmp/v13
+          patch /tmp/v13/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          python -m py_compile /tmp/v13/agent.py /tmp/v13/experiments/numba_core.py /tmp/v13/experiments/numba_search.py
+
+      - name: Download static residual
+        if: matrix.mode == 'blend'
+        uses: actions/download-artifact@v4
+        with:
+          name: v13-static-teacher-residual-5e0243e7b78e088675fcf2177175d21d31f9be4d
+          path: /tmp/models/static
+          repository: JamieLittle16/Chess
+          run-id: 34159146417
+          github-token: ${{ github.token }}
+
+      - name: Download diversity-first residual
+        if: matrix.mode == 'blend'
+        uses: actions/download-artifact@v4
+        with:
+          name: v13-diverse-residual-v2-b8306a4473fd1d6b1062cc85ce05e02f58226fa0
+          path: /tmp/models/diverse
+          repository: JamieLittle16/Chess
+          run-id: 34158845488
+          github-token: ${{ github.token }}
+
+      - name: Download alpha300 residual
+        if: matrix.mode == 'blend'
+        uses: actions/download-artifact@v4
+        with:
+          name: v13-alpha300-residual-b951334a9d57f7288a833dfd522ee4660c1f0b8f
+          path: /tmp/models/alpha300
+          repository: JamieLittle16/Chess
+          run-id: 34158910686
+          github-token: ${{ github.token }}
+
+      - name: Build selected zero-cost residual
+        if: matrix.mode == 'blend'
+        shell: bash
+        env:
+          STATIC_BP: ${{ matrix.static_bp }}
+          ALPHA_BP: ${{ matrix.alpha_bp }}
+          DIVERSE_BP: ${{ matrix.diverse_bp }}
+          CLAMP_CP: ${{ matrix.clamp }}
+          MODEL_NAME: ${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+          import hashlib
+          import json
+          import os
+          import re
+          from pathlib import Path
+          import numpy as np
+
+          roots = {
+              'static': Path('/tmp/models/static'),
+              'alpha300': Path('/tmp/models/alpha300'),
+              'diverse': Path('/tmp/models/diverse'),
+          }
+          coeff = {
+              'static': int(os.environ['STATIC_BP']),
+              'alpha300': int(os.environ['ALPHA_BP']),
+              'diverse': int(os.environ['DIVERSE_BP']),
+          }
+          if sum(coeff.values()) != 10_000:
+              raise SystemExit(f'blend coefficients must sum to 10000, got {coeff}')
+
+          weights = {}
+          metadata = {}
+          for name, root in roots.items():
+              model_path = root / 'model.json'
+              weights_path = root / 'weights.i16'
+              metadata[name] = json.loads(model_path.read_text())
+              arr = np.fromfile(weights_path, dtype='<i2').astype(np.int64)
+              if arr.shape != (24_576,):
+                  raise SystemExit(f'{name}: unexpected weight shape {arr.shape}')
+              weights[name] = arr
+
+          numerator = sum(coeff[name] * weights[name] for name in roots)
+          blended = np.rint(numerator / 10_000.0)
+          blended = np.clip(blended, -32768, 32767).astype('<i2')
+          bias_num = sum(coeff[name] * int(metadata[name]['bias_cp']) for name in roots)
+          bias = int(round(bias_num / 10_000.0))
+          clamp = int(os.environ['CLAMP_CP'])
+
+          out = Path('/tmp/v13/experiments/v13_residual.i16')
+          blended.tofile(out)
+          source = Path('/tmp/v13/experiments/numba_search.py')
+          text = source.read_text()
+          text, n1 = re.subn(r'RESIDUAL_BIAS\s*=\s*-?\d+', f'RESIDUAL_BIAS = {bias}', text, count=1)
+          text, n2 = re.subn(r'RESIDUAL_CLAMP\s*=\s*-?\d+', f'RESIDUAL_CLAMP = {clamp}', text, count=1)
+          if (n1, n2) != (1, 1):
+              raise SystemExit(f'constant replacement failed: bias={n1} clamp={n2}')
+          source.write_text(text)
+
+          provenance = {
+              'schema_version': 1,
+              'name': os.environ['MODEL_NAME'],
+              'feature_set_id': 'king-piece-v1-antisymmetric-v12-residual',
+              'coefficients_basis_points': coeff,
+              'bias_cp': bias,
+              'clamp_cp': clamp,
+              'weights_sha256': hashlib.sha256(out.read_bytes()).hexdigest(),
+              'source_models': {
+                  name: {
+                      'bias_cp': int(metadata[name]['bias_cp']),
+                      'clamp_cp': int(metadata[name]['clamp_cp']),
+                      'selected_alpha': metadata[name].get('selected_alpha'),
+                      'weights_sha256': hashlib.sha256((roots[name] / 'weights.i16').read_bytes()).hexdigest(),
+                  }
+                  for name in roots
+              },
+          }
+          Path('/tmp/v13-model-provenance.json').write_text(json.dumps(provenance, indent=2, sort_keys=True) + '\n')
+          print(json.dumps(provenance, indent=2, sort_keys=True))
+          PY
+          python -m py_compile /tmp/v13/experiments/numba_search.py
+          sha256sum /tmp/v13/experiments/v13_residual.i16 /tmp/v13/experiments/numba_search.py
+
+      - name: Record embedded control provenance
+        if: matrix.mode == 'old'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, json, re
+          from pathlib import Path
+          p = Path('/tmp/v13/experiments/numba_search.py')
+          s = p.read_text()
+          bias = int(re.search(r'RESIDUAL_BIAS\s*=\s*(-?\d+)', s).group(1))
+          clamp = int(re.search(r'RESIDUAL_CLAMP\s*=\s*(-?\d+)', s).group(1))
+          w = Path('/tmp/v13/experiments/v13_residual.i16')
+          data = {
+              'schema_version': 1,
+              'name': 'old',
+              'kind': 'embedded-v13-control',
+              'bias_cp': bias,
+              'clamp_cp': clamp,
+              'weights_sha256': hashlib.sha256(w.read_bytes()).hexdigest(),
+          }
+          Path('/tmp/v13-model-provenance.json').write_text(json.dumps(data, indent=2, sort_keys=True) + '\n')
+          print(json.dumps(data, indent=2, sort_keys=True))
+          PY
+
+      - name: Build exact pinned Rust opponent
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd rust-ref
+          test "$(git rev-parse HEAD)" = '169fb5d424d90ebc45577ecaabe2a8fa0b4c1c10'
+          cargo build --release -p chess-uci
+          ./target/release/chess-uci bench 2>/dev/null || true
+
+      - name: Hard competition-init smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/bin/time -f 'init_wall_s=%e maxrss_kb=%M' -o /tmp/init.txt \
+            timeout 90s python tools/v9_agent_runner.py /tmp/v13 <<'EOF' >/tmp/smoke.json
+          {"fen":"r2q1rk1/1bp1bppp/p2p1n2/np2p3/4P3/1BNP1N1P/PPP2PP1/R1BQR1K1 w - - 1 11","time_left_ms":120000}
+          EOF
+          cat /tmp/init.txt
+          cat /tmp/smoke.json
+          grep -q '"ready": true' /tmp/smoke.json
+          grep -q '"move":' /tmp/smoke.json
+
+      - name: Paired screen vs pinned Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          STOCKFISH="$(command -v stockfish || true)"; [ -n "$STOCKFISH" ] || STOCKFISH=/usr/games/stockfish
+          OUT="analysis-results/${{ matrix.name }}"; mkdir -p "$OUT"
+          python tools/v9_rust_diagnostic.py \
+            --agent /tmp/v13 \
+            --runner tools/v9_agent_runner.py \
+            --engine rust-ref/target/release/chess-uci \
+            --stockfish "$STOCKFISH" \
+            --openings match/openings/m3-uho-lichess-100-v1.epd \
+            --opening-start 30 \
+            --opening-count 6 \
+            --base-ms 2500 \
+            --increment-ms 50 \
+            --analysis-nodes 10000 \
+            --out-dir "$OUT" | tee "$OUT/run.log"
+          cp /tmp/init.txt "$OUT/init.txt"
+          cp /tmp/v13-model-provenance.json "$OUT/model-provenance.json"
+
+      - name: Validate and expose result
+        id: result
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="analysis-results/${{ matrix.name }}"
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          p = Path('analysis-results/${{ matrix.name }}/summary.json')
+          d = json.loads(p.read_text())
+          m = d['match']
+          bad = {'candidate_crash','candidate_flag','candidate_illegal','candidate_init','rust_crash','rust_flag','rust_illegal','rust_init'}
+          failures = {k:v for k,v in m['terminations'].items() if k in bad and v}
+          if failures:
+              raise SystemExit(f'protocol/engine failures in screen: {failures}')
+          sf = d['stockfish']['V9']
+          outputs = {
+              'w': int(m['wins']),
+              'd': int(m['draws']),
+              'l': int(m['losses']),
+              'score_milli': int(round(float(m['score']) * 1000)),
+              'mean_loss_cp': int(round(float(sf['mean_loss_cp'] or 0))),
+              'blunders_200': int(sf['blunders_200']),
+          }
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as h:
+              for k,v in outputs.items():
+                  h.write(f'{k}={v}\n')
+          print(outputs)
+          PY
+
+      - name: Package exact candidate
+        if: always() && steps.result.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="analysis-results/${{ matrix.name }}"
+          (cd /tmp/v13 && zip -qr "$GITHUB_WORKSPACE/$OUT/Little-Gambit-V13-${{ matrix.name }}.zip" .)
+          sha256sum "$OUT/Little-Gambit-V13-${{ matrix.name }}.zip" > "$OUT/CANDIDATE_SHA256.txt"
+
+      - name: Upload scored evidence and candidate
+        if: always() && steps.result.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: v13-${{ matrix.name }}-W${{ steps.result.outputs.w }}D${{ steps.result.outputs.d }}L${{ steps.result.outputs.l }}-S${{ steps.result.outputs.score_milli }}-ML${{ steps.result.outputs.mean_loss_cp }}-B${{ steps.result.outputs.blunders_200 }}-${{ github.sha }}
+          path: analysis-results/${{ matrix.name }}
+          retention-days: 14
