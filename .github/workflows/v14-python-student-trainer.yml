@@ -29,8 +29,20 @@ jobs:
           grep -Fq 'const WDL_PROPORTION: f32 = 0.75;' training/bullet-v14-python-a/src/main.rs
           grep -Fq 'const EVAL_SCALE: i32 = 400;' training/bullet-v14-python-a/src/main.rs
 
-      - name: Format standalone trainer
-        run: cargo fmt --manifest-path training/bullet-v14-python-a/Cargo.toml -- --check
+      - name: Capture canonical rustfmt result
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --manifest-path training/bullet-v14-python-a/Cargo.toml
+          git diff -- training/bullet-v14-python-a > /tmp/v14-trainer-rustfmt.patch
+          cat /tmp/v14-trainer-rustfmt.patch
+
+      - name: Upload canonical rustfmt patch
+        uses: actions/upload-artifact@v4
+        with:
+          name: v14-trainer-rustfmt-${{ github.sha }}
+          path: /tmp/v14-trainer-rustfmt.patch
+          retention-days: 7
 
       - name: Check pinned Bullet API without GPU backend
         run: cargo check --manifest-path training/bullet-v14-python-a/Cargo.toml
