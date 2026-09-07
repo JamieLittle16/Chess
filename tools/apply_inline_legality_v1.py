@@ -328,13 +328,23 @@ text = replace_once(
 ''',
     "root pseudo move generation",
 )
-text = replace_count(
+text = replace_once(
     text,
     '''while let Some(mv) = picker.next(position) {
             let undo = position.make_move(mv);''',
     '''while let Some((mv, undo)) = picker.next_legal_applied(position) {''',
-    2,
-    "applied root and recursive picker loops",
+    "applied root picker loop",
+)
+text = replace_once(
+    text,
+    '''while let Some(mv) = picker.next(position) {
+            let quiet = !mv.kind().is_capture() && !mv.kind().is_promotion();
+            let protected_killer = killers.contains(&Some(mv));
+            let undo = position.make_move(mv);''',
+    '''while let Some((mv, undo)) = picker.next_legal_applied(position) {
+            let quiet = !mv.kind().is_capture() && !mv.kind().is_promotion();
+            let protected_killer = killers.contains(&Some(mv));''',
+    "applied recursive picker loop",
 )
 text = replace_once(
     text,
