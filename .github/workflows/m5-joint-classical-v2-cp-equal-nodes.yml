@@ -1,0 +1,118 @@
+name: M5 joint classical v2 CP equal-nodes
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  equal-nodes:
+    if: github.head_ref == 'm5/joint-classical-v2-cp-equal-nodes'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - name: Strict correctness gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+      - name: Verify accepted reference search identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset CHESS_EXPERIMENTAL_CLASSICAL_V2
+          cargo run --quiet --release -p chess-bench | tee reference-bench.txt
+          grep -Fx 'signature 0x4c3bbe8701fbbb68' reference-bench.txt
+      - name: Build one shared release engine binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release -p chess-uci
+          test -x target/release/chess-uci
+          sha256sum target/release/chess-uci | tee engine.sha256
+      - name: Record CP candidate deterministic drift
+        shell: bash
+        env:
+          CHESS_EXPERIMENTAL_CLASSICAL_V2: cp
+        run: |
+          set -euo pipefail
+          cargo run --quiet --release -p chess-bench | tee candidate-bench.txt
+      - name: Build pinned Fastchess 1.8.2-alpha
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = 'f618e34540f94f4719ad3817950618dabe441318'
+          make -C .qualification/fastchess-src -j2
+          test -x .qualification/fastchess-src/fastchess
+      - name: Create same-binary candidate and reference launchers
+        shell: bash
+        run: |
+          set -euo pipefail
+          ENGINE="$PWD/target/release/chess-uci"
+          mkdir -p .qualification/launchers .qualification/equal-nodes
+          cat > .qualification/launchers/candidate.sh <<EOF
+          #!/usr/bin/env bash
+          export CHESS_EXPERIMENTAL_CLASSICAL_V2=cp
+          exec '$ENGINE'
+          EOF
+          cat > .qualification/launchers/reference.sh <<EOF
+          #!/usr/bin/env bash
+          unset CHESS_EXPERIMENTAL_CLASSICAL_V2
+          exec '$ENGINE'
+          EOF
+          chmod +x .qualification/launchers/candidate.sh .qualification/launchers/reference.sh
+          sha256sum .qualification/launchers/candidate.sh .qualification/launchers/reference.sh | tee launchers.sha256
+      - name: Run paired 100-game equal-nodes screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/.qualification/launchers/candidate.sh" name=joint-classical-v2-cp nodes=25000 option.Hash=32 \
+            -engine cmd="$PWD/.qualification/launchers/reference.sh" name=classical nodes=25000 option.Hash=32 \
+            -openings file=match/openings/m3-uho-lichess-100-v1.epd format=epd order=random \
+            -srand 20261023 \
+            -rounds 50 -repeat -concurrency 1 -maxmoves 300 \
+            -ratinginterval 20 \
+            -pgnout file=.qualification/equal-nodes/games.pgn notation=uci append=false nodes=true nps=true \
+            -log file=.qualification/equal-nodes/uci.log level=info engine=true append=false \
+            | tee .qualification/equal-nodes/fastchess.stdout.log
+      - name: Record immutable experiment identities
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/equal-nodes
+          cp engine.sha256 .qualification/equal-nodes/engine.sha256 || true
+          cp launchers.sha256 .qualification/equal-nodes/launchers.sha256 || true
+          cp reference-bench.txt .qualification/equal-nodes/reference-bench.txt || true
+          cp candidate-bench.txt .qualification/equal-nodes/candidate-bench.txt || true
+          cat > .qualification/equal-nodes/evidence.txt <<EOF
+          experiment=joint-classical-v2-cp-equal-nodes
+          source_head=23799f360aa99d91a811afdeb707b949e8679d09
+          variant=cp
+          nodes_per_move=25000
+          games=100
+          seed=20261023
+          opening_sha256=599a45efb446e91952d13e79bc7fec8de319e332036a54552a3e8e4af91f9cf1
+          reference_signature=0x4c3bbe8701fbbb68
+          fastchess_commit=f618e34540f94f4719ad3817950618dabe441318
+          EOF
+      - name: Upload equal-nodes evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m5-joint-classical-v2-cp-equal-nodes-${{ github.sha }}
+          path: .qualification/equal-nodes/
+          retention-days: 30
