@@ -178,14 +178,8 @@ impl Network {
         self.rebuild_accumulator(black.as_slice(), &mut black_acc);
 
         let (us, them) = match position.side_to_move() {
-            Color::White => (
-                &white_acc[..self.hidden],
-                &black_acc[..self.hidden],
-            ),
-            Color::Black => (
-                &black_acc[..self.hidden],
-                &white_acc[..self.hidden],
-            ),
+            Color::White => (&white_acc[..self.hidden], &black_acc[..self.hidden]),
+            Color::Black => (&black_acc[..self.hidden], &white_acc[..self.hidden]),
         };
 
         let mut sum = i64::from(self.output_bias);
@@ -414,10 +408,8 @@ mod tests {
 
     #[test]
     fn full_inference_uses_side_to_move_perspective_order() {
-        let white =
-            Position::from_fen("4k3/8/8/8/8/8/P7/4K3 w - - 0 1").expect("valid FEN");
-        let black =
-            Position::from_fen("4k3/8/8/8/8/8/P7/4K3 b - - 0 1").expect("valid FEN");
+        let white = Position::from_fen("4k3/8/8/8/8/8/P7/4K3 w - - 0 1").expect("valid FEN");
+        let black = Position::from_fen("4k3/8/8/8/8/8/P7/4K3 b - - 0 1").expect("valid FEN");
         let white_features = active_features(&white, Color::White).expect("white features");
         let black_features = active_features(&white, Color::Black).expect("black features");
         let unique = white_features
