@@ -1,0 +1,63 @@
+name: V13 half residual arena
+
+on:
+  push:
+    branches:
+      - analysis/v13-linear-residual
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  arena:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: [91000, 92000]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition dependencies
+        run: python -m pip install --disable-pip-version-check numba==0.67.0 numpy==2.5.2 chess==1.11.2
+      - name: Reconstruct exact half-residual candidate and classical control
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .v13/c3.part.* | base64 -d > /tmp/c3.zip
+          echo '975baca2f7ae192674b0e65d890a93c6c6f97616edf898567c8b3ad5d71ead88  /tmp/c3.zip' | sha256sum --check --strict
+          rm -rf /tmp/c3 /tmp/base
+          mkdir /tmp/c3
+          unzip -q /tmp/c3.zip -d /tmp/c3
+          cp -a /tmp/c3 /tmp/base
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('/tmp/base/experiments/numba_search.py')
+          s = p.read_text()
+          old = 'return _evaluate_state(side, state) + _learned_residual(board, side, state) // 2'
+          new = 'return _evaluate_state(side, state)'
+          assert s.count(old) == 1, s.count(old)
+          p.write_text(s.replace(old, new))
+          PY
+          python -m py_compile /tmp/c3/agent.py /tmp/c3/experiments/*.py /tmp/base/agent.py /tmp/base/experiments/*.py
+          find /tmp/c3 -maxdepth 2 -type f -printf '%P\n' | sort
+      - name: Run paired fixed-node arena
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p v13-results
+          /usr/bin/time -f 'ARENA_WALL_SEC=%e MAX_RSS_KB=%M' \
+            python -u .v13/v13_arena.py /tmp/c3 /tmp/base 20000 10 '${{ matrix.seed }}' 220 \
+            | tee v13-results/seed-${{ matrix.seed }}.log
+          grep '^FINAL ' v13-results/seed-${{ matrix.seed }}.log
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v13-half-residual-seed-${{ matrix.seed }}
+          path: v13-results/
+          retention-days: 7
