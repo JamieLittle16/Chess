@@ -5,15 +5,20 @@
 //! copied from another engine. Runtime evaluation remains allocation-free: iterate the existing
 //! piece bitboards, perform table lookups, and interpolate one middle-game/end-game score pair.
 
+mod classical_v2;
 pub mod nnue;
 
+use std::sync::OnceLock;
+
 use chess_core::{Color, PieceKind, Position};
+
+use classical_v2::{JointClassicalVariant, residual as joint_classical_residual};
 
 /// Conventional centipawn-like material values retained from the material-only reference.
 pub const PIECE_VALUES: [i32; 6] = [100, 320, 330, 500, 900, 0];
 
-const PHASE_WEIGHTS: [i32; 6] = [0, 1, 1, 2, 4, 0];
-const MAX_PHASE: i32 = 24;
+pub(crate) const PHASE_WEIGHTS: [i32; 6] = [0, 1, 1, 2, 4, 0];
+pub(crate) const MAX_PHASE: i32 = 24;
 const MG_PSQT: [[i16; 64]; 6] = generate_psqt(false);
 const EG_PSQT: [[i16; 64]; 6] = generate_psqt(true);
 
@@ -24,6 +29,8 @@ const ROOK_OPEN_FILE_EG_BONUS: i32 = 12;
 const ROOK_SEMI_OPEN_FILE_MG_BONUS: i32 = 8;
 const ROOK_SEMI_OPEN_FILE_EG_BONUS: i32 = 6;
 const FILE_A: u64 = 0x0101_0101_0101_0101;
+
+static EXPERIMENTAL_JOINT_CLASSICAL: OnceLock<Option<JointClassicalVariant>> = OnceLock::new();
 
 /// Return the material owned by one side in centipawn-like units.
 #[must_use]
@@ -36,11 +43,26 @@ pub fn material(position: &Position, color: Color) -> i32 {
 
 /// Evaluate a position from the side-to-move perspective.
 ///
-/// Positive values favour the player to move; negative values favour their opponent. The tapered
-/// score interpolates between middle-game and end-game piece-square preferences using remaining
-/// non-pawn material. Black reuses the same tables by vertically mirroring each square.
+/// Production with no experiment environment variable takes the exact accepted classical path.
+/// The draft M5 qualification branch may add one frozen, jointly fitted classical residual by
+/// setting `CHESS_EXPERIMENTAL_CLASSICAL_V2` to `cp` or `wdl` before process startup.
 #[must_use]
 pub fn evaluate(position: &Position) -> i32 {
+    let baseline = evaluate_classical(position);
+    let variant = EXPERIMENTAL_JOINT_CLASSICAL.get_or_init(|| {
+        std::env::var("CHESS_EXPERIMENTAL_CLASSICAL_V2")
+            .ok()
+            .as_deref()
+            .and_then(JointClassicalVariant::from_env)
+    });
+    variant.map_or(baseline, |variant| {
+        baseline.saturating_add(joint_classical_residual(position, variant))
+    })
+}
+
+/// Exact accepted E1+E4 evaluator, retained as the immutable control for M5 experiments.
+#[must_use]
+pub fn evaluate_classical(position: &Position) -> i32 {
     let mut middle_game = 0_i32;
     let mut end_game = 0_i32;
     let mut phase = 0_i32;
@@ -137,8 +159,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
     let file_centrality = 7 - file_distance;
 
     match piece {
-        // Pawns gain more from safe advancement in the endgame. A tiny central-file bonus nudges
-        // healthy central occupation without attempting to model pawn structure yet.
         0 => {
             let advance = if end_game {
                 match rank {
@@ -163,7 +183,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
             };
             advance + file_centrality / 2
         }
-        // Knights are the strongest centralisation signal in v1.
         1 => {
             if end_game {
                 centre * 3 - 18
@@ -171,7 +190,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
                 centre * 4 - 24
             }
         }
-        // Bishops prefer activity but are less sensitive to central squares than knights.
         2 => {
             if end_game {
                 centre * 2 - 6
@@ -179,8 +197,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
                 centre * 2 - 8
             }
         }
-        // Rooks get a modest seventh-rank/activity signal. File structure is deliberately deferred
-        // to a separate experiment so E1 remains a pure placement baseline.
         3 => {
             let seventh = if rank == 6 { 14 } else { 0 };
             if end_game {
@@ -189,8 +205,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
                 seventh + rank
             }
         }
-        // Queen placement is intentionally weakly weighted to avoid paying for brittle opening
-        // assumptions before development/king-safety terms exist.
         4 => {
             if end_game {
                 centre * 2 - 8
@@ -198,8 +212,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
                 centre - 8
             }
         }
-        // Middle-game kings prefer the home rank and castled files. End-game kings reverse that
-        // preference and are rewarded for centralisation.
         5 => {
             if end_game {
                 centre * 4 - 24
@@ -225,11 +237,12 @@ const fn abs_i32(value: i32) -> i32 {
 mod tests {
     use chess_core::{Color, Position};
 
-    use super::{evaluate, piece_structure};
+    use super::{evaluate, evaluate_classical, piece_structure};
 
     #[test]
     fn starting_position_is_positionally_equal() {
         assert_eq!(evaluate(&Position::startpos()), 0);
+        assert_eq!(evaluate_classical(&Position::startpos()), 0);
     }
 
     #[test]
