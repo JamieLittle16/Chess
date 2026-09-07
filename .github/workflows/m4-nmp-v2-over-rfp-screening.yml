@@ -1,0 +1,108 @@
+name: M4 NMP v2 over RFP screening
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  screening:
+    if: github.head_ref == 'm4/nmp-v2-over-rfp-screening'
+    name: Draw-safe NMP v2 marginally over RFP v1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - name: Apply exact NMP v2 substrate and RFP composition
+        run: |
+          set -euo pipefail
+          python3 tools/apply_null_move_v2.py
+          python3 tools/apply_rfp_over_nmp_v2.py
+          cargo fmt --all
+          git diff --check
+          test -n "$(git diff -- crates/chess-core/src/reversible.rs crates/chess-core/src/lib.rs crates/chess-search/src/lib.rs crates/chess-search/src/quiescence.rs)"
+      - name: Verify null-state, pruning, and draw correctness
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test -p chess-core --all-features
+          cargo test -p chess-search --all-features
+          cargo test -p chess-search --test draw_strategy
+          cargo test -p chess-engine --all-features
+          cargo test -p chess-uci --all-features
+      - name: Build candidate
+        run: |
+          set -euo pipefail
+          CANDIDATE_TARGET="$PWD/.qualification/candidate-target"
+          CARGO_TARGET_DIR="$CANDIDATE_TARGET" cargo build --release -p chess-uci
+          echo "CANDIDATE_BIN=$CANDIDATE_TARGET/release/chess-uci" >> "$GITHUB_ENV"
+      - name: Build exact RFP reference
+        run: |
+          set -euo pipefail
+          REFERENCE_SHA=d23b9719b5d3256a519e974f29a0ab5759ef2e63
+          git fetch --depth=1 origin "$REFERENCE_SHA"
+          git worktree add --detach .qualification/reference "$REFERENCE_SHA"
+          REFERENCE_TARGET="$PWD/.qualification/reference-target"
+          (
+            cd .qualification/reference
+            CARGO_TARGET_DIR="$REFERENCE_TARGET" cargo build --release -p chess-uci
+          )
+          echo "REFERENCE_BIN=$REFERENCE_TARGET/release/chess-uci" >> "$GITHUB_ENV"
+      - name: Fetch pinned Fastchess
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/fastchess
+          curl --fail --location --retry 3 --output .qualification/fastchess.tar \
+            https://github.com/Disservin/fastchess/releases/download/v1.8.2-alpha/fastchess-linux-x86-64.tar
+          echo '1003f920bebe841acdab5e6d7871e93171a4586857b3ec91c21ef5777f26ff96  .qualification/fastchess.tar' | sha256sum --check --strict
+          tar -xf .qualification/fastchess.tar -C .qualification/fastchess
+          FASTCHESS_BIN=$(find "$PWD/.qualification/fastchess" -type f -name fastchess -perm -111 -print -quit)
+          test -n "$FASTCHESS_BIN"
+          echo "FASTCHESS_BIN=$FASTCHESS_BIN" >> "$GITHUB_ENV"
+      - name: Record identities
+        run: |
+          set -euo pipefail
+          "$FASTCHESS_BIN" -version
+          sha256sum "$CANDIDATE_BIN" "$REFERENCE_BIN" "$FASTCHESS_BIN" match/openings/m3-uho-lichess-100-v1.epd
+      - name: Run paired equal-time interaction screen
+        run: |
+          set -euo pipefail
+          SHORT_SHA=${GITHUB_SHA:0:12}
+          python3 scripts/match_harness.py \
+            --protocol match/protocols/m4-nmp-v2-over-rfp-screening.json \
+            --candidate "$CANDIDATE_BIN" \
+            --candidate-name "Chess-M4-rfp+nmp-v2@$SHORT_SHA" \
+            --candidate-option Hash=32 \
+            --reference "$REFERENCE_BIN" \
+            --reference-name 'Chess-RFP-v1@d23b9719b5d3' \
+            --reference-option Hash=32 \
+            --fastchess "$FASTCHESS_BIN" \
+            --openings match/openings/m3-uho-lichess-100-v1.epd \
+            --output-dir screening-results
+      - name: Retain exact composed source
+        if: always()
+        run: |
+          mkdir -p screening-results/exact-source/crates/chess-core/src screening-results/exact-source/crates/chess-search/src
+          cp crates/chess-core/src/reversible.rs screening-results/exact-source/crates/chess-core/src/reversible.rs
+          cp crates/chess-core/src/lib.rs screening-results/exact-source/crates/chess-core/src/lib.rs
+          cp crates/chess-search/src/lib.rs screening-results/exact-source/crates/chess-search/src/lib.rs
+          cp crates/chess-search/src/quiescence.rs screening-results/exact-source/crates/chess-search/src/quiescence.rs
+          sha256sum crates/chess-core/src/reversible.rs crates/chess-core/src/lib.rs crates/chess-search/src/lib.rs crates/chess-search/src/quiescence.rs > screening-results/exact-source/source.sha256
+      - name: Upload retained evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m4-nmp-v2-over-rfp-${{ github.sha }}
+          path: screening-results/
+          if-no-files-found: warn
+          retention-days: 30
