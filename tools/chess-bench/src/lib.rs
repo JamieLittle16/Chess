@@ -6,24 +6,23 @@
 use chess_core::Position;
 use chess_search::Searcher;
 
-/// V8 adds the accepted E4 bishop-pair and rook open/semi-open-file terms on top of V7's tapered
-/// geometric PSQT and two-slot quiet killer ordering. The reviewed five-case report is:
+/// M5 search-generation-v1 intentionally changes search ordering/selectivity while leaving chess
+/// rules and the accepted evaluator untouched. This experiment branch therefore records its own
+/// deterministic five-case signature rather than pretending to remain production V8.
 ///
-/// - startpos d3: score +24, 649 nodes, 22 TT hits, best raw move 82 (`Nb1-c3`);
-/// - Kiwipete d2: score +17, 1,137 nodes, 2 TT hits, best raw move 3,427;
+/// The reviewed candidate report is:
+///
+/// - startpos d3: score +24, 620 nodes, 22 TT hits, best raw move 82 (`Nb1-c3`);
+/// - Kiwipete d2: score +17, 895 nodes, 1 TT hit, best raw move 17,192;
 /// - mate-net d2: mate score 29,999, 72 nodes, 1 TT hit, best raw move 3,446;
 /// - en-passant d3: score +167, 63 nodes, 7 TT hits, best raw move 22,827;
-/// - promotion d2: score +886, 62 nodes, 2 TT hits, best raw move 9 (`Ka1-b2`).
+/// - promotion d2: score +886, 61 nodes, 2 TT hits, best raw move 9 (`Ka1-b2`).
 ///
-/// E4 was first screened against exact V7 production and then qualified twice from materialized
-/// source. The original 200-game suite scored 60W/95D/45L (+26.11 +/- 32.35 Elo, LOS 94.43%).
-/// Because that was narrowly below the preferred confidence line, a fresh 100-position UHO holdout
-/// was selected deterministically from the pinned 2,632,036-position Stockfish source while
-/// explicitly excluding every source line used by the original suite. On that disjoint 200-game
-/// holdout E4 scored 70W/80D/50L (+34.86 +/- 35.54 Elo, LOS 97.40%). This independent validation
-/// accepts the evaluator drift as the new production baseline.
-pub const SUITE_NAME: &str = "reference-search-v8";
-pub const EXPECTED_SIGNATURE: u64 = 0x4c3b_be87_01fb_bb68;
+/// Production `main` remains `reference-search-v8` at signature `0x4c3bbe8701fbbb68` until this
+/// architecture earns its paired-game qualification. If accepted, production benchmark versioning
+/// must be updated explicitly during promotion rather than silently inheriting this experiment.
+pub const SUITE_NAME: &str = "candidate-search-generation-v1";
+pub const EXPECTED_SIGNATURE: u64 = 0x8142_2e1c_be49_6370;
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
