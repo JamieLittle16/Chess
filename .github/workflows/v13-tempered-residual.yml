@@ -1,0 +1,128 @@
+name: V13 tempered residual
+
+on:
+  push:
+    branches:
+      - analysis/v13-tempered-residual-20260907
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_TOOLCHAIN: 1.98.1
+
+jobs:
+  screen:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: classical, num: 0, den: 1 }
+          - { name: quarter, num: 1, den: 4 }
+          - { name: half, num: 1, den: 2 }
+          - { name: threequarter, num: 3, den: 4 }
+          - { name: full, num: 1, den: 1 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: 169fb5d424d90ebc45577ecaabe2a8fa0b4c1c10
+          path: rust-ref
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact runtime and Stockfish
+        run: |
+          python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+          sudo apt-get update -qq
+          sudo apt-get install -y stockfish
+      - name: Reconstruct exact V13 and apply residual temperature
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum -c -
+          rm -rf /tmp/v13 && mkdir /tmp/v13
+          unzip -q /tmp/v13.zip -d /tmp/v13
+          patch /tmp/v13/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          NUM='${{ matrix.num }}' DEN='${{ matrix.den }}' python - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path('/tmp/v13/experiments/numba_search.py')
+          s=p.read_text()
+          old='    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          new=(
+              f'    correction = (correction * {int(os.environ["NUM"])}) // {int(os.environ["DEN"])}\n'
+              '    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          )
+          assert s.count(old)==1, s.count(old)
+          p.write_text(s.replace(old,new,1))
+          PY
+          python -m py_compile /tmp/v13/agent.py /tmp/v13/experiments/numba_core.py /tmp/v13/experiments/numba_search.py
+      - name: Build pinned Rust opponent
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd rust-ref
+          test "$(git rev-parse HEAD)" = '169fb5d424d90ebc45577ecaabe2a8fa0b4c1c10'
+          RUSTUP_TOOLCHAIN=1.98.1 cargo build --release -p chess-uci
+      - name: Hard init smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/bin/time -f 'init_wall_s=%e maxrss_kb=%M' -o /tmp/init.txt \
+            timeout 90s python tools/v9_agent_runner.py /tmp/v13 <<'EOF' >/tmp/smoke.json
+          {"fen":"r2q1rk1/1bp1bppp/p2p1n2/np2p3/4P3/1BNP1N1P/PPP2PP1/R1BQR1K1 w - - 1 11","time_left_ms":120000}
+          EOF
+          cat /tmp/init.txt /tmp/smoke.json
+          grep -q '"ready": true' /tmp/smoke.json
+          grep -q '"move":' /tmp/smoke.json
+      - name: Paired screen vs production Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          STOCKFISH="$(command -v stockfish || true)"; [ -n "$STOCKFISH" ] || STOCKFISH=/usr/games/stockfish
+          OUT="analysis-results/${{ matrix.name }}"; mkdir -p "$OUT"
+          python tools/v9_rust_diagnostic.py \
+            --agent /tmp/v13 --runner tools/v9_agent_runner.py \
+            --engine rust-ref/target/release/chess-uci --stockfish "$STOCKFISH" \
+            --openings match/openings/m3-uho-lichess-100-v1.epd \
+            --opening-start 30 --opening-count 6 --base-ms 2500 --increment-ms 50 \
+            --analysis-nodes 10000 --out-dir "$OUT" | tee "$OUT/run.log"
+          cp /tmp/init.txt "$OUT/init.txt"
+          printf 'residual_scale=%s/%s\n' '${{ matrix.num }}' '${{ matrix.den }}' > "$OUT/model.txt"
+      - name: Validate and expose score
+        id: result
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, statistics
+          p='analysis-results/${{ matrix.name }}'
+          d=json.load(open(p+'/summary.json')); games=json.load(open(p+'/games.json'))
+          m=d['match']; sf=d['stockfish']['V9']
+          bad={'candidate_crash','candidate_flag','candidate_illegal','candidate_init','rust_crash','rust_flag','rust_illegal','rust_init'}
+          failures={k:v for k,v in m['terminations'].items() if k in bad and v}
+          assert not failures, failures
+          times=[g['candidate_mean_move_ms'] for g in games if g['candidate_mean_move_ms'] is not None]
+          vals={'w':m['wins'],'d':m['draws'],'l':m['losses'],'s':round(m['score']*1000),'ml':round(sf['mean_loss_cp'] or 0),'b':sf['blunders_200'],'t':round(statistics.mean(times)) if times else 0}
+          with open(os.environ['GITHUB_OUTPUT'],'a') as h:
+              for k,v in vals.items(): h.write(f'{k}={v}\n')
+          print(vals)
+          PY
+      - name: Package exact candidate
+        shell: bash
+        run: |
+          OUT="analysis-results/${{ matrix.name }}"
+          (cd /tmp/v13 && zip -qr "$GITHUB_WORKSPACE/$OUT/Little-Gambit-V13-${{ matrix.name }}.zip" .)
+          sha256sum "$OUT/Little-Gambit-V13-${{ matrix.name }}.zip" > "$OUT/CANDIDATE_SHA256.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v13-temp-${{ matrix.name }}-W${{ steps.result.outputs.w }}D${{ steps.result.outputs.d }}L${{ steps.result.outputs.l }}-S${{ steps.result.outputs.s }}-ML${{ steps.result.outputs.ml }}-B${{ steps.result.outputs.b }}-T${{ steps.result.outputs.t }}-${{ github.sha }}
+          path: analysis-results/${{ matrix.name }}
+          retention-days: 14
