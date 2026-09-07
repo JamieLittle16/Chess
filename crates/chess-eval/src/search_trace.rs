@@ -38,7 +38,10 @@ pub(crate) fn observe(position: &Position) {
         return;
     }
 
-    let mut output = trace.output.lock().expect("search trace output mutex poisoned");
+    let mut output = trace
+        .output
+        .lock()
+        .expect("search trace output mutex poisoned");
     writeln!(output, "{}\t{}", trace.group, position.to_fen())
         .expect("failed to append search-trace record");
 }
