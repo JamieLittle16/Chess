@@ -1,0 +1,131 @@
+name: V13 flagship residual model screen
+
+on:
+  push:
+    branches:
+      - analysis/v13-model-screen-flagship
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  screen:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: old
+            model: old
+            bias: 0
+            clamp: 0
+          - name: static
+            model: static
+            bias: 26
+            clamp: 400
+          - name: diverse
+            model: diverse
+            bias: 47
+            clamp: 0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact Python runtime and Stockfish
+        run: |
+          python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+          sudo apt-get update -qq
+          sudo apt-get install -y stockfish
+      - name: Reconstruct exact failed V13 and apply proven JIT refactor
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum -c -
+          rm -rf /tmp/v13 && mkdir /tmp/v13
+          unzip -q /tmp/v13.zip -d /tmp/v13
+          patch /tmp/v13/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          python -m py_compile /tmp/v13/agent.py /tmp/v13/experiments/numba_core.py /tmp/v13/experiments/numba_search.py
+      - name: Download static residual
+        if: matrix.model == 'static'
+        uses: actions/download-artifact@v4
+        with:
+          name: v13-static-teacher-residual-5e0243e7b78e088675fcf2177175d21d31f9be4d
+          path: /tmp/model
+          repository: JamieLittle16/Chess
+          run-id: 34159146417
+          github-token: ${{ github.token }}
+      - name: Download diverse residual
+        if: matrix.model == 'diverse'
+        uses: actions/download-artifact@v4
+        with:
+          name: v13-diverse-residual-v2-b8306a4473fd1d6b1062cc85ce05e02f58226fa0
+          path: /tmp/model
+          repository: JamieLittle16/Chess
+          run-id: 34158845488
+          github-token: ${{ github.token }}
+      - name: Install selected model
+        if: matrix.model != 'old'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp /tmp/model/weights.i16 /tmp/v13/experiments/v13_residual.i16
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          p=Path('/tmp/v13/experiments/numba_search.py')
+          s=p.read_text()
+          s,n1=re.subn(r'RESIDUAL_BIAS_CP\s*=\s*-?\d+', 'RESIDUAL_BIAS_CP = ${{ matrix.bias }}', s, count=1)
+          s,n2=re.subn(r'RESIDUAL_CLAMP_CP\s*=\s*-?\d+', 'RESIDUAL_CLAMP_CP = ${{ matrix.clamp }}', s, count=1)
+          if n1 != 1 or n2 != 1:
+              raise SystemExit(f'constant replacement failed bias={n1} clamp={n2}')
+          p.write_text(s)
+          PY
+          sha256sum /tmp/v13/experiments/v13_residual.i16 /tmp/v13/experiments/numba_search.py
+      - name: Build pinned Rust opponent
+        run: cargo build --release -p chess-uci
+      - name: Hard competition-init smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/bin/time -f 'init_wall_s=%e maxrss_kb=%M' -o /tmp/init.txt \
+            timeout 90s python tools/v9_agent_runner.py /tmp/v13 <<'EOF' >/tmp/smoke.json
+          {"fen":"r2q1rk1/1bp1bppp/p2p1n2/np2p3/4P3/1BNP1N1P/PPP2PP1/R1BQR1K1 w - - 1 11","time_left_ms":120000}
+          EOF
+          cat /tmp/init.txt
+          cat /tmp/smoke.json
+          grep -q '"ready": true' /tmp/smoke.json
+          grep -q '"move":' /tmp/smoke.json
+      - name: Paired screen vs Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          STOCKFISH="$(command -v stockfish || true)"; [ -n "$STOCKFISH" ] || STOCKFISH=/usr/games/stockfish
+          OUT="analysis-results/${{ matrix.name }}"; mkdir -p "$OUT"
+          python tools/v9_rust_diagnostic.py \
+            --agent /tmp/v13 \
+            --runner tools/v9_agent_runner.py \
+            --engine target/release/chess-uci \
+            --stockfish "$STOCKFISH" \
+            --openings match/openings/m3-uho-lichess-100-v1.epd \
+            --opening-start 30 \
+            --opening-count 6 \
+            --base-ms 2500 \
+            --increment-ms 50 \
+            --analysis-nodes 10000 \
+            --out-dir "$OUT" | tee "$OUT/run.log"
+          cp /tmp/init.txt "$OUT/init.txt"
+          echo '${{ matrix.name }} bias=${{ matrix.bias }} clamp=${{ matrix.clamp }}' > "$OUT/model.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v13-flagship-screen-${{ matrix.name }}
+          path: analysis-results/${{ matrix.name }}
+          retention-days: 7
