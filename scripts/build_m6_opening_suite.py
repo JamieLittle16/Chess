@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Derive the large M6 SPRT opening suite from the pinned Stockfish CC0 UHO book.
 
-This deliberately uses a different selection seed from the M3 100-position acceptance book. The
-source archive is verified byte-for-byte before selection. The initial derivation may omit an
-expected output hash; once generated in CI, the final suite hash is pinned in this file before merge.
+This deliberately uses a different selection seed from the M3 100-position acceptance book. Both
+the source archive and the final derived suite are pinned byte-for-byte, so every qualification run
+can prove it is using the exact same opening distribution.
 """
 
 from __future__ import annotations
@@ -31,8 +31,7 @@ SOURCE_LICENSE = "CC0-1.0"
 SUITE_ID = "m6-uho-lichess-5000-v1"
 SELECTION_SEED = "Chess/m6-uho-lichess-5000-v1"
 SELECTION_COUNT = 5_000
-# Filled after the first source-verified deterministic derivation and required before merge.
-SUITE_SHA256: str | None = None
+SUITE_SHA256 = "5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e"
 
 
 class DerivationError(ValueError):
@@ -83,7 +82,7 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def derive(archive: Path, output_dir: Path, *, require_pinned_output: bool) -> tuple[Path, Path, str]:
+def derive(archive: Path, output_dir: Path) -> tuple[Path, Path, str]:
     archive = archive.expanduser().resolve(strict=True)
     if not archive.is_file():
         raise DerivationError(f"source archive is not a regular file: {archive}")
@@ -124,12 +123,8 @@ def derive(archive: Path, output_dir: Path, *, require_pinned_output: bool) -> t
     metadata_path = output_dir / f"{SUITE_ID}.json"
     epd_bytes = ("\n".join(item.epd for item in selected) + "\n").encode("utf-8")
     suite_sha = hashlib.sha256(epd_bytes).hexdigest()
-    if SUITE_SHA256 is not None and suite_sha != SUITE_SHA256:
+    if suite_sha != SUITE_SHA256:
         raise DerivationError(f"suite SHA mismatch: expected {SUITE_SHA256}, got {suite_sha}")
-    if require_pinned_output and SUITE_SHA256 is None:
-        raise DerivationError(
-            f"suite output hash is not pinned yet; deterministic derived hash is {suite_sha}"
-        )
 
     epd_path.write_bytes(epd_bytes)
     metadata = {
@@ -167,22 +162,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--archive", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument(
-        "--bootstrap-unpinned-output",
-        action="store_true",
-        help="allow the first source-verified derivation before SUITE_SHA256 is pinned",
-    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     try:
-        epd, metadata, digest = derive(
-            args.archive,
-            args.output_dir,
-            require_pinned_output=not args.bootstrap_unpinned_output,
-        )
+        epd, metadata, digest = derive(args.archive, args.output_dir)
     except (OSError, UnicodeDecodeError, DerivationError) as exc:
         print(f"M6 opening-suite derivation: {exc}", file=sys.stderr)
         return 2
