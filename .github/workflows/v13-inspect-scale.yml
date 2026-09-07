@@ -1,0 +1,27 @@
+name: V13 inspect exact residual scale
+
+on:
+  push:
+    branches:
+      - analysis/v13-inspect-scale-20260907
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reconstruct and inspect evaluator
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          rm -rf /tmp/v13 && mkdir /tmp/v13
+          unzip -q /tmp/v13.zip -d /tmp/v13
+          echo '--- learned residual function ---'
+          sed -n '395,425p' /tmp/v13/experiments/numba_search.py
+          echo '--- evaluation call sites ---'
+          grep -n -C 3 -E '_learned_residual|_evaluate_state\(' /tmp/v13/experiments/numba_search.py | head -100
