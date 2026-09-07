@@ -37,6 +37,30 @@ jobs:
         run: |
           set -euo pipefail
           python3 tools/apply_null_move_v3.py
+          # The generator's first run exposed a Clippy-only regression in the test constructor.
+          # Normalize only that generated test before recording the immutable candidate patch;
+          # no NMP policy, threshold, or production code is changed here.
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("crates/chess-search/src/lib.rs")
+          text = path.read_text()
+          old = """        let mut searcher = Searcher::default();
+                  searcher.synthetic_null = true;
+          """
+          new = """        let mut searcher = Searcher {
+                      synthetic_null: true,
+                      ..Searcher::default()
+                  };
+          """
+          if text.count(old) != 1:
+              raise SystemExit("expected exactly one generated synthetic-null test constructor")
+          text = text.replace(old, new, 1)
+          reset = "        searcher.synthetic_null = false;\n"
+          if text.count(reset) != 1:
+              raise SystemExit("expected exactly one generated synthetic-null test reset")
+          path.write_text(text.replace(reset, "", 1))
+          PY
           cargo fmt
           git diff --check
           git diff --binary > candidate.patch
