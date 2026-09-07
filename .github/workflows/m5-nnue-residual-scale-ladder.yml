@@ -1,0 +1,157 @@
+name: M5 residual NNUE search-scale ladder
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  scale-ladder:
+    if: github.head_ref == 'm5/nnue-scale-ladder-v1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Keep classical futility pruning while screening learned leaf scales
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('crates/chess-search/src/lib.rs')
+          text = path.read_text(encoding='utf-8')
+          old_import = 'use chess_eval::evaluate;'
+          new_import = 'use chess_eval::{evaluate, evaluate_classical};'
+          marker = 'let pruning_static_eval = if pruning_eligible {'
+          next_marker = 'if let Some(static_eval) = pruning_static_eval {'
+          if text.count(old_import) != 1 or text.count(marker) != 1 or text.count(next_marker) != 1:
+              raise SystemExit('unexpected search source shape')
+          start = text.index(marker)
+          end = text.index(next_marker, start)
+          block = text[start:end]
+          old_call = 'Some(evaluate(position))'
+          if block.count(old_call) != 1:
+              raise SystemExit('expected one RFP learned-eval call')
+          block = block.replace(old_call, 'Some(evaluate_classical(position))', 1)
+          text = text.replace(old_import, new_import, 1)
+          text = text[:start] + block + text[end:]
+          path.write_text(text, encoding='utf-8')
+          PY
+          cargo fmt --check
+          cargo test --workspace --release
+      - name: Download frozen residual model
+        uses: actions/download-artifact@v4
+        with:
+          name: m5-nnue-residual-v1-0da545630ea1408f61e8c10d03252bdd8c11eeca
+          path: .qualification/residual
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34147825482
+      - name: Verify model and build 1/4x, 1/2x and 1x binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODEL=$(find "$PWD/.qualification/residual" -type f -name 'nnue-residual-32-v1.nnue' -print -quit)
+          test -n "$MODEL"
+          echo "7e156b6b7d18bdbfd61f98c9257b493918d9d19bfe94bbcadef401fc6835bc5b  $MODEL" | sha256sum --check --strict
+          echo "RESIDUAL_MODEL=$MODEL" >> "$GITHUB_ENV"
+          mkdir -p .qualification/bin .qualification/scale-ladder
+          cp crates/chess-eval/src/lib.rs /tmp/eval-original.rs
+          for NUM in 4 8 16; do
+            cp /tmp/eval-original.rs crates/chess-eval/src/lib.rs
+            python - "$NUM" <<'PY'
+          from pathlib import Path
+          import sys
+          numerator = sys.argv[1]
+          path = Path('crates/chess-eval/src/lib.rs')
+          text = path.read_text(encoding='utf-8')
+          old = 'const RESIDUAL_SCALE_NUMERATOR: i64 = 33;'
+          new = f'const RESIDUAL_SCALE_NUMERATOR: i64 = {numerator};'
+          if text.count(old) != 1:
+              raise SystemExit('unexpected residual numerator source shape')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+            cargo build --release -p chess-uci
+            cp target/release/chess-uci ".qualification/bin/chess-uci-scale-${NUM}-over-16"
+            sha256sum ".qualification/bin/chess-uci-scale-${NUM}-over-16" >> .qualification/scale-ladder/binaries.sha256
+          done
+          cp /tmp/eval-original.rs crates/chess-eval/src/lib.rs
+      - name: Build pinned Fastchess 1.8.2-alpha
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = 'f618e34540f94f4719ad3817950618dabe441318'
+          make -C .qualification/fastchess-src -j2
+          test -x .qualification/fastchess-src/fastchess
+      - name: Run paired equal-node scale ladder
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODEL="$RESIDUAL_MODEL"
+          mkdir -p .qualification/launchers
+          run_scale() {
+            NUM="$1"
+            SEED="$2"
+            BIN="$PWD/.qualification/bin/chess-uci-scale-${NUM}-over-16"
+            OUT="$PWD/.qualification/scale-ladder/scale-${NUM}-over-16"
+            mkdir -p "$OUT"
+            CAND="$PWD/.qualification/launchers/candidate-${NUM}.sh"
+            REF="$PWD/.qualification/launchers/reference-${NUM}.sh"
+            cat > "$CAND" <<EOF
+          #!/usr/bin/env bash
+          export CHESS_EXPERIMENTAL_RESIDUAL_NNUE='$MODEL'
+          exec '$BIN'
+          EOF
+            cat > "$REF" <<EOF
+          #!/usr/bin/env bash
+          unset CHESS_EXPERIMENTAL_RESIDUAL_NNUE
+          exec '$BIN'
+          EOF
+            chmod +x "$CAND" "$REF"
+            .qualification/fastchess-src/fastchess \
+              -engine cmd="$CAND" name="residual-${NUM}-over-16" nodes=25000 option.Hash=32 \
+              -engine cmd="$REF" name=classical nodes=25000 option.Hash=32 \
+              -openings file=match/openings/m3-uho-lichess-100-v1.epd format=epd order=random \
+              -srand "$SEED" \
+              -rounds 20 -repeat -concurrency 1 -maxmoves 300 \
+              -ratinginterval 20 \
+              -pgnout file="$OUT/games.pgn" notation=uci append=false nodes=true nps=true \
+              -log file="$OUT/uci.log" level=info engine=true append=false \
+              | tee "$OUT/fastchess.stdout.log"
+          }
+          run_scale 4 20261021
+          run_scale 8 20261023
+          run_scale 16 20261025
+      - name: Record ladder identities
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/scale-ladder
+          cat > .qualification/scale-ladder/evidence.txt <<EOF
+          model_sha256=7e156b6b7d18bdbfd61f98c9257b493918d9d19bfe94bbcadef401fc6835bc5b
+          scales=4/16,8/16,16/16
+          pruning_static_eval=accepted_classical
+          nodes_per_move=25000
+          games_per_scale=40
+          seeds=20261021,20261023,20261025
+          opening_sha256=599a45efb446e91952d13e79bc7fec8de319e332036a54552a3e8e4af91f9cf1
+          fastchess_commit=f618e34540f94f4719ad3817950618dabe441318
+          EOF
+      - name: Upload scale-ladder evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m5-nnue-scale-ladder-${{ github.sha }}
+          path: .qualification/scale-ladder/
+          retention-days: 30
