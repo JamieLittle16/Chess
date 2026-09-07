@@ -67,33 +67,68 @@ def run_root(
     env["CHESS_SEARCH_TRACE_FILE"] = str(trace_file)
     env["CHESS_SEARCH_TRACE_GROUP"] = group
     env["CHESS_SEARCH_TRACE_STRIDE"] = str(stride)
-    commands = (
-        "uci\n"
-        "isready\n"
-        "ucinewgame\n"
-        f"position fen {fen}\n"
-        f"go nodes {nodes}\n"
-        "quit\n"
-    )
-    result = subprocess.run(
+
+    # Do not queue `quit` behind `go`: the UCI front-end is allowed to process input while search
+    # is running, so an immediately available quit command can cooperatively stop the very search
+    # whose evaluation calls we are trying to observe. Keep stdin open, wait until the bounded
+    # node search emits `bestmove`, and only then terminate the per-root engine process.
+    process = subprocess.Popen(
         [str(engine)],
-        input=commands,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
-        capture_output=True,
+        bufsize=1,
         env=env,
-        timeout=60,
-        check=False,
     )
-    if result.returncode != 0:
+    assert process.stdin is not None
+    assert process.stdout is not None
+
+    transcript: list[str] = []
+    try:
+        process.stdin.write(
+            "uci\n"
+            "isready\n"
+            "ucinewgame\n"
+            f"position fen {fen}\n"
+            f"go nodes {nodes}\n"
+        )
+        process.stdin.flush()
+
+        saw_bestmove = False
+        for line in process.stdout:
+            transcript.append(line)
+            if line.startswith("bestmove "):
+                saw_bestmove = True
+                break
+        if not saw_bestmove:
+            raise RuntimeError(
+                f"trace engine exited before bestmove for {group}\n"
+                f"transcript:\n{''.join(transcript)}"
+            )
+
+        process.stdin.write("quit\n")
+        process.stdin.flush()
+        process.stdin.close()
+        remainder = process.stdout.read()
+        if remainder:
+            transcript.append(remainder)
+        returncode = process.wait(timeout=60)
+    except BaseException:
+        process.kill()
+        process.wait(timeout=10)
+        raise
+
+    output = "".join(transcript)
+    if returncode != 0:
         raise RuntimeError(
-            f"trace engine failed for {group} with code {result.returncode}\n"
-            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+            f"trace engine failed for {group} with code {returncode}\ntranscript:\n{output}"
         )
     required = ("uciok", "readyok", "bestmove ")
-    missing = [token for token in required if token not in result.stdout]
+    missing = [token for token in required if token not in output]
     if missing:
         raise RuntimeError(
-            f"trace engine omitted {missing!r} for {group}\nstdout:\n{result.stdout}"
+            f"trace engine omitted {missing!r} for {group}\ntranscript:\n{output}"
         )
 
 
