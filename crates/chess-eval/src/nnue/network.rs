@@ -27,7 +27,7 @@ pub const SUPPORTED_HIDDEN: [usize; 3] = [32, 64, 128];
 ///
 /// Heap allocation happens only when a network file is loaded. Full inference itself allocates no
 /// heap memory, and NNUE-3 will reuse the exact weight layout for incremental accumulators.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Network {
     hidden: usize,
     activation_max: i32,
@@ -45,11 +45,11 @@ impl Network {
         if bytes.len() < HEADER_LEN {
             return Err(NetworkError::Truncated);
         }
-        if bytes[..8] != MAGIC {
+        if bytes[..MAGIC.len()] != MAGIC {
             return Err(NetworkError::BadMagic);
         }
 
-        let mut cursor = 8;
+        let mut cursor = MAGIC.len();
         let version = read_u16(bytes, &mut cursor)?;
         if version != FORMAT_VERSION {
             return Err(NetworkError::UnsupportedVersion(version));
@@ -178,8 +178,14 @@ impl Network {
         self.rebuild_accumulator(black.as_slice(), &mut black_acc);
 
         let (us, them) = match position.side_to_move() {
-            Color::White => (&white_acc[..self.hidden], &black_acc[..self.hidden]),
-            Color::Black => (&black_acc[..self.hidden], &white_acc[..self.hidden]),
+            Color::White => (
+                &white_acc[..self.hidden],
+                &black_acc[..self.hidden],
+            ),
+            Color::Black => (
+                &black_acc[..self.hidden],
+                &white_acc[..self.hidden],
+            ),
         };
 
         let mut sum = i64::from(self.output_bias);
@@ -230,17 +236,42 @@ impl fmt::Display for NetworkError {
         match self {
             Self::Truncated => formatter.write_str("truncated NNUE network"),
             Self::BadMagic => formatter.write_str("invalid NNUE magic"),
-            Self::UnsupportedVersion(version) => write!(formatter, "unsupported NNUE version {version}"),
-            Self::FeatureSetMismatch => formatter.write_str("NNUE feature-set id does not match engine"),
-            Self::FeatureCountMismatch(count) => write!(formatter, "NNUE feature count {count} does not match engine"),
-            Self::UnsupportedHidden(hidden) => write!(formatter, "unsupported NNUE hidden width {hidden}"),
-            Self::InvalidActivationMax(value) => write!(formatter, "invalid NNUE activation maximum {value}"),
-            Self::InvalidOutputScale(value) => write!(formatter, "invalid NNUE output scale {value}"),
+            Self::UnsupportedVersion(version) => {
+                write!(formatter, "unsupported NNUE version {version}")
+            }
+            Self::FeatureSetMismatch => {
+                formatter.write_str("NNUE feature-set id does not match engine")
+            }
+            Self::FeatureCountMismatch(count) => write!(
+                formatter,
+                "NNUE feature count {count} does not match engine"
+            ),
+            Self::UnsupportedHidden(hidden) => {
+                write!(formatter, "unsupported NNUE hidden width {hidden}")
+            }
+            Self::InvalidActivationMax(value) => {
+                write!(formatter, "invalid NNUE activation maximum {value}")
+            }
+            Self::InvalidOutputScale(value) => {
+                write!(formatter, "invalid NNUE output scale {value}")
+            }
             Self::LengthOverflow => formatter.write_str("NNUE length arithmetic overflow"),
-            Self::PayloadLengthMismatch { expected, actual } => write!(formatter, "NNUE payload length {actual} != expected {expected}"),
-            Self::BlobLengthMismatch { expected, actual } => write!(formatter, "NNUE blob length {actual} != expected {expected}"),
-            Self::PayloadChecksumMismatch { expected, actual } => write!(formatter, "NNUE payload checksum {actual:#018x} != expected {expected:#018x}"),
-            Self::WeightOutOfRange(weight) => write!(formatter, "NNUE weight {weight} exceeds accepted quantization bound"),
+            Self::PayloadLengthMismatch { expected, actual } => write!(
+                formatter,
+                "NNUE payload length {actual} != expected {expected}"
+            ),
+            Self::BlobLengthMismatch { expected, actual } => write!(
+                formatter,
+                "NNUE blob length {actual} != expected {expected}"
+            ),
+            Self::PayloadChecksumMismatch { expected, actual } => write!(
+                formatter,
+                "NNUE payload checksum {actual:#018x} != expected {expected:#018x}"
+            ),
+            Self::WeightOutOfRange(weight) => write!(
+                formatter,
+                "NNUE weight {weight} exceeds accepted quantization bound"
+            ),
         }
     }
 }
@@ -360,7 +391,10 @@ mod tests {
 
         let mut feature = valid.clone();
         feature[10] ^= 1;
-        assert_eq!(Network::from_bytes(&feature), Err(NetworkError::FeatureSetMismatch));
+        assert_eq!(
+            Network::from_bytes(&feature),
+            Err(NetworkError::FeatureSetMismatch)
+        );
 
         let mut payload = valid.clone();
         payload[HEADER_LEN] ^= 1;
@@ -370,8 +404,7 @@ mod tests {
         ));
 
         let mut out_of_range = test_network(32, 127, 100, 0, None);
-        let payload_start = HEADER_LEN;
-        out_of_range[payload_start..payload_start + 2].copy_from_slice(&5000_i16.to_le_bytes());
+        out_of_range[HEADER_LEN..HEADER_LEN + 2].copy_from_slice(&5000_i16.to_le_bytes());
         rewrite_checksum(&mut out_of_range);
         assert_eq!(
             Network::from_bytes(&out_of_range),
@@ -381,8 +414,10 @@ mod tests {
 
     #[test]
     fn full_inference_uses_side_to_move_perspective_order() {
-        let white = Position::from_fen("4k3/8/8/8/8/8/P7/4K3 w - - 0 1").expect("valid FEN");
-        let black = Position::from_fen("4k3/8/8/8/8/8/P7/4K3 b - - 0 1").expect("valid FEN");
+        let white =
+            Position::from_fen("4k3/8/8/8/8/8/P7/4K3 w - - 0 1").expect("valid FEN");
+        let black =
+            Position::from_fen("4k3/8/8/8/8/8/P7/4K3 b - - 0 1").expect("valid FEN");
         let white_features = active_features(&white, Color::White).expect("white features");
         let black_features = active_features(&white, Color::Black).expect("black features");
         let unique = white_features
