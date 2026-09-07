@@ -1,0 +1,56 @@
+name: V11 submission exact-package smoke
+
+on:
+  push:
+    branches:
+      - analysis/v11-submission-final-20260907
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install competition Python runtime
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Verify exact submission ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '27c377230484e9820c85eedb3c01bf483c1893580a6be2bc1c36a8b05bf41a16  .analysis/v11_submission_final.zip' | sha256sum -c -
+          rm -rf /tmp/v11-final
+          mkdir -p /tmp/v11-final
+          unzip -q .analysis/v11_submission_final.zip -d /tmp/v11-final
+          test "$(find /tmp/v11-final -type f | wc -l)" -eq 4
+          test -f /tmp/v11-final/agent.py
+          test -f /tmp/v11-final/experiments/__init__.py
+          test -f /tmp/v11-final/experiments/numba_core.py
+          test -f /tmp/v11-final/experiments/numba_search.py
+          echo '3191c46f19a1c0b159de0fe5146bbc0bd3dcb74755619838084b3f87f299331f  /tmp/v11-final/experiments/numba_search.py' | sha256sum -c -
+          python -m py_compile /tmp/v11-final/agent.py /tmp/v11-final/experiments/__init__.py /tmp/v11-final/experiments/numba_core.py /tmp/v11-final/experiments/numba_search.py
+
+      - name: Production JIT and legal-move smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          START=$(date +%s)
+          timeout 90s python tools/v9_agent_runner.py /tmp/v11-final <<'EOF' > /tmp/v11-smoke.json
+          {"fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1","time_left_ms":120000}
+          EOF
+          END=$(date +%s)
+          cat /tmp/v11-smoke.json
+          grep -q '"ready": true' /tmp/v11-smoke.json
+          grep -q '"move":' /tmp/v11-smoke.json
+          echo "wall_seconds=$((END-START))"
