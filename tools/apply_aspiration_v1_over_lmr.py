@@ -22,6 +22,13 @@ text = replace_once(
 
 text = replace_once(
     text,
+    "        let mut last_completed = None;",
+    "        let mut last_completed: Option<SearchResult> = None;",
+    "iterative result type",
+)
+
+text = replace_once(
+    text,
     '''        for depth in 1..=max_depth {
             self.nodes = self.nodes.saturating_add(1);
             match self.search_root(position, prior_history, depth, control) {
