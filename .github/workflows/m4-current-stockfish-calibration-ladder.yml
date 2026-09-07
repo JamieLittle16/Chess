@@ -1,0 +1,106 @@
+name: M4 current Stockfish calibration ladder
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  calibration:
+    if: github.head_ref == 'm4/current-stockfish-calibration-ladder'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - elo: 1800
+            protocol: m4-calibration-stockfish1800-v1
+          - elo: 2000
+            protocol: m4-calibration-stockfish2000-v1
+          - elo: 2200
+            protocol: m4-calibration-stockfish2200-v1
+    name: Stockfish 19 Elo ${{ matrix.elo }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+
+      - name: Verify calibration branch does not change engine source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin 70484195439dc79d3610e36bcac88feb801a7721
+          git diff --exit-code 70484195439dc79d3610e36bcac88feb801a7721 -- crates Cargo.toml Cargo.lock rust-toolchain.toml
+
+      - name: Build current production engine
+        run: cargo build --release -p chess-uci
+
+      - name: Fetch pinned Fastchess and Stockfish 19
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/fastchess .qualification/stockfish
+
+          curl --fail --location --retry 3 \
+            --output .qualification/fastchess.tar \
+            https://github.com/Disservin/fastchess/releases/download/v1.8.2-alpha/fastchess-linux-x86-64.tar
+          echo '1003f920bebe841acdab5e6d7871e93171a4586857b3ec91c21ef5777f26ff96  .qualification/fastchess.tar' | sha256sum --check --strict
+          tar -xf .qualification/fastchess.tar -C .qualification/fastchess
+
+          curl --fail --location --retry 3 \
+            --output .qualification/stockfish.tar.gz \
+            https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  .qualification/stockfish.tar.gz' | sha256sum --check --strict
+          tar -xzf .qualification/stockfish.tar.gz -C .qualification/stockfish
+
+          FASTCHESS_BIN=$(find "$PWD/.qualification/fastchess" -type f -name fastchess -perm -111 -print -quit)
+          STOCKFISH_BIN=$(find "$PWD/.qualification/stockfish" -type f -name 'stockfish*' -perm -111 -print -quit)
+          test -n "$FASTCHESS_BIN"
+          test -n "$STOCKFISH_BIN"
+          echo "FASTCHESS_BIN=$FASTCHESS_BIN" >> "$GITHUB_ENV"
+          echo "STOCKFISH_BIN=$STOCKFISH_BIN" >> "$GITHUB_ENV"
+
+      - name: Record exact identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$FASTCHESS_BIN" -version
+          printf 'uci\nquit\n' | "$STOCKFISH_BIN" | head -n 50
+          sha256sum target/release/chess-uci "$FASTCHESS_BIN" "$STOCKFISH_BIN" match/openings/m3-uho-lichess-100-v1.epd
+
+      - name: Run paired calibration rung
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHORT_SHA=${GITHUB_SHA:0:12}
+          python3 scripts/match_harness.py \
+            --protocol "match/protocols/${{ matrix.protocol }}.json" \
+            --candidate "$PWD/target/release/chess-uci" \
+            --candidate-name "Chess-M4-current@$SHORT_SHA" \
+            --candidate-option Hash=32 \
+            --reference "$STOCKFISH_BIN" \
+            --reference-name 'Stockfish-19-Elo${{ matrix.elo }}' \
+            --reference-option Threads=1 \
+            --reference-option Hash=32 \
+            --reference-option UCI_LimitStrength=true \
+            --reference-option UCI_Elo=${{ matrix.elo }} \
+            --fastchess "$FASTCHESS_BIN" \
+            --openings match/openings/m3-uho-lichess-100-v1.epd \
+            --output-dir "calibration-results-${{ matrix.elo }}"
+
+      - name: Upload retained calibration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m4-current-stockfish${{ matrix.elo }}-${{ github.sha }}
+          path: calibration-results-${{ matrix.elo }}/
+          if-no-files-found: warn
+          retention-days: 30
