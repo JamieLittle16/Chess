@@ -44,3 +44,5 @@ A width is not selected from training loss alone. Each checkpoint must pass:
 6. fresh-book replication / SPRT before any V14 integration.
 
 Only after a width survives those gates do we consider blending/replacing the V13 evaluator or retuning search around it.
+
+The trainer API itself is CI-gated before any expensive GPU run; GPU checkpoints remain external, immutable experiment artifacts rather than repository state.
