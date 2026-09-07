@@ -270,8 +270,10 @@ text = replace_once(
     fn bounded_root_search_fails_soft_and_restores_position() {
         let mut root = Position::startpos();
         let original = root.clone();
-        let mut searcher = Searcher::default();
-        searcher.nodes = 1;
+        let mut searcher = Searcher {
+            nodes: 1,
+            ..Searcher::default()
+        };
 
         let fail_high = searcher
             .search_root(&mut root, &[], 3, -500, -400, &super::NeverStop)
