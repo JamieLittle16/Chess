@@ -123,8 +123,8 @@ fn evaluate_joint_tapered_psqt_v1(position: &Position) -> i32 {
                         square.file(),
                         square.rank(),
                     );
-                middle_game +=
-                    sign * (i32::from(MG_PSQT[kind.index()][relative_index]) + correction_middle_game);
+                middle_game += sign
+                    * (i32::from(MG_PSQT[kind.index()][relative_index]) + correction_middle_game);
                 end_game +=
                     sign * (i32::from(EG_PSQT[kind.index()][relative_index]) + correction_end_game);
             }
