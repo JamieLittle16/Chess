@@ -1,0 +1,93 @@
+name: V13 final interaction confirmation
+
+on:
+  push:
+    branches: [analysis/v13-final-interaction-confirm-20260907]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  arena:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Confirm 140/200 pruning marginally over 120/180 at 1/6.
+          - {name: prune-a, cn: 1, cd: 6, cq: 10, cr: 140, cf: 200, bn: 1, bd: 6, bq: 10, br: 120, bf: 180, start: 40, seed: 110101}
+          - {name: prune-b, cn: 1, cd: 6, cq: 10, cr: 140, cf: 200, bn: 1, bd: 6, bq: 10, br: 120, bf: 180, start: 60, seed: 110102}
+          # Test 3/16 marginally over 1/6 once 140/200 pruning is present.
+          - {name: res316-a, cn: 3, cd: 16, cq: 10, cr: 140, cf: 200, bn: 1, bd: 6, bq: 10, br: 140, bf: 200, start: 40, seed: 110201}
+          - {name: res316-b, cn: 3, cd: 16, cq: 10, cr: 140, cf: 200, bn: 1, bd: 6, bq: 10, br: 140, bf: 200, start: 60, seed: 110202}
+          # Test q8 marginally over q10 on the strongest proposed quality stack.
+          - {name: q8-a, cn: 3, cd: 16, cq: 8, cr: 140, cf: 200, bn: 3, bd: 16, bq: 10, br: 140, bf: 200, start: 40, seed: 110301}
+          - {name: q8-b, cn: 3, cd: 16, cq: 8, cr: 140, cf: 200, bn: 3, bd: 16, bq: 10, br: 140, bf: 200, start: 60, seed: 110302}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: analysis/v13-linear-residual
+          path: arena-src
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition dependencies
+        run: python -m pip install --disable-pip-version-check numba==0.67.0 numpy==2.5.2 chess==1.11.2
+      - name: Reconstruct matched engines
+        shell: bash
+        env:
+          CN: ${{ matrix.cn }}
+          CD: ${{ matrix.cd }}
+          CQ: ${{ matrix.cq }}
+          CR: ${{ matrix.cr }}
+          CF: ${{ matrix.cf }}
+          BN: ${{ matrix.bn }}
+          BD: ${{ matrix.bd }}
+          BQ: ${{ matrix.bq }}
+          BR: ${{ matrix.br }}
+          BF: ${{ matrix.bf }}
+        run: |
+          set -euo pipefail
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum -c -
+          rm -rf /tmp/base /tmp/cand; mkdir /tmp/base /tmp/cand
+          unzip -q /tmp/v13.zip -d /tmp/base; unzip -q /tmp/v13.zip -d /tmp/cand
+          patch /tmp/base/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          patch /tmp/cand/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          python scripts/patch_v13_legality_context.py /tmp/base/experiments/numba_core.py
+          python scripts/patch_v13_legality_context.py /tmp/cand/experiments/numba_core.py
+          python - <<'PY'
+          import os,re
+          from pathlib import Path
+          def tune(root,n,d,q,r,f):
+              p=Path(root)/'experiments/numba_search.py'; s=p.read_text()
+              old='    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+              new=f'    correction = (correction * {n}) // {d}\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+              assert s.count(old)==1; s=s.replace(old,new,1)
+              s,c=re.subn(r'MAX_QPLY = 10\n',f'MAX_QPLY = {q}\n',s,count=1); assert c==1
+              old='pruning_static_eval - 120 * depth >= beta'; new=f'pruning_static_eval - {r} * depth >= beta'; assert s.count(old)==1; s=s.replace(old,new,1)
+              old='pruning_static_eval + 180 * depth <= alpha'; new=f'pruning_static_eval + {f} * depth <= alpha'; assert s.count(old)==1; s=s.replace(old,new,1)
+              p.write_text(s)
+          tune('/tmp/cand',int(os.environ['CN']),int(os.environ['CD']),int(os.environ['CQ']),int(os.environ['CR']),int(os.environ['CF']))
+          tune('/tmp/base',int(os.environ['BN']),int(os.environ['BD']),int(os.environ['BQ']),int(os.environ['BR']),int(os.environ['BF']))
+          PY
+          python -m py_compile /tmp/base/agent.py /tmp/base/experiments/*.py /tmp/cand/agent.py /tmp/cand/experiments/*.py
+      - name: Fresh-opening fixed-node paired arena
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p v13-results
+          /usr/bin/time -f 'ARENA_WALL_SEC=%e MAX_RSS_KB=%M' \
+            python -u arena-src/.v13/v13_arena.py /tmp/cand /tmp/base 20000 20 '${{ matrix.seed }}' 220 \
+              match/openings/m3-uho-lichess-100-v1.epd '${{ matrix.start }}' \
+            | tee 'v13-results/${{ matrix.name }}.log'
+          grep '^FINAL ' 'v13-results/${{ matrix.name }}.log'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v13-final-confirm-${{ matrix.name }}-${{ github.sha }}
+          path: v13-results/
+          retention-days: 7
