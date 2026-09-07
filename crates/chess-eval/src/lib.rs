@@ -4,10 +4,19 @@
 //! model. The tables are generated at compile time from transparent geometric rules rather than
 //! copied from another engine. Runtime evaluation remains allocation-free: iterate the existing
 //! piece bitboards, perform table lookups, and interpolate one middle-game/end-game score pair.
+//!
+//! M5 diagnostics may opt into an absolute learned evaluator through
+//! `CHESS_EXPERIMENTAL_ABSOLUTE_NNUE=/path/to/network.nnue`. The default path remains the exact
+//! accepted classical evaluator. The model is loaded once per process and replaces, rather than
+//! augments, the classical value so an absolute Stockfish-CP-trained model is tested with the target
+//! semantics it was actually trained for.
 
 pub mod nnue;
 
+use std::{env, fs, sync::OnceLock};
+
 use chess_core::{Color, PieceKind, Position};
+use nnue::network::Network;
 
 /// Conventional centipawn-like material values retained from the material-only reference.
 pub const PIECE_VALUES: [i32; 6] = [100, 320, 330, 500, 900, 0];
@@ -25,6 +34,9 @@ const ROOK_SEMI_OPEN_FILE_MG_BONUS: i32 = 8;
 const ROOK_SEMI_OPEN_FILE_EG_BONUS: i32 = 6;
 const FILE_A: u64 = 0x0101_0101_0101_0101;
 
+const EXPERIMENTAL_ABSOLUTE_NNUE_ENV: &str = "CHESS_EXPERIMENTAL_ABSOLUTE_NNUE";
+static EXPERIMENTAL_ABSOLUTE_NNUE: OnceLock<Option<Network>> = OnceLock::new();
+
 /// Return the material owned by one side in centipawn-like units.
 #[must_use]
 pub fn material(position: &Position, color: Color) -> i32 {
@@ -36,11 +48,45 @@ pub fn material(position: &Position, color: Color) -> i32 {
 
 /// Evaluate a position from the side-to-move perspective.
 ///
-/// Positive values favour the player to move; negative values favour their opponent. The tapered
-/// score interpolates between middle-game and end-game piece-square preferences using remaining
-/// non-pawn material. Black reuses the same tables by vertically mirroring each square.
+/// Production/default processes return the accepted classical score exactly. A diagnostic process
+/// may set `CHESS_EXPERIMENTAL_ABSOLUTE_NNUE` to an exact `CHNNUE1` artifact path; in that process
+/// the network's absolute side-to-move value replaces classical evaluation. Missing or malformed
+/// configured models fail loudly rather than silently changing the experiment back to the control.
 #[must_use]
 pub fn evaluate(position: &Position) -> i32 {
+    let Some(network) = experimental_absolute_nnue() else {
+        return evaluate_classical(position);
+    };
+    network
+        .evaluate_full(position)
+        .expect("legal search positions contain both kings")
+}
+
+fn experimental_absolute_nnue() -> Option<&'static Network> {
+    EXPERIMENTAL_ABSOLUTE_NNUE
+        .get_or_init(|| {
+            let Some(path) = env::var_os(EXPERIMENTAL_ABSOLUTE_NNUE_ENV) else {
+                return None;
+            };
+            let bytes = fs::read(&path).unwrap_or_else(|error| {
+                panic!(
+                    "failed to read {EXPERIMENTAL_ABSOLUTE_NNUE_ENV} model {}: {error}",
+                    path.to_string_lossy()
+                )
+            });
+            Some(Network::from_bytes(&bytes).unwrap_or_else(|error| {
+                panic!(
+                    "failed to parse {EXPERIMENTAL_ABSOLUTE_NNUE_ENV} model {}: {error}",
+                    path.to_string_lossy()
+                )
+            }))
+        })
+        .as_ref()
+}
+
+/// Exact accepted handcrafted evaluator, retained as the control and as an offline diagnostic oracle.
+#[must_use]
+pub fn evaluate_classical(position: &Position) -> i32 {
     let mut middle_game = 0_i32;
     let mut end_game = 0_i32;
     let mut phase = 0_i32;
@@ -137,8 +183,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
     let file_centrality = 7 - file_distance;
 
     match piece {
-        // Pawns gain more from safe advancement in the endgame. A tiny central-file bonus nudges
-        // healthy central occupation without attempting to model pawn structure yet.
         0 => {
             let advance = if end_game {
                 match rank {
@@ -163,7 +207,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
             };
             advance + file_centrality / 2
         }
-        // Knights are the strongest centralisation signal in v1.
         1 => {
             if end_game {
                 centre * 3 - 18
@@ -171,7 +214,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
                 centre * 4 - 24
             }
         }
-        // Bishops prefer activity but are less sensitive to central squares than knights.
         2 => {
             if end_game {
                 centre * 2 - 6
@@ -179,8 +221,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
                 centre * 2 - 8
             }
         }
-        // Rooks get a modest seventh-rank/activity signal. File structure is deliberately deferred
-        // to a separate experiment so E1 remains a pure placement baseline.
         3 => {
             let seventh = if rank == 6 { 14 } else { 0 };
             if end_game {
@@ -189,8 +229,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
                 seventh + rank
             }
         }
-        // Queen placement is intentionally weakly weighted to avoid paying for brittle opening
-        // assumptions before development/king-safety terms exist.
         4 => {
             if end_game {
                 centre * 2 - 8
@@ -198,8 +236,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
                 centre - 8
             }
         }
-        // Middle-game kings prefer the home rank and castled files. End-game kings reverse that
-        // preference and are rewarded for centralisation.
         5 => {
             if end_game {
                 centre * 4 - 24
@@ -225,11 +261,12 @@ const fn abs_i32(value: i32) -> i32 {
 mod tests {
     use chess_core::{Color, Position};
 
-    use super::{evaluate, piece_structure};
+    use super::{evaluate, evaluate_classical, piece_structure};
 
     #[test]
     fn starting_position_is_positionally_equal() {
         assert_eq!(evaluate(&Position::startpos()), 0);
+        assert_eq!(evaluate_classical(&Position::startpos()), 0);
     }
 
     #[test]
