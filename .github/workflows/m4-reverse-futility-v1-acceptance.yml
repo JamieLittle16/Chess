@@ -1,0 +1,124 @@
+name: M4 reverse futility v1 acceptance
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  acceptance:
+    if: github.head_ref == 'm4/reverse-futility-v1-acceptance'
+    name: Clean RFP v1 200-game acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: m4/reverse-futility-v1-acceptance
+          fetch-depth: 2
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - name: Ensure exact screened source is committed
+        id: source
+        run: |
+          set -euo pipefail
+          EXPECTED=d04cbd5503ad4fba42b73cc3e7b7b5ee2e5893b9e847d7ac8f01884267f90523
+          CURRENT=$(sha256sum crates/chess-search/src/lib.rs | cut -d' ' -f1)
+          if [ "$CURRENT" = "$EXPECTED" ]; then
+            echo 'materialized=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          python3 tools/apply_reverse_futility_v1.py
+          cargo fmt --all
+          ACTUAL=$(sha256sum crates/chess-search/src/lib.rs | cut -d' ' -f1)
+          test "$ACTUAL" = "$EXPECTED"
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates/chess-search/src/lib.rs
+          git commit -m 'm4: materialize exact screened RFP v1 source'
+          git push origin HEAD:m4/reverse-futility-v1-acceptance
+          echo 'materialized=false' >> "$GITHUB_OUTPUT"
+      - name: Verify exact committed candidate
+        if: steps.source.outputs.materialized == 'true'
+        run: |
+          set -euo pipefail
+          echo 'd04cbd5503ad4fba42b73cc3e7b7b5ee2e5893b9e847d7ac8f01884267f90523  crates/chess-search/src/lib.rs' | sha256sum --check --strict
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test -p chess-search --all-features
+          cargo test -p chess-search --test draw_strategy
+          cargo test -p chess-core --all-features
+          cargo test -p chess-engine --all-features
+          cargo test -p chess-uci --all-features
+          git diff --exit-code
+          git diff --cached --exit-code
+      - name: Build candidate
+        if: steps.source.outputs.materialized == 'true'
+        run: |
+          set -euo pipefail
+          CANDIDATE_TARGET="$PWD/.qualification/candidate-target"
+          CARGO_TARGET_DIR="$CANDIDATE_TARGET" cargo build --release -p chess-uci
+          echo "CANDIDATE_BIN=$CANDIDATE_TARGET/release/chess-uci" >> "$GITHUB_ENV"
+      - name: Build accepted reference
+        if: steps.source.outputs.materialized == 'true'
+        run: |
+          set -euo pipefail
+          REFERENCE_SHA=88d2843afce44921ea422da11961aaf0f8ed383f
+          git fetch --depth=1 origin "$REFERENCE_SHA"
+          git worktree add --detach .qualification/reference "$REFERENCE_SHA"
+          REFERENCE_TARGET="$PWD/.qualification/reference-target"
+          (
+            cd .qualification/reference
+            CARGO_TARGET_DIR="$REFERENCE_TARGET" cargo build --release -p chess-uci
+          )
+          echo "REFERENCE_BIN=$REFERENCE_TARGET/release/chess-uci" >> "$GITHUB_ENV"
+      - name: Fetch pinned Fastchess
+        if: steps.source.outputs.materialized == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/fastchess
+          curl --fail --location --retry 3 --output .qualification/fastchess.tar \
+            https://github.com/Disservin/fastchess/releases/download/v1.8.2-alpha/fastchess-linux-x86-64.tar
+          echo '1003f920bebe841acdab5e6d7871e93171a4586857b3ec91c21ef5777f26ff96  .qualification/fastchess.tar' | sha256sum --check --strict
+          tar -xf .qualification/fastchess.tar -C .qualification/fastchess
+          FASTCHESS_BIN=$(find "$PWD/.qualification/fastchess" -type f -name fastchess -perm -111 -print -quit)
+          test -n "$FASTCHESS_BIN"
+          echo "FASTCHESS_BIN=$FASTCHESS_BIN" >> "$GITHUB_ENV"
+      - name: Record exact identities
+        if: steps.source.outputs.materialized == 'true'
+        run: |
+          set -euo pipefail
+          "$FASTCHESS_BIN" -version
+          git rev-parse HEAD
+          sha256sum "$CANDIDATE_BIN" "$REFERENCE_BIN" "$FASTCHESS_BIN" match/openings/m3-uho-lichess-100-v1.epd crates/chess-search/src/lib.rs
+      - name: Run clean 200-game acceptance
+        if: steps.source.outputs.materialized == 'true'
+        run: |
+          set -euo pipefail
+          SHORT_SHA=$(git rev-parse --short=12 HEAD)
+          python3 scripts/match_harness.py \
+            --protocol match/protocols/m4-reverse-futility-v1-acceptance.json \
+            --candidate "$CANDIDATE_BIN" \
+            --candidate-name "Chess-M4-rfp-v1-accept@$SHORT_SHA" \
+            --candidate-option Hash=32 \
+            --reference "$REFERENCE_BIN" \
+            --reference-name 'Chess-main@88d2843afce4' \
+            --reference-option Hash=32 \
+            --fastchess "$FASTCHESS_BIN" \
+            --openings match/openings/m3-uho-lichess-100-v1.epd \
+            --output-dir acceptance-results
+      - name: Upload retained evidence
+        if: always() && steps.source.outputs.materialized == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: m4-reverse-futility-v1-acceptance-${{ github.sha }}
+          path: acceptance-results/
+          if-no-files-found: warn
+          retention-days: 30
