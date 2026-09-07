@@ -15,10 +15,12 @@ jobs:
           python-version: '3.13'
       - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy scikit-learn scipy
       - name: Print canonical dynamic features
+        env:
+          PYTHONPATH: scripts
         run: |
           python - <<'PY'
-          import chess, json
-          from scripts.train_v13_dynamic_residual import dynamic_features
+          import chess
+          from train_v13_dynamic_residual import dynamic_features
           fens = {
             'm23':'5rk1/pq3ppp/1p2pn2/3rN3/P7/1P3PP1/1Q2R1KP/R7 w - - 0 1',
             'm24':'3r2k1/pq3ppp/1p2pn2/3rN3/P7/RP3PP1/1Q2R1KP/8 w - - 0 1',
