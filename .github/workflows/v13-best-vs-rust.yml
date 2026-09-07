@@ -1,0 +1,130 @@
+name: V13 BEST vs Rust diagnostic
+
+on:
+  push:
+    branches:
+      - analysis/v13-best-vs-rust-20260907
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostic:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: fast-a, start: 0,  count: 6, base_ms: 2500, inc_ms: 50,  nodes: 10000}
+          - {name: fast-b, start: 6,  count: 6, base_ms: 2500, inc_ms: 50,  nodes: 10000}
+          - {name: fast-c, start: 12, count: 6, base_ms: 2500, inc_ms: 50,  nodes: 10000}
+          - {name: fast-d, start: 18, count: 6, base_ms: 2500, inc_ms: 50,  nodes: 10000}
+          - {name: slow-a, start: 24, count: 3, base_ms: 8000, inc_ms: 100, nodes: 25000}
+          - {name: slow-b, start: 27, count: 3, base_ms: 8000, inc_ms: 100, nodes: 25000}
+
+    steps:
+      - name: Checkout pinned diagnostic branch
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.98.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install runtime and Stockfish
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install chess==1.11.2 numpy==2.5.2 numba==0.67.0
+          sudo apt-get update -qq
+          sudo apt-get install -y stockfish
+
+      - name: Reconstruct exact uploaded V13 BEST
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 -d .analysis/v13_best_payload.b64 > /tmp/v13best.zip
+          echo 'acf6ba72c95fa61fb6b54245f2e24ab9aa1665950b29cecf421ac3c7ab9a738a  /tmp/v13best.zip' | sha256sum -c -
+          rm -rf /tmp/v13best && mkdir -p /tmp/v13best
+          unzip -q /tmp/v13best.zip -d /tmp/v13best
+          echo 'df346b21be42832a0ae97e7faa15953ab460f0387fb0358961651466557ebde8  /tmp/v13best/agent.py' | sha256sum -c -
+          echo '6422eb8eb8713e02e6d62d33ef230f37cf707188e864b575226802aead128b2f  /tmp/v13best/experiments/__init__.py' | sha256sum -c -
+          echo '0306e8145a453d91b9b5ac92e9980931510d9e18f8ba598a7548d08b85165c35  /tmp/v13best/experiments/numba_core.py' | sha256sum -c -
+          echo '401f6580028a72361286bd99bee1f0022c74e6c8a65da8acd47448835a1ff360  /tmp/v13best/experiments/numba_search.py' | sha256sum -c -
+          echo '7d0fc5f7a186e79317cf12a2ff285d7716c651fbd045c53d65a3cc6eb1b15319  /tmp/v13best/experiments/v13_residual.i16' | sha256sum -c -
+          python -m py_compile /tmp/v13best/agent.py /tmp/v13best/experiments/__init__.py /tmp/v13best/experiments/numba_core.py /tmp/v13best/experiments/numba_search.py
+
+      - name: Build pinned Rust UCI engine
+        run: cargo build --release -p chess-uci
+
+      - name: Smoke-test under competition init cap
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUST_ENGINE=target/release/chess-uci
+          printf 'uci\nisready\nquit\n' | "$RUST_ENGINE" | tee /tmp/rust-uci.txt
+          grep -q 'uciok' /tmp/rust-uci.txt
+          grep -q 'readyok' /tmp/rust-uci.txt
+          /usr/bin/time -f 'v13best_init_wall_s=%e v13best_init_maxrss_kb=%M' -o /tmp/v13best-init.txt \
+            timeout 90s python tools/v9_agent_runner.py /tmp/v13best <<'EOF' >/tmp/v13best-smoke.json
+          {"fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1","time_left_ms":2000}
+          EOF
+          cat /tmp/v13best-init.txt
+          cat /tmp/v13best-smoke.json
+          grep -q '"ready": true' /tmp/v13best-smoke.json
+          grep -q '"move":' /tmp/v13best-smoke.json
+
+      - name: Run paired games and Stockfish diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          STOCKFISH="$(command -v stockfish || true)"
+          if [ -z "$STOCKFISH" ]; then STOCKFISH=/usr/games/stockfish; fi
+          OUT="analysis-results/${{ matrix.name }}"
+          mkdir -p "$OUT"
+          python tools/v9_rust_diagnostic.py \
+            --agent /tmp/v13best \
+            --runner tools/v9_agent_runner.py \
+            --engine target/release/chess-uci \
+            --stockfish "$STOCKFISH" \
+            --openings match/openings/m3-uho-lichess-100-v1.epd \
+            --opening-start ${{ matrix.start }} \
+            --opening-count ${{ matrix.count }} \
+            --base-ms ${{ matrix.base_ms }} \
+            --increment-ms ${{ matrix.inc_ms }} \
+            --analysis-nodes ${{ matrix.nodes }} \
+            --out-dir "$OUT" | tee "$OUT/run.log"
+          {
+            echo 'candidate=Little-Gambit-V13-BEST'
+            echo 'zip_sha256=acf6ba72c95fa61fb6b54245f2e24ab9aa1665950b29cecf421ac3c7ab9a738a'
+            echo 'search_sha256=401f6580028a72361286bd99bee1f0022c74e6c8a65da8acd47448835a1ff360'
+            echo 'core_sha256=0306e8145a453d91b9b5ac92e9980931510d9e18f8ba598a7548d08b85165c35'
+            echo 'rust_sha=44c1e16d3713cdca1ff1bd71f7596ef3b5804037'
+            echo "shard=${{ matrix.name }}"
+            echo "opening_start=${{ matrix.start }}"
+            echo "opening_count=${{ matrix.count }}"
+            echo "base_ms=${{ matrix.base_ms }}"
+            echo "increment_ms=${{ matrix.inc_ms }}"
+            echo "analysis_nodes=${{ matrix.nodes }}"
+            cat /tmp/v13best-init.txt || true
+            python --version
+            rustc --version
+            python -m pip show chess numpy numba | grep -E '^(Name|Version):'
+          } > "$OUT/provenance.txt"
+
+      - name: Upload diagnostic shard
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v13-best-vs-rust-${{ matrix.name }}
+          path: analysis-results/${{ matrix.name }}
+          if-no-files-found: error
+          retention-days: 7
