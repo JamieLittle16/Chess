@@ -1,0 +1,101 @@
+name: M4 clock horizon v1 over LMR screening
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  screening:
+    if: github.head_ref == 'm4/clock-horizon-v1-over-lmr-screening'
+    name: Assertive clock horizon v1 over LMR
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - name: Apply isolated time-management candidate
+        run: |
+          set -euo pipefail
+          python3 tools/apply_clock_horizon_v1_over_lmr.py
+          cargo fmt --all
+          git diff --check
+          test -n "$(git diff -- crates/chess-engine/src/lib.rs)"
+      - name: Verify engine and search correctness
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test -p chess-engine --all-features
+          cargo test -p chess-uci --all-features
+          cargo test -p chess-search --all-features
+          cargo test -p chess-search --test draw_strategy
+          cargo test -p chess-core --all-features
+          cargo test -p chess-eval --all-features
+      - name: Build candidate
+        run: |
+          set -euo pipefail
+          CANDIDATE_TARGET="$PWD/.qualification/candidate-target"
+          CARGO_TARGET_DIR="$CANDIDATE_TARGET" cargo build --release -p chess-uci
+          echo "CANDIDATE_BIN=$CANDIDATE_TARGET/release/chess-uci" >> "$GITHUB_ENV"
+      - name: Build accepted LMR production reference
+        run: |
+          set -euo pipefail
+          REFERENCE_SHA=1be30731607d0f1a609a17e469aff78ee091d24e
+          git fetch --depth=1 origin "$REFERENCE_SHA"
+          git worktree add --detach .qualification/reference "$REFERENCE_SHA"
+          REFERENCE_TARGET="$PWD/.qualification/reference-target"
+          (cd .qualification/reference && CARGO_TARGET_DIR="$REFERENCE_TARGET" cargo build --release -p chess-uci)
+          echo "REFERENCE_BIN=$REFERENCE_TARGET/release/chess-uci" >> "$GITHUB_ENV"
+      - name: Fetch pinned Fastchess
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/fastchess
+          curl --fail --location --retry 3 --output .qualification/fastchess.tar https://github.com/Disservin/fastchess/releases/download/v1.8.2-alpha/fastchess-linux-x86-64.tar
+          echo '1003f920bebe841acdab5e6d7871e93171a4586857b3ec91c21ef5777f26ff96  .qualification/fastchess.tar' | sha256sum --check --strict
+          tar -xf .qualification/fastchess.tar -C .qualification/fastchess
+          FASTCHESS_BIN=$(find "$PWD/.qualification/fastchess" -type f -name fastchess -perm -111 -print -quit)
+          test -n "$FASTCHESS_BIN"
+          echo "FASTCHESS_BIN=$FASTCHESS_BIN" >> "$GITHUB_ENV"
+      - name: Record identities
+        run: |
+          set -euo pipefail
+          "$FASTCHESS_BIN" -version
+          sha256sum "$CANDIDATE_BIN" "$REFERENCE_BIN" "$FASTCHESS_BIN" match/openings/m3-uho-lichess-100-v1.epd
+      - name: Run paired equal-time screen
+        run: |
+          set -euo pipefail
+          SHORT_SHA=${GITHUB_SHA:0:12}
+          python3 scripts/match_harness.py \
+            --protocol match/protocols/m4-clock-horizon-v1-over-lmr-screening.json \
+            --candidate "$CANDIDATE_BIN" \
+            --candidate-name "Chess-M4-lmr+clock24@$SHORT_SHA" \
+            --candidate-option Hash=32 \
+            --reference "$REFERENCE_BIN" \
+            --reference-name 'Chess-LMR-prod@1be30731607d' \
+            --reference-option Hash=32 \
+            --fastchess "$FASTCHESS_BIN" \
+            --openings match/openings/m3-uho-lichess-100-v1.epd \
+            --output-dir screening-results
+      - name: Retain exact patched source
+        if: always()
+        run: |
+          mkdir -p screening-results/exact-source/crates/chess-engine/src
+          cp crates/chess-engine/src/lib.rs screening-results/exact-source/crates/chess-engine/src/lib.rs
+          sha256sum crates/chess-engine/src/lib.rs > screening-results/exact-source/chess-engine-lib.sha256
+      - name: Upload retained evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m4-clock-horizon-v1-over-lmr-${{ github.sha }}
+          path: screening-results/
+          if-no-files-found: warn
+          retention-days: 30
