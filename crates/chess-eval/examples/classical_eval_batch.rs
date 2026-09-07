@@ -4,7 +4,7 @@ use std::{
 };
 
 use chess_core::Position;
-use chess_eval::evaluate;
+use chess_eval::evaluate_classical;
 
 fn main() {
     let stdin = io::stdin();
@@ -21,6 +21,6 @@ fn main() {
             eprintln!("invalid FEN at input line {}: {error}", line_no + 1);
             process::exit(2);
         });
-        println!("{}", evaluate(&position));
+        println!("{}", evaluate_classical(&position));
     }
 }
