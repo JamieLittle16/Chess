@@ -1,0 +1,39 @@
+name: V14 Python compact NNUE trainer
+
+on:
+  push:
+    branches: [analysis/v14-python-student-trainer-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  trainer-api:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: Verify frozen training contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -Fq 'rev = "629ee50000b2afb7b3337595401c830d3b1e0f42"' training/bullet-v14-python-a/Cargo.toml
+          grep -Fq 'const ALLOWED_HIDDEN_SIZES: [usize; 4] = [64, 96, 128, 192];' training/bullet-v14-python-a/src/main.rs
+          grep -Fq 'const WDL_PROPORTION: f32 = 0.75;' training/bullet-v14-python-a/src/main.rs
+          grep -Fq 'const EVAL_SCALE: i32 = 400;' training/bullet-v14-python-a/src/main.rs
+
+      - name: Format standalone trainer
+        run: cargo fmt --manifest-path training/bullet-v14-python-a/Cargo.toml -- --check
+
+      - name: Check pinned Bullet API without GPU backend
+        run: cargo check --manifest-path training/bullet-v14-python-a/Cargo.toml
+
+      - name: Clippy standalone trainer
+        run: cargo clippy --manifest-path training/bullet-v14-python-a/Cargo.toml -- -D warnings
