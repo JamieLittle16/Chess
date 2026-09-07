@@ -1,4 +1,4 @@
-name: M6 SPRT opening bootstrap
+name: M6 SPRT opening certification
 
 on:
   pull_request:
@@ -35,23 +35,25 @@ jobs:
           echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/UHO_Lichess_4852_v1.epd.zip' \
             | sha256sum --check --strict
 
-      - name: Derive deterministic 5000-position M6 suite
+      - name: Reproduce pinned 5000-position M6 suite
         shell: bash
         run: |
           set -euo pipefail
           rm -rf generated-m6-openings
+          mkdir -p generated-m6-openings
           python scripts/build_m6_opening_suite.py \
             --archive /tmp/UHO_Lichess_4852_v1.epd.zip \
             --output-dir generated-m6-openings \
-            --bootstrap-unpinned-output \
             | tee generated-m6-openings/derivation.log
-          wc -l generated-m6-openings/m6-uho-lichess-5000-v1.epd
+          test "$(wc -l < generated-m6-openings/m6-uho-lichess-5000-v1.epd)" = '5000'
+          echo '5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e  generated-m6-openings/m6-uho-lichess-5000-v1.epd' \
+            | sha256sum --check --strict
           sha256sum generated-m6-openings/m6-uho-lichess-5000-v1.epd \
             | tee generated-m6-openings/epd.sha256
 
       - name: Upload source-verified derived suite
         uses: actions/upload-artifact@v4
         with:
-          name: m6-uho-lichess-5000-v1-bootstrap-${{ github.sha }}
+          name: m6-uho-lichess-5000-v1-certified-${{ github.sha }}
           path: generated-m6-openings/
           retention-days: 30
