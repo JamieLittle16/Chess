@@ -1,0 +1,59 @@
+name: M6 SPRT opening certification
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  derive:
+    if: github.head_ref == 'm6/sprt-qualification-v1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Unit-test finite and SPRT qualification boundaries
+        run: |
+          set -euo pipefail
+          python -m unittest tests.test_match_harness tests.test_sprt_match_harness
+
+      - name: Download exact pinned Stockfish UHO source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip' \
+            --output /tmp/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/UHO_Lichess_4852_v1.epd.zip' \
+            | sha256sum --check --strict
+
+      - name: Reproduce pinned 5000-position M6 suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf generated-m6-openings
+          mkdir -p generated-m6-openings
+          python scripts/build_m6_opening_suite.py \
+            --archive /tmp/UHO_Lichess_4852_v1.epd.zip \
+            --output-dir generated-m6-openings \
+            | tee generated-m6-openings/derivation.log
+          test "$(wc -l < generated-m6-openings/m6-uho-lichess-5000-v1.epd)" = '5000'
+          echo '5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e  generated-m6-openings/m6-uho-lichess-5000-v1.epd' \
+            | sha256sum --check --strict
+          sha256sum generated-m6-openings/m6-uho-lichess-5000-v1.epd \
+            | tee generated-m6-openings/epd.sha256
+
+      - name: Upload source-verified derived suite
+        uses: actions/upload-artifact@v4
+        with:
+          name: m6-uho-lichess-5000-v1-certified-${{ github.sha }}
+          path: generated-m6-openings/
+          retention-days: 30

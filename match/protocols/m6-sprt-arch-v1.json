@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "protocol_id": "m6-sprt-arch-v1",
+  "runner": "fastchess",
+  "max_games": 10000,
+  "time_control": "1+0.01",
+  "concurrency": 1,
+  "seed": 20261015,
+  "max_moves": 300,
+  "opening_format": "epd",
+  "openings_required": true,
+  "opening_suite_id": "m6-uho-lichess-5000-v1",
+  "opening_sha256": "5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e",
+  "paired_colour_reversal": true,
+  "ponder": false,
+  "tablebases": false,
+  "evaluation_adjudication": false,
+  "sprt": {
+    "elo0": 0.0,
+    "elo1": 10.0,
+    "alpha": 0.05,
+    "beta": 0.05,
+    "model": "logistic"
+  },
+  "notes": "M6 architecture-development SPRT. Paired pentanomial testing with a maximum 10000-game budget. Stop only when Fastchess crosses the predeclared SPRT boundary or exhausts the fixed budget. Threads=1 and Hash=32 are supplied explicitly by experiment workflows."
+}
