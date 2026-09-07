@@ -1,0 +1,103 @@
+name: Round57 V12 Stockfish postmortem
+
+on:
+  push:
+    branches:
+      - analysis/round57-v12-postmortem-20260907
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install analysis runtime
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install chess==1.11.2
+          sudo apt-get update -qq
+          sudo apt-get install -y stockfish
+      - name: Analyse every Little Gambit move
+        shell: bash
+        run: |
+          set -euo pipefail
+          STOCKFISH="$(command -v stockfish || true)"
+          if [ -z "$STOCKFISH" ]; then STOCKFISH=/usr/games/stockfish; fi
+          export STOCKFISH
+          python - <<'PY'
+          import chess, chess.pgn, chess.engine, json, os, statistics
+          from pathlib import Path
+
+          def cp(score):
+              s = score.pov(chess.WHITE)
+              if s.is_mate():
+                  m = s.mate()
+                  return (100000 - min(abs(m), 999)) if m and m > 0 else (-100000 + min(abs(m), 999))
+              v = s.score()
+              return int(v if v is not None else 0)
+
+          pgn = open('.analysis/round57-najeeba.pgn')
+          game = chess.pgn.read_game(pgn)
+          board = game.board()
+          engine = chess.engine.SimpleEngine.popen_uci(os.environ['STOCKFISH'])
+          engine.configure({'Threads': 1, 'Hash': 256})
+          rows=[]
+          node = game
+          ply=0
+          while node.variations:
+              child=node.variation(0)
+              move=child.move
+              ply += 1
+              if board.turn == chess.WHITE:
+                  fen=board.fen()
+                  san=board.san(move)
+                  multi=engine.analyse(board, chess.engine.Limit(nodes=120000), multipv=3)
+                  best=multi[0]
+                  best_move=best['pv'][0]
+                  best_san=board.san(best_move)
+                  best_cp=cp(best['score'])
+                  played=engine.analyse(board, chess.engine.Limit(nodes=120000), root_moves=[move])
+                  played_cp=cp(played['score'])
+                  loss=max(0,best_cp-played_cp)
+                  alternatives=[]
+                  for inf in multi:
+                      mv=inf['pv'][0]
+                      alternatives.append({'uci':mv.uci(),'san':board.san(mv),'score_cp':cp(inf['score'])})
+                  rows.append({
+                      'white_move_no': board.fullmove_number,
+                      'ply': ply,
+                      'fen_before': fen,
+                      'played_uci': move.uci(),
+                      'played_san': san,
+                      'best_uci': best_move.uci(),
+                      'best_san': best_san,
+                      'best_cp': best_cp,
+                      'played_cp': played_cp,
+                      'loss_cp': loss,
+                      'top3': alternatives,
+                  })
+              board.push(move)
+              node=child
+          engine.quit()
+          rows_sorted=sorted(rows,key=lambda r:r['loss_cp'],reverse=True)
+          out={'moves':rows,'worst':rows_sorted[:15]}
+          Path('round57-stockfish.json').write_text(json.dumps(out,indent=2))
+          print('TOP LOSSES')
+          for r in rows_sorted[:15]:
+              print(f"{r['white_move_no']}. {r['played_san']:<8} loss={r['loss_cp']:>6} best={r['best_san']:<8} before={r['best_cp']:>7} played={r['played_cp']:>7}")
+          finite=[r['loss_cp'] for r in rows if r['loss_cp'] < 90000]
+          print('moves',len(rows),'mean_loss_finite',round(statistics.mean(finite),1),'median',statistics.median(finite))
+          PY
+      - name: Upload postmortem
+        uses: actions/upload-artifact@v4
+        with:
+          name: round57-v12-stockfish-postmortem
+          path: round57-stockfish.json
+          retention-days: 7
