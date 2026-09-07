@@ -16,7 +16,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        seed: [91000, 92000]
+        include:
+          - { seed: 93000, start: 0 }
+          - { seed: 94000, start: 20 }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -44,20 +46,20 @@ jobs:
           p.write_text(s.replace(old, new))
           PY
           python -m py_compile /tmp/c3/agent.py /tmp/c3/experiments/*.py /tmp/base/agent.py /tmp/base/experiments/*.py
-          find /tmp/c3 -maxdepth 2 -type f -printf '%P\n' | sort
-      - name: Run paired fixed-node arena
+      - name: Run paired fixed-node arena on disjoint UHO openings
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p v13-results
           /usr/bin/time -f 'ARENA_WALL_SEC=%e MAX_RSS_KB=%M' \
-            python -u .v13/v13_arena.py /tmp/c3 /tmp/base 20000 10 '${{ matrix.seed }}' 220 \
-            | tee v13-results/seed-${{ matrix.seed }}.log
-          grep '^FINAL ' v13-results/seed-${{ matrix.seed }}.log
+            python -u .v13/v13_arena.py /tmp/c3 /tmp/base 20000 20 '${{ matrix.seed }}' 220 \
+              match/openings/m3-uho-lichess-100-v1.epd '${{ matrix.start }}' \
+            | tee v13-results/uho-${{ matrix.start }}-${{ matrix.seed }}.log
+          grep '^FINAL ' v13-results/uho-${{ matrix.start }}-${{ matrix.seed }}.log
       - name: Upload result
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: v13-half-residual-seed-${{ matrix.seed }}
+          name: v13-half-residual-uho-${{ matrix.start }}-${{ matrix.seed }}
           path: v13-results/
           retention-days: 7
