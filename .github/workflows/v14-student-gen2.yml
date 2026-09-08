@@ -65,16 +65,20 @@ jobs:
             python -m py_compile "$DIR/experiments/numba_search.py" "$DIR/experiments/v14_student_single_runtime.py"
             PYTHONPATH="$DIR" MODE="$MODE" python - <<'PY'
           import os,chess,numpy as np
-          from experiments.numba_core import encode_position
+          from experiments.numba_core import encode_position,generate_legal_moves,move_to_uci
           from experiments.numba_search import EVAL_WIDTH,_build_eval_state_into,_advance_eval_state_into,iterative_search_stateful
           b=chess.Board(); e=encode_position(b); root=np.empty(EVAL_WIDTH,dtype=np.int32);_build_eval_state_into(e.board,root)
-          # Exact incremental/full-refresh accumulator parity through a deterministic legal trajectory.
           parent=root.copy()
           for uci in ('e2e4','e7e5','g1f3','b8c6','f1b5','a7a6','b5a4','g8f6'):
               m=chess.Move.from_uci(uci); assert m in b.legal_moves
-              from experiments.numba_core import encode_move
-              im=encode_move(b,m); child=np.empty(EVAL_WIDTH,dtype=np.int32)
-              eb=encode_position(b); _advance_eval_state_into(eb.board,eb.side,im,parent,child)
+              eb=encode_position(b); moves,count=generate_legal_moves(eb.board,eb.side,eb.castling,eb.ep_square)
+              im=-1
+              for i in range(int(count)):
+                  candidate=int(moves[i])
+                  if move_to_uci(candidate)==uci:
+                      im=candidate;break
+              assert im>=0,(uci,[move_to_uci(int(moves[i])) for i in range(int(count))])
+              child=np.empty(EVAL_WIDTH,dtype=np.int32);_advance_eval_state_into(eb.board,eb.side,im,parent,child)
               b.push(m); full=np.empty(EVAL_WIDTH,dtype=np.int32); eb2=encode_position(b);_build_eval_state_into(eb2.board,full)
               assert np.array_equal(child,full),(os.environ['MODE'],uci,child,full)
               parent=child
@@ -125,9 +129,7 @@ jobs:
           UHO="$UHO" python - <<'PY'
           import os,chess
           from pathlib import Path
-          rows=Path(os.environ['UHO']).read_text(errors='ignore').splitlines()
-          out=[]
-          # This window is intentionally disjoint from final assembly qualification windows 3000:3700 and 3900:4500.
+          rows=Path(os.environ['UHO']).read_text(errors='ignore').splitlines();out=[]
           for raw in rows[500:1800]:
               f=raw.strip().split()
               if len(f)<4: continue
@@ -137,8 +139,7 @@ jobs:
               if b.is_game_over(claim_draw=False):continue
               out.append(fen)
               if len(out)==320:break
-          assert len(out)==320,len(out)
-          Path('/tmp/train-roots.epd').write_text('\n'.join(out)+'\n')
+          assert len(out)==320,len(out);Path('/tmp/train-roots.epd').write_text('\n'.join(out)+'\n')
           PY
           sha256sum /tmp/train-roots.epd
       - name: Generate broad deterministic V13 self-play corpus
@@ -146,36 +147,23 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p gen2-source
-          python -u tools/v14_generate_selfplay_positions.py \
-            --engine /tmp/v13 --openings /tmp/train-roots.epd \
-            --nodes 4500 --games 320 --opening-offset 0 \
-            --min-ply 8 --max-ply 160 --stride 3 --max-positions 12000 \
-            --output gen2-source/selfplay-positions.json \
-            | tee gen2-source/selfplay.log
+          python -u tools/v14_generate_selfplay_positions.py --engine /tmp/v13 --openings /tmp/train-roots.epd --nodes 4500 --games 320 --opening-offset 0 --min-ply 8 --max-ply 160 --stride 3 --max-positions 12000 --output gen2-source/selfplay-positions.json | tee gen2-source/selfplay.log
       - name: Fetch pinned Stockfish 19
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p .qualification/stockfish
-          curl --fail --location --retry 3 -o .qualification/stockfish.tar.gz \
-            https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+          curl --fail --location --retry 3 -o .qualification/stockfish.tar.gz https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
           echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  .qualification/stockfish.tar.gz' | sha256sum --check --strict
           tar -xzf .qualification/stockfish.tar.gz -C .qualification/stockfish
           STOCKFISH_BIN=$(find "$PWD/.qualification/stockfish" -type f -name 'stockfish*' -perm -111 -print -quit);test -n "$STOCKFISH_BIN"
-          echo "STOCKFISH_BIN=$STOCKFISH_BIN" >> "$GITHUB_ENV"
-          "$STOCKFISH_BIN" bench 1 1 4 default depth >/dev/null
+          echo "STOCKFISH_BIN=$STOCKFISH_BIN" >> "$GITHUB_ENV"; "$STOCKFISH_BIN" bench 1 1 4 default depth >/dev/null
       - name: Label with fixed-node Stockfish 19 and leakage-safe grouped splits
         shell: bash
         run: |
           set -euo pipefail
-          python -u tools/v14_label_selfplay_teacher.py \
-            --positions gen2-source/selfplay-positions.json \
-            --stockfish "$STOCKFISH_BIN" --nodes 12000 --threads 1 --hash-mb 64 \
-            --split-salt Chess/v14-gen2-large-20260908 \
-            --validation-permille 100 --holdout-permille 100 \
-            --output gen2-source/teacher.jsonl | tee gen2-source/teacher.log
-          wc -l gen2-source/teacher.jsonl
-          sha256sum gen2-source/teacher.jsonl | tee gen2-source/teacher.sha256
+          python -u tools/v14_label_selfplay_teacher.py --positions gen2-source/selfplay-positions.json --stockfish "$STOCKFISH_BIN" --nodes 12000 --threads 1 --hash-mb 64 --split-salt Chess/v14-gen2-large-20260908 --validation-permille 100 --holdout-permille 100 --output gen2-source/teacher.jsonl | tee gen2-source/teacher.log
+          wc -l gen2-source/teacher.jsonl; sha256sum gen2-source/teacher.jsonl | tee gen2-source/teacher.sha256
       - uses: actions/upload-artifact@v4
         with:
           name: v14-gen2-teacher-${{ github.sha }}
@@ -213,10 +201,7 @@ jobs:
           patch /tmp/v13/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
           python - <<'PY'
           from pathlib import Path
-          p=Path('/tmp/v13/experiments/numba_search.py');s=p.read_text()
-          old='    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
-          new='    correction = correction // 6\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
-          assert s.count(old)==1,s.count(old);p.write_text(s.replace(old,new,1))
+          p=Path('/tmp/v13/experiments/numba_search.py');s=p.read_text();old='    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into(';new='    correction = correction // 6\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into(';assert s.count(old)==1;p.write_text(s.replace(old,new,1))
           PY
           python scripts/patch_v13_legality_context.py /tmp/v13/experiments/numba_core.py
           python scripts/patch_v13_qsearch_tactical.py /tmp/v13/experiments/numba_core.py /tmp/v13/experiments/numba_search.py
@@ -225,13 +210,8 @@ jobs:
         run: |
           set -euo pipefail
           OUT="student-${{ matrix.baseline }}-h${{ matrix.hidden }}"
-          python -u scripts/train_v14_single_residual.py \
-            --teacher gen2-source/teacher.jsonl --engine-dir /tmp/v13 \
-            --output-dir "$OUT" --hidden '${{ matrix.hidden }}' --baseline '${{ matrix.baseline }}' \
-            --epochs 40 --batch-size 512 --learning-rate 0.002 --weight-decay 0.00002 --seed 20260908 \
-            | tee "$OUT.log"
-          cat "$OUT/training-metadata.json"
-          sha256sum "$OUT/student-h${{ matrix.hidden }}.npz" | tee "$OUT/model.sha256"
+          python -u scripts/train_v14_single_residual.py --teacher gen2-source/teacher.jsonl --engine-dir /tmp/v13 --output-dir "$OUT" --hidden '${{ matrix.hidden }}' --baseline '${{ matrix.baseline }}' --epochs 40 --batch-size 512 --learning-rate 0.002 --weight-decay 0.00002 --seed 20260908 | tee "$OUT.log"
+          cat "$OUT/training-metadata.json"; sha256sum "$OUT/student-h${{ matrix.hidden }}.npz" | tee "$OUT/model.sha256"
       - uses: actions/upload-artifact@v4
         with:
           name: v14-gen2-${{ matrix.baseline }}-h${{ matrix.hidden }}-${{ github.sha }}
