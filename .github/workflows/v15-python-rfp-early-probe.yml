@@ -1,8 +1,8 @@
-name: V15 Python RFP early-probe qualification
+name: V15 Python RFP early-probe V2 qualification
 
 on:
   push:
-    branches: [analysis/v15-python-rfp-early-probe-20260908]
+    branches: [analysis/v15-python-rfp-early-probe-v2-20260908]
   workflow_dispatch:
 
 permissions:
@@ -53,7 +53,7 @@ jobs:
           from pathlib import Path
           old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
           large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
-          fresh=[x for x in large if x not in old]; chosen=fresh[496:544]
+          fresh=[x for x in large if x not in old]; chosen=fresh[544:592]
           assert len(chosen)==48 and len(set(chosen))==48
           Path('/tmp/rfp-48.epd').write_text('\n'.join(chosen)+'\n')
           PY
@@ -87,8 +87,7 @@ jobs:
               for i,fen in enumerate(roots):
                   b=one(base,fen,16000);c=one(cand,fen,16000)
                   if b != c:mismatches.append({'i':i,'base':b,'cand':c})
-              if mismatches:
-                  raise SystemExit('fixed-node semantic mismatch: '+json.dumps(mismatches[:3]))
+              if mismatches: raise SystemExit('fixed-node semantic mismatch: '+json.dumps(mismatches[:3]))
               rows=[];ratios=[]
               for rep in range(5):
                   order=roots[:20] if rep%2==0 else list(reversed(roots[:20]))
@@ -158,12 +157,12 @@ jobs:
           finally:base.stop();cand.stop()
           score=sum(r['score'] for r in rows);n=len(rows);f=score/n;elo=400*math.log10(f/(1-f)) if 0<f<1 else None
           ct=[x for r in rows for x in r['candidate_ms']];bt=[x for r in rows for x in r['control_ms']]
-          out={'candidate':'V15 RFP early legal probe','control':'exact packaged V14','games':n,'score':score,'score_fraction':f,'naive_elo_from_score':elo,'pair_histogram':dict(Counter(str(x) for x in pairs)),'candidate_mean_move_ms':sum(ct)/max(1,len(ct)),'control_mean_move_ms':sum(bt)/max(1,len(bt)),'details':rows}
+          out={'candidate':'V15 RFP early legal probe V2','control':'exact packaged V14','games':n,'score':score,'score_fraction':f,'naive_elo_from_score':elo,'pair_histogram':dict(Counter(str(x) for x in pairs)),'candidate_mean_move_ms':sum(ct)/max(1,len(ct)),'control_mean_move_ms':sum(bt)/max(1,len(bt)),'details':rows}
           Path('results/timed.json').write_text(json.dumps(out,indent=2)+'\n');print('FINAL',json.dumps({k:v for k,v in out.items() if k!='details'}))
           PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: v15-python-rfp-early-probe-${{ github.sha }}
+          name: v15-python-rfp-early-probe-v2-${{ github.sha }}
           path: results/
           retention-days: 30
