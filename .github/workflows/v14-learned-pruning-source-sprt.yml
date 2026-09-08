@@ -1,0 +1,160 @@
+name: V14 learned-pruning source SPRT
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  sprt:
+    if: github.head_ref == 'v14/learned-pruning-production'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      RUSTFLAGS: -C target-cpu=native
+      V14_BASE: f6ac75d644b844fabf35195d6054703e68bcc60f
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Verify committed v14 source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'Some(self.leaf_evaluate(position))' crates/chess-search/src/lib.rs
+          if grep -A8 -B8 'let pruning_static_eval' crates/chess-search/src/lib.rs | grep -q 'Some(evaluate(position))'; then
+            echo 'legacy classical pruning oracle is still present' >&2
+            exit 1
+          fi
+
+      - name: Strict candidate gate and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/bin .qualification/v14-sprt
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/bin/v14-learned-pruning
+          chmod +x .qualification/bin/v14-learned-pruning
+          sha256sum .qualification/bin/v14-learned-pruning > .qualification/v14-sprt/candidate.sha256
+          git rev-parse HEAD > .qualification/v14-sprt/candidate-head.txt
+
+      - name: Build exact pre-v14 production reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          git worktree add --detach /tmp/chess-v14-reference "$V14_BASE"
+          CARGO_TARGET_DIR=/tmp/chess-v14-reference-target \
+            cargo build --release -p chess-uci --manifest-path /tmp/chess-v14-reference/Cargo.toml
+          cp /tmp/chess-v14-reference-target/release/chess-uci .qualification/bin/v14-reference
+          chmod +x .qualification/bin/v14-reference
+          sha256sum .qualification/bin/v14-reference > .qualification/v14-sprt/reference.sha256
+          git -C /tmp/chess-v14-reference rev-parse HEAD > .qualification/v14-sprt/reference-head.txt
+          test "$(cat .qualification/v14-sprt/reference-head.txt)" = "$V14_BASE"
+
+      - name: Download exact certified Gestalt network
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' \
+            --output .qualification/v14-sprt/gestalt-b840.nnue
+          test "$(stat -c%s .qualification/v14-sprt/gestalt-b840.nnue)" = '21242944'
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  .qualification/v14-sprt/gestalt-b840.nnue' | sha256sum --check --strict
+
+      - name: Reproduce frozen M6 5000-root suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip' \
+            --output /tmp/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/UHO_Lichess_4852_v1.epd.zip' | sha256sum --check --strict
+          mkdir -p .qualification/m6-openings
+          python scripts/build_m6_opening_suite.py --archive /tmp/UHO_Lichess_4852_v1.epd.zip --output-dir .qualification/m6-openings
+          echo '5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e  .qualification/m6-openings/m6-uho-lichess-5000-v1.epd' | sha256sum --check --strict
+
+      - name: Build pinned Fastchess
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = 'f618e34540f94f4719ad3817950618dabe441318'
+          make -C .qualification/fastchess-src -j2
+
+      - name: Create identical-network launchers
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$PWD"
+          cat > .qualification/bin/candidate-launcher <<EOF
+          #!/usr/bin/env bash
+          export CHESS_GESTALT_NETWORK='$ROOT/.qualification/v14-sprt/gestalt-b840.nnue'
+          exec '$ROOT/.qualification/bin/v14-learned-pruning'
+          EOF
+          cat > .qualification/bin/reference-launcher <<EOF
+          #!/usr/bin/env bash
+          export CHESS_GESTALT_NETWORK='$ROOT/.qualification/v14-sprt/gestalt-b840.nnue'
+          exec '$ROOT/.qualification/bin/v14-reference'
+          EOF
+          chmod +x .qualification/bin/*-launcher
+
+      - name: Run frozen equal-time v14 SPRT
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/sprt_match_harness.py \
+            --candidate .qualification/bin/candidate-launcher \
+            --reference .qualification/bin/reference-launcher \
+            --candidate-name v14-learned-pruning \
+            --reference-name pre-v14-production \
+            --candidate-option Hash=32 \
+            --reference-option Hash=32 \
+            --fastchess .qualification/fastchess-src/fastchess \
+            --openings .qualification/m6-openings/m6-uho-lichess-5000-v1.epd \
+            --protocol match/protocols/m6-sprt-arch-v1.json \
+            --output-dir .qualification/v14-sprt/match
+
+      - name: Record v14 evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > .qualification/v14-sprt/evidence.txt <<'EOF'
+          purpose=v14 learned pruning production acceptance
+          production_base=f6ac75d644b844fabf35195d6054703e68bcc60f
+          source_change=shallow RFP/LQF static pruning oracle uses active mature leaf evaluator
+          network_sha256=956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6
+          opening_sha256=5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e
+          prior_pruning_only_fixed_nodes=79W-18D-3L,+346.12+-72.02 Elo
+          prior_combined_fixed_nodes=75W-23D-2L,+322.67+-74.95 Elo
+          prior_combined_equal_time=70W-26D-4L,+275.45+-58.99 Elo
+          sprt_protocol=m6-sprt-arch-v1
+          EOF
+
+      - name: Upload complete v14 SPRT evidence without network bytes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v14-learned-pruning-source-sprt-${{ github.sha }}
+          path: |
+            .qualification/v14-sprt/candidate.sha256
+            .qualification/v14-sprt/reference.sha256
+            .qualification/v14-sprt/candidate-head.txt
+            .qualification/v14-sprt/reference-head.txt
+            .qualification/v14-sprt/evidence.txt
+            .qualification/v14-sprt/match/
+          retention-days: 30
