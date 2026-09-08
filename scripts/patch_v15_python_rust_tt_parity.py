@@ -13,7 +13,6 @@ if len(sys.argv) != 2:
 p = Path(sys.argv[1])
 s = p.read_text()
 
-# Compact layout: key array + packed metadata + generation cell.
 old = '''TT_KEYS_OFFSET = 0
 TT_CONTEXTS_OFFSET = TT_SIZE
 TT_META_OFFSET = TT_SIZE * 2
@@ -25,8 +24,7 @@ TT_META_OFFSET = TT_SIZE
 TT_GENERATION_INDEX = TT_SIZE * 2
 TT_STORAGE_SIZE = TT_GENERATION_INDEX + 1
 '''
-if s.count(old) != 1:
-    raise SystemExit(f"TT layout anchor count={s.count(old)}")
+if s.count(old) != 1: raise SystemExit(f"TT layout anchor count={s.count(old)}")
 s = s.replace(old, new, 1)
 
 old = '''@njit(cache=False, inline="always")
@@ -37,11 +35,9 @@ new = '''@njit(cache=False, inline="always")
 def _tt_index(position: np.uint64) -> int:
     return int(position & np.uint64(TT_MASK))
 '''
-if s.count(old) != 1:
-    raise SystemExit(f"TT index anchor count={s.count(old)}")
+if s.count(old) != 1: raise SystemExit(f"TT index anchor count={s.count(old)}")
 s = s.replace(old, new, 1)
 
-# Negamax probe: draw logic is already above this point, so board-only identity matches Rust.
 old = '''    current_key = path_keys[ply]
     current_context = history_contexts[ply]
     current_tt_context = _tt_context_identity(current_context, halfmove_clock)
@@ -59,19 +55,16 @@ new = '''    current_key = path_keys[ply]
         and tt_table[TT_META_OFFSET + tt_index] != np.uint64(0)
     )
 '''
-if s.count(old) != 1:
-    raise SystemExit(f"negamax TT probe anchor count={s.count(old)}")
+if s.count(old) != 1: raise SystemExit(f"negamax TT probe anchor count={s.count(old)}")
 s = s.replace(old, new, 1)
 
-# Child history context is no longer TT state. Keep array ABI but make update free.
 old = '''        history_contexts[ply + 1] = _child_history_context(
             current_context, current_key, child_halfmove
         )
 '''
 new = '''        history_contexts[ply + 1] = np.uint64(0)
 '''
-if s.count(old) != 1:
-    raise SystemExit(f"child context anchor count={s.count(old)}")
+if s.count(old) != 1: raise SystemExit(f"child context anchor count={s.count(old)}")
 s = s.replace(old, new, 1)
 
 old = '''        same_tt_entry = (
@@ -85,8 +78,7 @@ new = '''        same_tt_entry = (
             and old_meta != np.uint64(0)
         )
 '''
-if s.count(old) != 1:
-    raise SystemExit(f"TT replacement anchor count={s.count(old)}")
+if s.count(old) != 1: raise SystemExit(f"TT replacement anchor count={s.count(old)}")
 s = s.replace(old, new, 1)
 
 old = '''            tt_table[TT_KEYS_OFFSET + tt_index] = current_key
@@ -96,30 +88,29 @@ old = '''            tt_table[TT_KEYS_OFFSET + tt_index] = current_key
 new = '''            tt_table[TT_KEYS_OFFSET + tt_index] = current_key
             tt_table[TT_META_OFFSET + tt_index] = _tt_pack_meta(
 '''
-if s.count(old) != 1:
-    raise SystemExit(f"TT store anchor count={s.count(old)}")
+if s.count(old) != 1: raise SystemExit(f"TT store anchor count={s.count(old)}")
 s = s.replace(old, new, 1)
 
-# Root probe and child context.
-old = '''    root_context = history_contexts[0]
+old = '''    root_key = path_keys[0]
+    root_context = history_contexts[0]
     root_tt_context = _tt_context_identity(root_context, halfmove_clock)
     root_tt_index = _tt_index(root_key, root_tt_context)
     root_meta = tt_table[TT_META_OFFSET + root_tt_index]
-    root_match = (
+    if (
         tt_table[TT_KEYS_OFFSET + root_tt_index] == root_key
         and tt_table[TT_CONTEXTS_OFFSET + root_tt_index] == root_tt_context
         and root_meta != np.uint64(0)
-    )
+    ):
 '''
-new = '''    root_tt_index = _tt_index(root_key)
+new = '''    root_key = path_keys[0]
+    root_tt_index = _tt_index(root_key)
     root_meta = tt_table[TT_META_OFFSET + root_tt_index]
-    root_match = (
+    if (
         tt_table[TT_KEYS_OFFSET + root_tt_index] == root_key
         and root_meta != np.uint64(0)
-    )
+    ):
 '''
-if s.count(old) != 1:
-    raise SystemExit(f"root TT probe anchor count={s.count(old)}")
+if s.count(old) != 1: raise SystemExit(f"root TT probe anchor count={s.count(old)}")
 s = s.replace(old, new, 1)
 
 old = '''        history_contexts[1] = _child_history_context(
@@ -128,17 +119,13 @@ old = '''        history_contexts[1] = _child_history_context(
 '''
 new = '''        history_contexts[1] = np.uint64(0)
 '''
-if s.count(old) != 1:
-    raise SystemExit(f"root child context anchor count={s.count(old)}")
+if s.count(old) != 1: raise SystemExit(f"root child context anchor count={s.count(old)}")
 s = s.replace(old, new, 1)
 
-# Entry points no longer hash the entire prior history for TT identity.
+count = s.count('history_contexts[0] = _root_history_context(history_keys, history_count)')
+if count < 1: raise SystemExit('root history-context initialization anchor missing')
 s = s.replace('history_contexts[0] = _root_history_context(history_keys, history_count)', 'history_contexts[0] = np.uint64(0)')
 
-# No live reference should remain.
-if 'TT_CONTEXTS_OFFSET' in s:
-    raise SystemExit('live TT_CONTEXTS_OFFSET remains')
-if '_tt_index(current_key,' in s or '_tt_index(root_key,' in s:
-    raise SystemExit('two-argument TT index call remains')
-
+if 'TT_CONTEXTS_OFFSET' in s: raise SystemExit('live TT_CONTEXTS_OFFSET remains')
+if '_tt_index(current_key,' in s or '_tt_index(root_key,' in s: raise SystemExit('two-argument TT index call remains')
 p.write_text(s)
