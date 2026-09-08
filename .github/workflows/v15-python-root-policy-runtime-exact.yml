@@ -32,7 +32,7 @@ jobs:
           github-token: ${{ github.token }}
           repository: JamieLittle16/Chess
           run-id: 34218142973
-      - name: Train runtime-exact H64 root policy
+      - name: Train runtime-exact H64 root policy at selected early checkpoint
         shell: bash
         run: |
           set -euo pipefail
@@ -40,7 +40,7 @@ jobs:
           mkdir -p results
           python -u scripts/train_v15_root_policy_runtime_exact.py \
             --teacher "$TEACHER" --output results/root-policy-h64.pt \
-            --hidden 64 --epochs 12 | tee results/train.log
+            --hidden 64 --epochs 2 | tee results/train.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
