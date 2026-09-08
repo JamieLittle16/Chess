@@ -1,0 +1,155 @@
+name: V15 Python Gestalt-distilled king-bucket student
+
+on:
+  push:
+    branches: [analysis/v15-python-gestalt-student-20260908]
+    paths:
+      - crates/chess-eval/examples/gestalt_teacher.rs
+      - .github/workflows/v15-python-gestalt-student.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  labels:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2
+      - name: Build exact Gestalt teacher
+        run: cargo build --release -p chess-eval --example gestalt_teacher
+      - name: Download exact production Gestalt
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/gestalt
+          curl --fail --location --retry 5 \
+            'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' \
+            --output /tmp/gestalt/gestalt-b840.nnue
+          test "$(stat -c%s /tmp/gestalt/gestalt-b840.nnue)" = '21242944'
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  /tmp/gestalt/gestalt-b840.nnue' | sha256sum --check --strict
+      - name: Build 5000 realistic positions from frozen UHO roots
+        shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6; mkdir /tmp/m6
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          import hashlib, os, random
+          from pathlib import Path
+          import chess
+          shard=int(os.environ['SHARD'])
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          bases=fresh[1000*shard:1000*(shard+1)]
+          assert len(bases)==1000, (shard,len(bases))
+          positions=[]
+          seen=set()
+          for fen in bases:
+              b=chess.Board(fen)
+              seed=int.from_bytes(hashlib.sha256((fen+'|gestalt-v15').encode()).digest()[:8],'big')
+              rng=random.Random(seed)
+              for step in range(9):
+                  if step in (0,2,4,6,8):
+                      f=b.fen()
+                      if f not in seen:
+                          seen.add(f); positions.append(f)
+                  if b.outcome(claim_draw=False) is not None:
+                      break
+                  legal=list(b.legal_moves)
+                  if not legal: break
+                  # Prefer tactically plausible continuations slightly, while retaining broad coverage.
+                  captures=[m for m in legal if b.is_capture(m)]
+                  pool=captures if captures and rng.random()<0.35 else legal
+                  b.push(pool[rng.randrange(len(pool))])
+          Path('/tmp/gestalt/positions.fen').write_text('\n'.join(positions)+'\n')
+          print({'shard':shard,'bases':len(bases),'positions':len(positions)})
+          assert len(positions)>=4700
+          PY
+      - name: Label exact Gestalt static scores
+        shell: bash
+        env:
+          CHESS_GESTALT_NETWORK: /tmp/gestalt/gestalt-b840.nnue
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          target/release/examples/gestalt_teacher </tmp/gestalt/positions.fen >/tmp/gestalt/raw.tsv
+          python - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+          shard=int(os.environ['SHARD']); rows=[]
+          for line in Path('/tmp/gestalt/raw.tsv').read_text().splitlines():
+              fen,score=line.rsplit('\t',1)
+              bucket=int.from_bytes(hashlib.sha256(fen.encode()).digest()[:8],'big')%10
+              split='holdout' if bucket==0 else ('validation' if bucket==1 else 'train')
+              rows.append(json.dumps({'split':split,'fen':fen,'teacher_cp':int(score),'teacher_mate':None},separators=(',',':')))
+          out=Path(f'/tmp/gestalt/gestalt-{shard}.jsonl');out.write_text('\n'.join(rows)+'\n')
+          counts={s:sum(json.loads(r)['split']==s for r in rows) for s in ('train','validation','holdout')}
+          print({'records':len(rows),'split_counts':counts,'first':json.loads(rows[0])})
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v15-gestalt-labels-${{ matrix.shard }}-${{ github.sha }}
+          path: /tmp/gestalt/gestalt-${{ matrix.shard }}.jsonl
+          retention-days: 30
+
+  train:
+    needs: labels
+    strategy:
+      fail-fast: false
+      matrix:
+        hidden: [16, 32]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: v15-gestalt-labels-*-${{ github.sha }}
+          path: label-artifacts
+          merge-multiple: true
+      - name: Train quantized king-bucket residual against Gestalt
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
+          rm -rf /tmp/v14 results; mkdir -p /tmp/v14 results
+          unzip -q "$ZIP" -d /tmp/v14
+          cat label-artifacts/gestalt-*.jsonl > results/gestalt-teacher.jsonl
+          echo "teacher_records=$(wc -l < results/gestalt-teacher.jsonl)"
+          python -u scripts/train_v15_bucket_student.py \
+            --teacher results/gestalt-teacher.jsonl --engine-dir /tmp/v14 \
+            --output-dir results/h${{ matrix.hidden }} --hidden ${{ matrix.hidden }} \
+            --epochs 25 --batch-size 256 --seed 20260908 \
+            | tee results/h${{ matrix.hidden }}.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-gestalt-student-h${{ matrix.hidden }}-${{ github.sha }}
+          path: results/
+          retention-days: 30
