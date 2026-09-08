@@ -1,0 +1,79 @@
+name: V14 materialize learned pruning
+
+on:
+  push:
+    branches: [v14/learned-pruning-production]
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: Apply exact minimal source change if needed
+        id: patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('crates/chess-search/src/lib.rs')
+          text = path.read_text()
+          old = '''            Some(evaluate(position))
+          } else {
+              None
+          };
+          '''
+          new = '''            // Pruning must use the same positional model as searched leaves. The mature
+              // Gestalt accumulator is already current at this node, so this pays only the output
+              // head rather than a refresh and avoids discarding moves using the obsolete classical
+              // evaluator.
+              Some(self.leaf_evaluate(position))
+          } else {
+              None
+          };
+          '''
+
+          if new in text:
+              print('v14 learned-pruning source is already materialized')
+              Path('/tmp/v14_changed').write_text('0')
+          else:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'expected exactly one classical pruning oracle, found {count}')
+              path.write_text(text.replace(old, new, 1))
+              Path('/tmp/v14_changed').write_text('1')
+          PY
+          cargo fmt --all
+          git diff --check
+          echo "changed=$(cat /tmp/v14_changed)" >> "$GITHUB_OUTPUT"
+
+      - name: Strict source gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'Some(self.leaf_evaluate(position))' crates/chess-search/src/lib.rs
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+
+      - name: Commit materialized source
+        if: steps.patch.outputs.changed == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates/chess-search/src/lib.rs
+          git commit -m 'feat(search): use mature evaluator for shallow pruning'
+          git push origin HEAD:v14/learned-pruning-production
