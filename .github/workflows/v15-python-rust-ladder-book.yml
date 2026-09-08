@@ -1,0 +1,38 @@
+name: V15 Python own-Rust ladder book
+
+on:
+  push:
+    branches: [analysis/v15-python-rust-opening-book-20260908]
+    paths:
+      - scripts/generate_v15_rust_ladder_book.py
+      - .github/workflows/v15-python-rust-ladder-book.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2
+      - name: Build exact Rust production UCI
+        run: cargo build --release -p chess-uci
+      - name: Generate robust two-response ladder book
+        run: |
+          mkdir -p results
+          python -u scripts/generate_v15_rust_ladder_book.py \
+            --engine target/release/chess-uci \
+            --output results/v15_rust_ladder_book.json \
+            --nodes 10000 --mainline-nodes 60000 --mainline-plies 10 \
+            | tee results/generate.log
+          sha256sum results/v15_rust_ladder_book.json > results/book.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v15-python-own-rust-ladder-book-${{ github.sha }}
+          path: results/
+          retention-days: 30
