@@ -120,8 +120,7 @@ impl Network {
         feature: u16,
         direction: Direction,
     ) {
-        let start = (usize::from(bucket) * INPUTS + usize::from(feature)) * HIDDEN;
-        let row = &self.feature_weights[start..start + HIDDEN];
+        let row = self.feature_row(bucket, feature);
         match direction {
             Direction::Add => {
                 for (value, weight) in values.iter_mut().zip(row) {
@@ -131,6 +130,63 @@ impl Network {
             Direction::Subtract => {
                 for (value, weight) in values.iter_mut().zip(row) {
                     *value = value.wrapping_sub(*weight);
+                }
+            }
+        }
+    }
+
+    #[inline]
+    fn feature_row(&self, bucket: u8, feature: u16) -> &[i16] {
+        let start = (usize::from(bucket) * INPUTS + usize::from(feature)) * HIDDEN;
+        &self.feature_weights[start..start + HIDDEN]
+    }
+
+    fn apply_delta(
+        &self,
+        values: &mut [i16; HIDDEN],
+        bucket: u8,
+        delta: FeatureDelta,
+        reverse: bool,
+    ) {
+        let removed = delta.removed();
+        let added = delta.added();
+        match (removed, added) {
+            ([remove], [add]) => fused_delta_1_1(
+                values,
+                self.feature_row(bucket, *remove),
+                self.feature_row(bucket, *add),
+                reverse,
+            ),
+            ([remove_a, remove_b], [add]) => fused_delta_2_1(
+                values,
+                self.feature_row(bucket, *remove_a),
+                self.feature_row(bucket, *remove_b),
+                self.feature_row(bucket, *add),
+                reverse,
+            ),
+            ([remove_a, remove_b], [add_a, add_b]) => fused_delta_2_2(
+                values,
+                self.feature_row(bucket, *remove_a),
+                self.feature_row(bucket, *remove_b),
+                self.feature_row(bucket, *add_a),
+                self.feature_row(bucket, *add_b),
+                reverse,
+            ),
+            _ => {
+                if reverse {
+                    for &feature in added {
+                        self.apply_feature(values, bucket, feature, Direction::Subtract);
+                    }
+                    for &feature in removed {
+                        self.apply_feature(values, bucket, feature, Direction::Add);
+                    }
+                } else {
+                    for &feature in removed {
+                        self.apply_feature(values, bucket, feature, Direction::Subtract);
+                    }
+                    for &feature in added {
+                        self.apply_feature(values, bucket, feature, Direction::Add);
+                    }
                 }
             }
         }
@@ -160,6 +216,74 @@ impl Network {
         output *= i64::from(SCALE);
         output /= i64::from(QA * QB);
         i32::try_from(output).expect("gestalt quantised output remains within i32")
+    }
+}
+
+#[inline]
+fn fused_delta_1_1(values: &mut [i16; HIDDEN], removed: &[i16], added: &[i16], reverse: bool) {
+    for ((value, &remove), &add) in values.iter_mut().zip(removed).zip(added) {
+        *value = if reverse {
+            value.wrapping_sub(add).wrapping_add(remove)
+        } else {
+            value.wrapping_sub(remove).wrapping_add(add)
+        };
+    }
+}
+
+#[inline]
+fn fused_delta_2_1(
+    values: &mut [i16; HIDDEN],
+    removed_a: &[i16],
+    removed_b: &[i16],
+    added: &[i16],
+    reverse: bool,
+) {
+    for (((value, &remove_a), &remove_b), &add) in
+        values.iter_mut().zip(removed_a).zip(removed_b).zip(added)
+    {
+        *value = if reverse {
+            value
+                .wrapping_sub(add)
+                .wrapping_add(remove_a)
+                .wrapping_add(remove_b)
+        } else {
+            value
+                .wrapping_sub(remove_a)
+                .wrapping_sub(remove_b)
+                .wrapping_add(add)
+        };
+    }
+}
+
+#[inline]
+fn fused_delta_2_2(
+    values: &mut [i16; HIDDEN],
+    removed_a: &[i16],
+    removed_b: &[i16],
+    added_a: &[i16],
+    added_b: &[i16],
+    reverse: bool,
+) {
+    for ((((value, &remove_a), &remove_b), &add_a), &add_b) in values
+        .iter_mut()
+        .zip(removed_a)
+        .zip(removed_b)
+        .zip(added_a)
+        .zip(added_b)
+    {
+        *value = if reverse {
+            value
+                .wrapping_sub(add_a)
+                .wrapping_sub(add_b)
+                .wrapping_add(remove_a)
+                .wrapping_add(remove_b)
+        } else {
+            value
+                .wrapping_sub(remove_a)
+                .wrapping_sub(remove_b)
+                .wrapping_add(add_a)
+                .wrapping_add(add_b)
+        };
     }
 }
 
@@ -387,41 +511,12 @@ fn apply_one(
             accumulator.frame = rebuilt;
         }
         PerspectiveUpdate::Delta(delta) => {
-            if reverse {
-                for &feature in delta.added() {
-                    network.apply_feature(
-                        &mut accumulator.values,
-                        accumulator.frame.bucket,
-                        feature,
-                        Direction::Subtract,
-                    );
-                }
-                for &feature in delta.removed() {
-                    network.apply_feature(
-                        &mut accumulator.values,
-                        accumulator.frame.bucket,
-                        feature,
-                        Direction::Add,
-                    );
-                }
-            } else {
-                for &feature in delta.removed() {
-                    network.apply_feature(
-                        &mut accumulator.values,
-                        accumulator.frame.bucket,
-                        feature,
-                        Direction::Subtract,
-                    );
-                }
-                for &feature in delta.added() {
-                    network.apply_feature(
-                        &mut accumulator.values,
-                        accumulator.frame.bucket,
-                        feature,
-                        Direction::Add,
-                    );
-                }
-            }
+            network.apply_delta(
+                &mut accumulator.values,
+                accumulator.frame.bucket,
+                delta,
+                reverse,
+            );
         }
     }
     Some(())

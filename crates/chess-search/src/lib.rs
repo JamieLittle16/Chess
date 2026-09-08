@@ -11,7 +11,13 @@ mod root_analysis;
 pub use root_analysis::RootCandidate;
 
 use chess_core::{ChessMove, PieceKind, Position, generate_legal_moves_mut, has_legal_move_mut};
-use chess_eval::evaluate;
+use chess_eval::{
+    evaluate,
+    gestalt::{
+        AccumulatorState as GestaltAccumulatorState, Network as GestaltNetwork,
+        PreparedAccumulatorUpdate as GestaltPreparedUpdate,
+    },
+};
 use move_picker::MovePicker;
 
 /// Scores at or above this range encode forced mate rather than static evaluation.
@@ -64,6 +70,23 @@ impl SearchControl for NeverStop {
     }
 }
 
+struct GestaltSearchEvaluator {
+    network: GestaltNetwork,
+    accumulator: Option<GestaltAccumulatorState>,
+}
+
+impl GestaltSearchEvaluator {
+    fn from_environment() -> Option<Self> {
+        let path = std::env::var_os("CHESS_GESTALT_NETWORK")?;
+        let network = GestaltNetwork::from_file(std::path::Path::new(&path))
+            .unwrap_or_else(|error| panic!("failed to load CHESS_GESTALT_NETWORK: {error}"));
+        Some(Self {
+            network,
+            accumulator: None,
+        })
+    }
+}
+
 /// Reusable search state.
 ///
 /// Long-lived engine frontends should keep one `Searcher` so the table allocation is not repeated
@@ -74,6 +97,7 @@ pub struct Searcher {
     tt_hits: u64,
     path_keys: [u64; MAX_SEARCH_PLY],
     killers: [[Option<ChessMove>; 2]; MAX_SEARCH_PLY],
+    gestalt: Option<GestaltSearchEvaluator>,
 }
 
 impl Searcher {
@@ -85,6 +109,7 @@ impl Searcher {
             tt_hits: 0,
             path_keys: [0; MAX_SEARCH_PLY],
             killers: [[None; 2]; MAX_SEARCH_PLY],
+            gestalt: GestaltSearchEvaluator::from_environment(),
         }
     }
 
@@ -100,6 +125,61 @@ impl Searcher {
     #[must_use]
     pub fn tt_capacity_entries(&self) -> usize {
         self.table.len()
+    }
+
+    fn reset_leaf_evaluator(&mut self, position: &Position) {
+        if let Some(gestalt) = &mut self.gestalt {
+            gestalt.accumulator = Some(
+                GestaltAccumulatorState::from_position(&gestalt.network, position)
+                    .expect("legal search root has both kings"),
+            );
+        }
+    }
+
+    fn leaf_evaluate(&self, position: &Position) -> i32 {
+        if let Some(gestalt) = &self.gestalt
+            && let Some(accumulator) = &gestalt.accumulator
+        {
+            return accumulator.evaluate(&gestalt.network, position.side_to_move());
+        }
+        evaluate(position)
+    }
+
+    fn prepare_leaf_move(
+        &self,
+        position: &Position,
+        mv: ChessMove,
+    ) -> Option<GestaltPreparedUpdate> {
+        self.gestalt.as_ref().map(|_| {
+            GestaltAccumulatorState::prepare_move(position, mv)
+                .expect("generated legal move has a valid gestalt update")
+        })
+    }
+
+    fn apply_leaf_move(&mut self, position: &Position, prepared: Option<GestaltPreparedUpdate>) {
+        if let Some(prepared) = prepared
+            && let Some(gestalt) = &mut self.gestalt
+        {
+            gestalt
+                .accumulator
+                .as_mut()
+                .expect("gestalt root state was initialised")
+                .apply_prepared(&gestalt.network, position, prepared)
+                .expect("legal child position has valid gestalt state");
+        }
+    }
+
+    fn restore_leaf_move(&mut self, position: &Position, prepared: Option<GestaltPreparedUpdate>) {
+        if let Some(prepared) = prepared
+            && let Some(gestalt) = &mut self.gestalt
+        {
+            gestalt
+                .accumulator
+                .as_mut()
+                .expect("gestalt root state was initialised")
+                .restore_after_unmake(&gestalt.network, position, prepared)
+                .expect("restored legal position has valid gestalt state");
+        }
     }
 
     /// Search one exact nominal depth while restoring `position` exactly.
@@ -122,6 +202,7 @@ impl Searcher {
         self.nodes = 1;
         self.tt_hits = 0;
         self.killers = [[None; 2]; MAX_SEARCH_PLY];
+        self.reset_leaf_evaluator(position);
         let result = self
             .search_root(position, prior_history, depth, &NeverStop)
             .expect("NeverStop cannot interrupt search");
@@ -191,6 +272,7 @@ impl Searcher {
         self.nodes = 0;
         self.tt_hits = 0;
         self.killers = [[None; 2]; MAX_SEARCH_PLY];
+        self.reset_leaf_evaluator(position);
         let mut last_completed = None;
 
         for depth in 1..=max_depth {
@@ -277,7 +359,7 @@ impl Searcher {
         }
 
         if depth == 0 {
-            let score = evaluate(position);
+            let score = self.leaf_evaluate(position);
             self.table
                 .store(key, depth, score_to_tt(score, 0), Bound::Exact, None);
             return Some(self.result(None, score, depth));
@@ -293,7 +375,9 @@ impl Searcher {
         let mut picker = MovePicker::new(&mut moves, hint, [None; 2]);
         let mut first_move = true;
         while let Some(mv) = picker.next(position) {
+            let prepared = self.prepare_leaf_move(position, mv);
             let undo = position.make_move(mv);
+            self.apply_leaf_move(position, prepared);
             let child = if first_move {
                 self.negamax(
                     position,
@@ -333,6 +417,7 @@ impl Searcher {
                 }
             };
             position.unmake_move(mv, undo);
+            self.restore_leaf_move(position, prepared);
             let score = -child?;
             first_move = false;
 
@@ -460,7 +545,9 @@ impl Searcher {
         while let Some(mv) = picker.next(position) {
             let quiet = !mv.kind().is_capture() && !mv.kind().is_promotion();
             let protected_killer = killers.contains(&Some(mv));
+            let prepared = self.prepare_leaf_move(position, mv);
             let undo = position.make_move(mv);
+            self.apply_leaf_move(position, prepared);
             let gives_check = position.is_in_check(position.side_to_move());
             if let Some(static_eval) = pruning_static_eval
                 && should_prune_late_quiet_futility(
@@ -477,6 +564,7 @@ impl Searcher {
                 )
             {
                 position.unmake_move(mv, undo);
+                self.restore_leaf_move(position, prepared);
                 move_index = move_index.saturating_add(1);
                 continue;
             }
@@ -542,6 +630,7 @@ impl Searcher {
                 }
             };
             position.unmake_move(mv, undo);
+            self.restore_leaf_move(position, prepared);
             let score = -child?;
             first_move = false;
             move_index = move_index.saturating_add(1);
@@ -583,7 +672,7 @@ impl Searcher {
         } else if is_rule_draw(position, repetition_key, prior_history, &[]) {
             (Some(moves[0]), 0)
         } else {
-            (Some(moves[0]), evaluate(position))
+            (Some(moves[0]), self.leaf_evaluate(position))
         };
         SearchResult {
             best_move,
