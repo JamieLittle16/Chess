@@ -163,7 +163,7 @@ jobs:
           repeats_per_pass=3
           timing_order=reference,candidate,reference,candidate
           required_search_identity=exact chess-bench output
-          required_tt_entry_bytes=32
+          required_tt_entry_bytes=24
           EOF
 
       - name: Upload evidence
