@@ -1,0 +1,208 @@
+name: M6 gestalt cached-output performance probe
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  cached-output:
+    if: github.head_ref == 'm6/gestalt-cached-output-v3'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      RUSTFLAGS: -C target-cpu=native
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Strict production gate and classical build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/bin .qualification/gestalt-cached
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/bin/classical
+
+      - name: Build current fused gestalt control
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/apply_gestalt_avx2_probe.py
+          python scripts/apply_gestalt_search_probe.py
+          cargo fmt --all
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/bin/gestalt-fused
+          git checkout -- crates/chess-eval/src/gestalt.rs crates/chess-search/src/lib.rs crates/chess-search/src/quiescence.rs
+
+      - name: Build cached-output candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/apply_gestalt_cached_output_probe.py
+          python scripts/apply_gestalt_search_probe.py
+          cargo fmt --all
+          git diff --check
+          git diff -- crates/chess-eval/src/gestalt.rs > .qualification/gestalt-cached/eval.patch
+          test -s .qualification/gestalt-cached/eval.patch
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          cargo build --release -p chess-uci
+          cargo build --release -p chess-eval --example gestalt_incremental_check --example viri13_oracle --example gestalt_runtime_oracle
+          cp target/release/chess-uci .qualification/bin/gestalt-cached
+          chmod +x .qualification/bin/*
+
+      - name: Download exact certified CC0 network
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' \
+            --output .qualification/gestalt-cached/gestalt-b840.nnue
+          test "$(stat -c%s .qualification/gestalt-cached/gestalt-b840.nnue)" = '21242944'
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  .qualification/gestalt-cached/gestalt-b840.nnue' | sha256sum --check --strict
+
+      - name: Differential-check cached sums on real network
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --release --quiet -p chess-eval --example gestalt_incremental_check -- \
+            .qualification/gestalt-cached/gestalt-b840.nnue \
+            | tee .qualification/gestalt-cached/differential.txt
+          grep -F '256 pushes + 256 pops exact' .qualification/gestalt-cached/differential.txt
+
+      - name: Require exact scalar score parity
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > .qualification/gestalt-cached/oracle-parity.txt
+          FENS=(
+            'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+            '2k5/5p2/8/3N4/6b1/1P6/8/4K3 w - - 0 1'
+            'r3k2r/pppq1ppp/2npbn2/3Np3/4P3/2N1B3/PPP2PPP/R2Q1RK1 b kq - 4 10'
+            '8/2p5/3p4/1P1P4/2K5/8/6k1/8 w - - 0 45'
+            '3r2k1/5pp1/2p4p/1pPp4/1P1P1Q2/6P1/5PKP/8 b - - 2 31'
+          )
+          for fen in "${FENS[@]}"; do
+            scalar="$(target/release/examples/viri13_oracle .qualification/gestalt-cached/gestalt-b840.nnue "$fen")"
+            cached="$(target/release/examples/gestalt_runtime_oracle .qualification/gestalt-cached/gestalt-b840.nnue "$fen")"
+            printf '%s | scalar=%s cached=%s\n' "$fen" "$scalar" "$cached" | tee -a .qualification/gestalt-cached/oracle-parity.txt
+            test "$cached" = "$scalar"
+          done
+
+      - name: Reproduce certified M6 opening suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip' \
+            --output /tmp/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/UHO_Lichess_4852_v1.epd.zip' | sha256sum --check --strict
+          mkdir -p .qualification/m6-openings
+          python scripts/build_m6_opening_suite.py --archive /tmp/UHO_Lichess_4852_v1.epd.zip --output-dir .qualification/m6-openings
+          echo '5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e  .qualification/m6-openings/m6-uho-lichess-5000-v1.epd' | sha256sum --check --strict
+
+      - name: Build pinned Fastchess
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          make -C .qualification/fastchess-src -j2
+
+      - name: Create fixed-network launchers
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$PWD"
+          mkdir -p .qualification/launchers
+          for kind in fused cached; do
+            binary="gestalt-$kind"
+            cat > ".qualification/launchers/$kind.sh" <<EOF
+          #!/usr/bin/env bash
+          export CHESS_GESTALT_NETWORK='$ROOT/.qualification/gestalt-cached/gestalt-b840.nnue'
+          exec '$ROOT/.qualification/bin/$binary'
+          EOF
+          done
+          cat > .qualification/launchers/classical.sh <<EOF
+          #!/usr/bin/env bash
+          unset CHESS_GESTALT_NETWORK
+          exec '$ROOT/.qualification/bin/classical'
+          EOF
+          chmod +x .qualification/launchers/*.sh
+
+      - name: Time cached versus fused
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/gestalt-cached/cached-v-fused
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/.qualification/launchers/cached.sh" name=gestalt-cached nodes=25000 option.Hash=32 \
+            -engine cmd="$PWD/.qualification/launchers/fused.sh" name=gestalt-fused nodes=25000 option.Hash=32 \
+            -openings file="$PWD/.qualification/m6-openings/m6-uho-lichess-5000-v1.epd" format=epd order=random \
+            -srand 20261203 -rounds 10 -repeat -concurrency 1 -maxmoves 300 -ratinginterval 20 \
+            -pgnout file=.qualification/gestalt-cached/cached-v-fused/games.pgn notation=uci append=false nodes=true nps=true \
+            | tee .qualification/gestalt-cached/cached-v-fused/stdout.log
+          python scripts/analyze_fastchess_node_times.py .qualification/gestalt-cached/cached-v-fused/games.pgn --output .qualification/gestalt-cached/cached-v-fused/times.json
+
+      - name: Time cached versus classical
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/gestalt-cached/cached-v-classical
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/.qualification/launchers/cached.sh" name=gestalt-cached nodes=25000 option.Hash=32 \
+            -engine cmd="$PWD/.qualification/launchers/classical.sh" name=classical-main nodes=25000 option.Hash=32 \
+            -openings file="$PWD/.qualification/m6-openings/m6-uho-lichess-5000-v1.epd" format=epd order=random \
+            -srand 20261204 -rounds 10 -repeat -concurrency 1 -maxmoves 300 -ratinginterval 20 \
+            -pgnout file=.qualification/gestalt-cached/cached-v-classical/games.pgn notation=uci append=false nodes=true nps=true \
+            | tee .qualification/gestalt-cached/cached-v-classical/stdout.log
+          python scripts/analyze_fastchess_node_times.py .qualification/gestalt-cached/cached-v-classical/games.pgn --output .qualification/gestalt-cached/cached-v-classical/times.json
+
+      - name: Summarize performance
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' | tee .qualification/gestalt-cached/performance-summary.txt
+          import json
+          from pathlib import Path
+          a=json.loads(Path('.qualification/gestalt-cached/cached-v-fused/times.json').read_text())['engines']
+          b=json.loads(Path('.qualification/gestalt-cached/cached-v-classical/times.json').read_text())['engines']
+          cached_same=a['gestalt-cached']['mean_seconds']
+          fused=a['gestalt-fused']['mean_seconds']
+          cached=b['gestalt-cached']['mean_seconds']
+          classical=b['classical-main']['mean_seconds']
+          print(f'fused_mean_seconds={fused:.9f}')
+          print(f'cached_mean_seconds_same_match={cached_same:.9f}')
+          print(f'cached_speedup_over_fused={fused/cached_same:.4f}x')
+          print(f'cached_mean_seconds_vs_classical={cached:.9f}')
+          print(f'classical_mean_seconds={classical:.9f}')
+          print(f'residual_time_ratio={cached/classical:.4f}x')
+          PY
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m6-gestalt-cached-output-${{ github.sha }}
+          path: |
+            .qualification/gestalt-cached/differential.txt
+            .qualification/gestalt-cached/oracle-parity.txt
+            .qualification/gestalt-cached/eval.patch
+            .qualification/gestalt-cached/performance-summary.txt
+            .qualification/gestalt-cached/cached-v-fused/
+            .qualification/gestalt-cached/cached-v-classical/
+          retention-days: 30
