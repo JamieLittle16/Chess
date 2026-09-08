@@ -557,10 +557,8 @@ fn canonicalize_simd_l1(serialized: &[i8]) -> Box<[i8]> {
             for output in 0..L2 {
                 for lane in 0..L1_INPUT_CHUNK {
                     let input = chunk * L1_INPUT_CHUNK + lane;
-                    let source = base
-                        + chunk * L1_INPUT_CHUNK * L2
-                        + output * L1_INPUT_CHUNK
-                        + lane;
+                    let source =
+                        base + chunk * L1_INPUT_CHUNK * L2 + output * L1_INPUT_CHUNK + lane;
                     let target = base + output * HIDDEN + input;
                     canonical[target] = serialized[source];
                 }
@@ -680,8 +678,7 @@ mod tests {
         let output = 7;
         let chunk = input / L1_INPUT_CHUNK;
         let lane = input % L1_INPUT_CHUNK;
-        let serialized_index =
-            chunk * L1_INPUT_CHUNK * L2 + output * L1_INPUT_CHUNK + lane;
+        let serialized_index = chunk * L1_INPUT_CHUNK * L2 + output * L1_INPUT_CHUNK + lane;
         l1[serialized_index] = 42;
         let l1 = canonicalize_simd_l1(&l1);
         assert_eq!(l1[output * HIDDEN + input], 42);
