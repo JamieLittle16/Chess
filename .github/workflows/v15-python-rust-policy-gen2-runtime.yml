@@ -1,0 +1,164 @@
+name: V15 Python Rust-policy gen2 runtime
+
+on:
+  push:
+    branches: [analysis/v15-python-rust-policy-gen2-runtime-20260908]
+    paths:
+      - .github/workflows/v15-python-rust-policy-gen2-runtime.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  qualify:
+    strategy:
+      fail-fast: false
+      matrix:
+        base: [presort, qcap6-presort]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Install runtime and exporter
+        run: |
+          python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+          python -m pip install --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Download gen2 Rust-V15 H64 policy
+        uses: actions/download-artifact@v4
+        with:
+          name: rust-v15-policy-gen2-h64-b11cd3b13d396041caf1f3734ddd5b65ec4cbb30
+          path: policy-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34278735085
+      - name: Materialize matched control and policy candidate
+        shell: bash
+        env:
+          BASE_KIND: ${{ matrix.base }}
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit)
+          PT=$(find policy-artifact -type f -name root-policy-h64.pt -print -quit)
+          test -n "$ZIP"; test -n "$PT"
+          rm -rf /tmp/base /tmp/cand /tmp/m6 results; mkdir -p /tmp/base /tmp/cand /tmp/m6 results
+          unzip -q "$ZIP" -d /tmp/base
+          python scripts/patch_v15_python_presort_once.py /tmp/base/experiments/numba_search.py
+          if [ "$BASE_KIND" = 'qcap6-presort' ]; then
+            python scripts/patch_v15_python_qsearch_cap.py /tmp/base/experiments/numba_search.py 6
+          fi
+          cp -a /tmp/base/. /tmp/cand/
+          python scripts/export_v15_root_policy_npz.py "$PT" /tmp/cand/experiments/v15_root_policy.npz
+          python scripts/patch_v15_python_root_policy_runtime.py /tmp/cand/experiments/numba_search.py 3
+          python -m py_compile tools/v14_agent_runner.py /tmp/base/agent.py /tmp/cand/agent.py /tmp/base/experiments/*.py /tmp/cand/experiments/*.py
+      - name: Build completely teacher-disjoint roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          chosen=fresh[4400:4448]
+          assert len(chosen)==48 and len(set(chosen))==48, len(chosen)
+          Path('/tmp/gen2-policy-48.epd').write_text('\n'.join(chosen)+'\n')
+          print({'fresh':len(fresh),'reserved_range':[4400,4448]})
+          PY
+      - name: Fixed-node throughput
+        shell: bash
+        run: |
+          cat >/tmp/worker.py <<'PY'
+          import json,sys,chess,numpy as np
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful
+          for line in sys.stdin:
+              q=json.loads(line);b=chess.Board(q['fen']);e=encode_position(b);h=np.empty(0,dtype=np.uint64)
+              o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,int(q['nodes']))
+              print(json.dumps({'nodes':int(o[3]),'depth':int(o[2])}),flush=True)
+          PY
+          python - <<'PY'
+          import json,os,statistics,subprocess,sys,time
+          from pathlib import Path
+          roots=Path('/tmp/gen2-policy-48.epd').read_text().splitlines()[:12]
+          def start(d):
+              e=os.environ.copy();e['PYTHONPATH']=d;return subprocess.Popen([sys.executable,'/tmp/worker.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=e)
+          def one(p,f,n):p.stdin.write(json.dumps({'fen':f,'nodes':n})+'\n');p.stdin.flush();return json.loads(p.stdout.readline())
+          def run(p,order):
+              n=0;ds=[];t=time.perf_counter()
+              for f in order:
+                  z=one(p,f,25000);n+=z['nodes'];ds.append(z['depth'])
+              return n/(time.perf_counter()-t),sum(ds)/len(ds)
+          b=start('/tmp/base');c=start('/tmp/cand');rs=[];rows=[]
+          try:
+              one(b,roots[0],500);one(c,roots[0],500)
+              for r in range(3):
+                  order=roots if r%2==0 else list(reversed(roots))
+                  if r%2==0:bn,bd=run(b,order);cn,cd=run(c,order)
+                  else:cn,cd=run(c,order);bn,bd=run(b,order)
+                  rs.append(cn/bn);rows.append({'rep':r,'ratio':cn/bn,'base_nps':bn,'candidate_nps':cn,'base_depth':bd,'candidate_depth':cd})
+          finally:b.terminate();c.terminate();b.wait();c.wait()
+          out={'median_nps_ratio':statistics.median(rs),'rows':rows};Path('results/throughput.json').write_text(json.dumps(out,indent=2)+'\n');print('FINAL',out)
+          PY
+      - name: 96-game equal-node policy isolation
+        run: python -u tools/v14_fixed_node_arena.py /tmp/cand /tmp/base --nodes 18000 --pairs 48 --opening-file /tmp/gen2-policy-48.epd --opening-offset 0 --max-plies 220 --json-out results/equal-node.json | tee results/equal-node.log
+      - name: 96-game competition-clock policy isolation
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json,math,queue,subprocess,sys,threading,time
+          from collections import Counter
+          from pathlib import Path
+          import chess
+          BASE_MS=2500;INC_MS=50;MAX_PLIES=180;GRACE=1500
+          roots=[x.strip() for x in Path('/tmp/gen2-policy-48.epd').read_text().splitlines() if x.strip()]
+          class A:
+              def __init__(self,d):
+                  self.p=subprocess.Popen([sys.executable,'tools/v14_agent_runner.py',d],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,bufsize=1);self.q=queue.Queue()
+                  threading.Thread(target=lambda:[self.q.put(x.rstrip()) for x in self.p.stdout] or self.q.put(None),daemon=True).start();assert json.loads(self.q.get(timeout=120)).get('ready')
+              def reset(self):self.p.stdin.write(json.dumps({'reset':True})+'\n');self.p.stdin.flush();assert json.loads(self.q.get(timeout=5)).get('reset')
+              def move(self,b,ms):
+                  t=time.monotonic();self.p.stdin.write(json.dumps({'fen':b.fen(),'time_left_ms':max(0,int(ms))})+'\n');self.p.stdin.flush();z=json.loads(self.q.get(timeout=(max(0,ms)+GRACE)/1000));return chess.Move.from_uci(z['move']),(time.monotonic()-t)*1000
+              def stop(self):self.p.kill();self.p.wait()
+          b=A('/tmp/base');c=A('/tmp/cand');rows=[]
+          try:
+              for i,fen in enumerate(roots):
+                  for cw in (True,False):
+                      x=chess.Board(fen);cl={True:float(BASE_MS),False:float(BASE_MS)};b.reset();c.reset();cm=[];bm=[]
+                      for _ in range(MAX_PLIES):
+                          o=x.outcome(claim_draw=True)
+                          if o is not None:s=.5 if o.winner is None else float(o.winner==cw);term=x.result(claim_draw=True);break
+                          side=x.turn;e=c if side==cw else b
+                          try:m,dt=e.move(x,cl[side]);assert m in x.legal_moves
+                          except Exception:s=0.0 if side==cw else 1.0;term='engine-failure';break
+                          cl[side]-=dt
+                          if cl[side]<0:s=0.0 if side==cw else 1.0;term='flag';break
+                          (cm if side==cw else bm).append(dt);x.push(m);cl[side]+=INC_MS
+                      else:s=.5;term='max-ply-draw'
+                      rows.append({'opening':i,'candidate_white':cw,'score':s,'termination':term,'candidate_ms':cm,'control_ms':bm});print(i,cw,s,term,flush=True)
+          finally:b.stop();c.stop()
+          score=sum(r['score'] for r in rows);n=len(rows);f=score/n;elo=400*math.log10(f/(1-f)) if 0<f<1 else None
+          cm=[z for r in rows for z in r['candidate_ms']];bm=[z for r in rows for z in r['control_ms']]
+          out={'games':n,'score':score,'score_fraction':f,'naive_elo_from_score':elo,'candidate_mean_move_ms':sum(cm)/len(cm),'control_mean_move_ms':sum(bm)/len(bm),'terminations':dict(Counter(r['termination'] for r in rows)),'details':rows}
+          Path('results/timed.json').write_text(json.dumps(out,indent=2)+'\n');print('FINAL',json.dumps({k:v for k,v in out.items() if k!='details'}))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-rust-policy-gen2-${{ matrix.base }}-${{ github.sha }}
+          path: results/
+          retention-days: 30
