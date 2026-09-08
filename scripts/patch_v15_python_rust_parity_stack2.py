@@ -17,6 +17,10 @@ old = '''if 'TT_CONTEXTS_OFFSET' in s:\n    raise SystemExit('history-sensitive 
 if source.count(old) != 1:
     raise SystemExit("TT assertion anchor changed")
 source = source.replace(old, "", 1)
+old = 'repo = Path(__file__).resolve().parents[1]\n'
+if source.count(old) != 1:
+    raise SystemExit("repo-root anchor changed")
+source = source.replace(old, 'repo = Path.cwd()\n', 1)
 with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
     f.write(source)
     temp = f.name
