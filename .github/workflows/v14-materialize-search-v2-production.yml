@@ -1,0 +1,83 @@
+name: V14 materialize accepted Search-v2 source
+
+on:
+  push:
+    branches: [v14/search-v2-production-materialize]
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    env:
+      PRODUCTION_BASE: f6ac75d644b844fabf35195d6054703e68bcc60f
+      ACCEPTED_PATCH_SHA256: 8e2ad1b016badc339a6751b51a84ab80532ff6f04ac1d5b725fc71ed7a4b1e8c
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: Verify accepted research identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '305275bd07248973b1150967d8034c8d8cf007437812a79ff07faa55a6be80bb  scripts/apply_history_v2_probe.py' | sha256sum --check --strict
+          echo '42d68b30d7476fd17a2637f08a3b369f987a5737c920d2e42e097a379c22404f  scripts/apply_v14_learned_pruning_probe.py' | sha256sum --check --strict
+          test -f crates/chess-search/src/history.rs
+          grep -q 'pub(super) fn next_scored' crates/chess-search/src/move_picker.rs
+
+      - name: Materialize source onto clean production base
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$PWD"
+          git worktree add --detach /tmp/v14-source "$PRODUCTION_BASE"
+          cp "$ROOT/crates/chess-search/src/history.rs" /tmp/v14-source/crates/chess-search/src/history.rs
+          cp "$ROOT/crates/chess-search/src/move_picker.rs" /tmp/v14-source/crates/chess-search/src/move_picker.rs
+          cd /tmp/v14-source
+          python "$ROOT/scripts/apply_history_v2_probe.py" --variant history-lmr
+          python "$ROOT/scripts/apply_v14_learned_pruning_probe.py"
+          cargo fmt --all
+          git diff --check
+          git diff -- crates/chess-search/src/lib.rs crates/chess-search/src/root_analysis.rs > /tmp/accepted-candidate.patch
+          echo "$ACCEPTED_PATCH_SHA256  /tmp/accepted-candidate.patch" | sha256sum --check --strict
+          git status --short
+          test "$(git status --short | wc -l)" = '4'
+          git status --short | grep -q 'crates/chess-search/src/history.rs'
+          git status --short | grep -q 'crates/chess-search/src/move_picker.rs'
+          git status --short | grep -q 'crates/chess-search/src/lib.rs'
+          git status --short | grep -q 'crates/chess-search/src/root_analysis.rs'
+
+      - name: Strict source gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/v14-source
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release --exclude chess-bench
+          cargo test -p chess-bench --release tests::suite_is_deterministic_within_the_same_build
+          grep -q 'Some(self.leaf_evaluate(position))' crates/chess-search/src/lib.rs
+          grep -q 'history_adjusted_lmr_reduction' crates/chess-search/src/lib.rs
+          grep -q 'mod history;' crates/chess-search/src/lib.rs
+
+      - name: Commit exact source-only v14 branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/v14-source
+          git switch -c v14/search-v2-production
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates/chess-search/src/history.rs \
+                  crates/chess-search/src/move_picker.rs \
+                  crates/chess-search/src/lib.rs \
+                  crates/chess-search/src/root_analysis.rs
+          test "$(git diff --cached --name-only | wc -l)" = '4'
+          git commit -m 'feat(search): promote accepted v14 Search-v2 stack'
+          git push origin HEAD:v14/search-v2-production
