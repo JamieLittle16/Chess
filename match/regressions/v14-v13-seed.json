@@ -19,7 +19,9 @@
     {
       "id": "v13-tactical-qxb5",
       "category": "tactical_capture_exactness",
-      "fen": "r2qk2r/pp1nbppp/5n2/1Qp1N3/3p4/8/PPPN1PPP/R1B1R1K b kq - 4 12",
+      "fen": "r2qk2r/pp1nbppp/5n2/1Qp1N3/3p4/8/PPPN1PPP/R1B1R1K1 b kq - 4 12",
+      "source_fen_as_reported": "r2qk2r/pp1nbppp/5n2/1Qp1N3/3p4/8/PPPN1PPP/R1B1R1K b kq - 4 12",
+      "source_normalization": "The diagnostic transcription omitted the trailing empty h1 square. Appending 1 makes the first rank legal while preserving the reported Ra1/Bc1/Re1/Kg1 placement. The fixture is not promoted to a hard label unless pinned Stockfish 19 independently reproduces Qxb5.",
       "expected_uci": ["d8b5"],
       "v13_observed_san": "b6",
       "teacher_preferred_san": "Qxb5",
