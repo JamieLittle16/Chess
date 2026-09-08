@@ -511,7 +511,7 @@ impl Searcher {
                     .store(key, depth, score_to_tt(score, ply), Bound::Exact, None);
                 return Some(score);
             }
-            Some(evaluate(position))
+            Some(self.leaf_evaluate(position))
         } else {
             None
         };
