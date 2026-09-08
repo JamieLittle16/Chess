@@ -19,6 +19,21 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: '3.12'}
       - run: python -m pip install --disable-pip-version-check chess==1.11.2
+      - name: Instrument the actual Gestalt leaf-evaluation boundary
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          ep=Path('crates/chess-eval/src/lib.rs');e=ep.read_text()
+          anchor='''#[cfg(feature = "search-trace")]\nmod search_trace;\n\nuse chess_core::{Color, PieceKind, Position};'''
+          repl='''#[cfg(feature = "search-trace")]\nmod search_trace;\n\nuse chess_core::{Color, PieceKind, Position};\n\n/// Research-only observer for positions at the real search leaf boundary.\n#[cfg(feature = "search-trace")]\npub fn observe_search_position(position: &Position) {\n    search_trace::observe(position);\n}'''
+          assert e.count(anchor)==1,e.count(anchor);ep.write_text(e.replace(anchor,repl,1))
+          sp=Path('crates/chess-search/src/lib.rs');s=sp.read_text()
+          anchor='''    fn leaf_evaluate(&self, position: &Position) -> i32 {\n        if let Some(gestalt) = &self.gestalt'''
+          repl='''    fn leaf_evaluate(&self, position: &Position) -> i32 {\n        #[cfg(feature = "search-trace")]\n        chess_eval::observe_search_position(position);\n        if let Some(gestalt) = &self.gestalt'''
+          assert s.count(anchor)==1,s.count(anchor);sp.write_text(s.replace(anchor,repl,1))
+          print('instrumented actual Searcher::leaf_evaluate boundary')
+          PY
       - name: Build traced Rust V15 and exact Gestalt oracle
         run: |
           CARGO_TARGET_DIR="$PWD/target-trace" cargo build --release -p chess-uci --features search-trace
