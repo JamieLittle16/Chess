@@ -6,10 +6,9 @@ use chess_core::{ChessMove, MoveKind, Position};
 use chess_eval::hyperstition::{AccumulatorState, Network, PreparedAccumulatorUpdate};
 
 fn main() -> Result<(), String> {
-    let path = env::args_os()
-        .nth(1)
-        .map(PathBuf::from)
-        .ok_or_else(|| "usage: hyperstition_incremental_check <hyperstition-b400.nnue>".to_owned())?;
+    let path = env::args_os().nth(1).map(PathBuf::from).ok_or_else(|| {
+        "usage: hyperstition_incremental_check <hyperstition-b400.nnue>".to_owned()
+    })?;
     let network = Network::from_file(&path)?;
 
     certify_long_walk(&network)?;
@@ -126,7 +125,9 @@ fn certify_special_move(
         .ok_or_else(|| format!("{name}: could not restore {mv:?}"))?;
     require_match(network, &state, &position, &format!("{name} restored"))?;
     if position != root || state != root_state {
-        return Err(format!("{name}: root position/accumulator not restored exactly"));
+        return Err(format!(
+            "{name}: root position/accumulator not restored exactly"
+        ));
     }
     println!("{name}: push + pop exact ({mv:?})");
     Ok(())
