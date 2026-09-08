@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Build a compact competition opening/reply book from the production Rust V15 teacher.
 
-The input TSV records each observed Chessathon start FEN and the colour controlled by our agent.
-At our turns we store/follow the teacher's best move. At opponent turns we expand the strongest N
-teacher candidates so the next one of our turns is covered for several plausible replies.
+Observed Chessathon starts include which colour our agent controlled. At our turns we ask the normal
+production PVS teacher for one deeper best move. At opponent turns we use shallower full-window
+MultiPV only to enumerate the strongest N plausible replies. This asymmetry spends offline compute
+where it directly improves moves we will actually play.
 
 The emitted lookup key is the first four FEN fields (board, side, castling, en-passant), deliberately
-ignoring move clocks. The submission uses the book only as an opening/early-game move oracle; draw
-claims and later repetition handling remain owned by the normal engine.
+ignoring move clocks. Draw/repetition semantics remain owned by the normal runtime engine.
 """
 from __future__ import annotations
 
@@ -77,26 +77,30 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--roots", type=Path, required=True)
     ap.add_argument("--teacher-bin", type=Path, required=True)
-    ap.add_argument("--depth", type=int, default=4)
+    ap.add_argument("--our-depth", type=int, default=6)
+    ap.add_argument("--opponent-depth", type=int, default=4)
     ap.add_argument("--opponent-width", type=int, default=3)
     ap.add_argument("--plies", type=int, default=6)
     ap.add_argument("--output", type=Path, required=True)
     args = ap.parse_args()
-    if args.depth < 1 or args.opponent_width < 1 or args.plies < 1:
-        raise SystemExit("depth, opponent-width and plies must be positive")
+    if min(args.our_depth, args.opponent_depth, args.opponent_width, args.plies) < 1:
+        raise SystemExit("depths, opponent-width and plies must be positive")
 
-    frontier = load_roots(args.roots)
+    roots = load_roots(args.roots)
+    frontier = roots[:]
     book: dict[str, dict[str, object]] = {}
     layer_stats: list[dict[str, int]] = []
 
     for ply in range(args.plies):
-        # Deduplicate exact states while retaining colour/origin metadata for traversal.
         dedup: dict[tuple[str, bool], State] = {(s.fen, s.our_color): s for s in frontier}
         frontier = list(dedup.values())
-        teacher = query_teacher(args.teacher_bin, frontier, args.depth, args.opponent_width)
+        our_states = [s for s in frontier if chess.Board(s.fen).turn == s.our_color]
+        opponent_states = [s for s in frontier if chess.Board(s.fen).turn != s.our_color]
+        teacher: dict[str, list[tuple[str, int]]] = {}
+        teacher.update(query_teacher(args.teacher_bin, our_states, args.our_depth, 1))
+        teacher.update(query_teacher(args.teacher_bin, opponent_states, args.opponent_depth, args.opponent_width))
+
         nxt: dict[tuple[str, bool], State] = {}
-        our_nodes = 0
-        opponent_nodes = 0
         for state in frontier:
             board = chess.Board(state.fen)
             candidates = teacher[state.fen]
@@ -104,7 +108,6 @@ def main() -> int:
                 continue
             ours = board.turn == state.our_color
             if ours:
-                our_nodes += 1
                 move_uci, score = candidates[0]
                 move = chess.Move.from_uci(move_uci)
                 if move not in board.legal_moves:
@@ -113,7 +116,7 @@ def main() -> int:
                 entry = {
                     "move": move_uci,
                     "score": score,
-                    "teacher_depth": args.depth,
+                    "teacher_depth": args.our_depth,
                     "origin": state.origin,
                     "tree_ply": ply,
                 }
@@ -125,7 +128,6 @@ def main() -> int:
                 child = State(board.fen(), state.our_color, state.origin)
                 nxt[(child.fen, child.our_color)] = child
             else:
-                opponent_nodes += 1
                 for move_uci, _score in candidates[: args.opponent_width]:
                     move = chess.Move.from_uci(move_uci)
                     if move not in board.legal_moves:
@@ -137,8 +139,8 @@ def main() -> int:
         layer_stats.append({
             "ply": ply,
             "states": len(frontier),
-            "our_nodes": our_nodes,
-            "opponent_nodes": opponent_nodes,
+            "our_nodes": len(our_states),
+            "opponent_nodes": len(opponent_states),
             "next_states": len(nxt),
             "book_entries": len(book),
         })
@@ -150,10 +152,11 @@ def main() -> int:
     payload = {
         "format": "little-gambit-rust-teacher-book-v1",
         "key": "first four FEN fields",
-        "teacher_depth": args.depth,
+        "our_teacher_depth": args.our_depth,
+        "opponent_teacher_depth": args.opponent_depth,
         "opponent_width": args.opponent_width,
         "tree_plies": args.plies,
-        "roots": len(load_roots(args.roots)),
+        "roots": len(roots),
         "entries": dict(sorted(book.items())),
         "layer_stats": layer_stats,
     }
