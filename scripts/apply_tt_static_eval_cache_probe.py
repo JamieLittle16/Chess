@@ -205,8 +205,8 @@ fn score_from_tt(score: i32, ply: u16) -> i32 {
         label="static eval compression helper",
     )
 
-    # Guard the main engineering premise: Option<i16> must consume existing layout slack, not shrink
-    # the configured TT by increasing each entry.
+    # V15's TtEntry is 24 bytes on the pinned x86-64 Rust toolchain. The added Option<i16> fits
+    # existing layout slack, so this guard ensures the configured Hash budget loses no entries.
     marker = """    #[test]
     fn megabyte_tt_sizing_matches_entry_layout_and_never_returns_zero() {
 """
@@ -214,8 +214,8 @@ fn score_from_tt(score: i32, ply: u16) -> i32 {
         text,
         marker,
         """    #[test]
-    fn static_eval_cache_preserves_32_byte_tt_entry() {
-        assert_eq!(core::mem::size_of::<super::TtEntry>(), 32);
+    fn static_eval_cache_preserves_24_byte_tt_entry() {
+        assert_eq!(core::mem::size_of::<super::TtEntry>(), 24);
     }
 
 """ + marker,
