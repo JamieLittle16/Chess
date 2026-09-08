@@ -1,0 +1,114 @@
+name: V15 Python learned shallow-pruning screen
+
+on:
+  push:
+    branches: [analysis/v15-python-learned-pruning-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Materialize control and both learned-pruning candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name 'Little-Gambit-V14.zip' -print -quit); test -n "$ZIP"
+          rm -rf /tmp/base /tmp/v13 /tmp/h64; mkdir -p /tmp/base /tmp/v13 /tmp/h64 results
+          unzip -q "$ZIP" -d /tmp/base
+          cp -a /tmp/base/. /tmp/v13/; cp -a /tmp/base/. /tmp/h64/
+          python scripts/patch_v15_python_learned_pruning.py v13 /tmp/v13/experiments/numba_search.py
+          python scripts/patch_v15_python_learned_pruning.py h64 /tmp/h64/experiments/numba_search.py
+          python -m py_compile /tmp/base/agent.py /tmp/base/experiments/*.py /tmp/v13/agent.py /tmp/v13/experiments/*.py /tmp/h64/agent.py /tmp/h64/experiments/*.py
+          PYTHONPATH=/tmp/v13 python - <<'PY'
+          import chess,numpy as np
+          from experiments.numba_core import encode_position,move_to_uci
+          from experiments.numba_search import iterative_search_stateful
+          b=chess.Board();e=encode_position(b);h=np.empty(0,dtype=np.uint64);o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,4000);assert chess.Move.from_uci(move_to_uci(int(o[0]))) in b.legal_moves;print('v13',o)
+          PY
+          PYTHONPATH=/tmp/h64 python - <<'PY'
+          import chess,numpy as np
+          from experiments.numba_core import encode_position,move_to_uci
+          from experiments.numba_search import iterative_search_stateful
+          b=chess.Board();e=encode_position(b);h=np.empty(0,dtype=np.uint64);o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,4000);assert chess.Move.from_uci(move_to_uci(int(o[0]))) in b.legal_moves;print('h64',o)
+          PY
+      - name: Build fresh pinned roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          mkdir -p /tmp/m6; python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          echo '5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e  /tmp/m6/m6-uho-lichess-5000-v1.epd' | sha256sum --check --strict
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]; chosen=fresh[448:496]
+          assert len(chosen)==48 and len(set(chosen))==48
+          Path('/tmp/prune-48.epd').write_text('\n'.join(chosen)+'\n')
+          PY
+          sha256sum /tmp/prune-48.epd | tee results/openings.sha256
+      - name: Measure three-way fixed-node throughput
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/worker.py <<'PY'
+          import json,sys,chess,numpy as np
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful
+          for line in sys.stdin:
+              q=json.loads(line);b=chess.Board(q['fen']);e=encode_position(b);h=np.empty(0,dtype=np.uint64);o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,int(q['nodes']));print(json.dumps({'nodes':int(o[3])}),flush=True)
+          PY
+          python - <<'PY'
+          import json,os,statistics,subprocess,sys,time
+          from pathlib import Path
+          roots=[x.strip() for x in Path('/tmp/prune-48.epd').read_text().splitlines() if x.strip()][:16]
+          def start(d):
+              e=os.environ.copy();e['PYTHONPATH']=d;return subprocess.Popen([sys.executable,'/tmp/worker.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=e)
+          def run(p,order):
+              total=0;t=time.perf_counter()
+              for fen in order:p.stdin.write(json.dumps({'fen':fen,'nodes':25000})+'\n');p.stdin.flush();total+=json.loads(p.stdout.readline())['nodes']
+              return total/(time.perf_counter()-t)
+          ps={k:start(v) for k,v in {'base':'/tmp/base','v13':'/tmp/v13','h64':'/tmp/h64'}.items()};rows=[]
+          try:
+              for p in ps.values():p.stdin.write(json.dumps({'fen':roots[0],'nodes':500})+'\n');p.stdin.flush();json.loads(p.stdout.readline())
+              for rep in range(3):
+                  order=roots if rep%2==0 else list(reversed(roots));vals={k:run(ps[k],order) for k in ('base','v13','h64')};rows.append({'rep':rep,**vals,'v13_ratio':vals['v13']/vals['base'],'h64_ratio':vals['h64']/vals['base']})
+          finally:
+              for p in ps.values():p.terminate();p.wait()
+          out={'median_v13_ratio':statistics.median(r['v13_ratio'] for r in rows),'median_h64_ratio':statistics.median(r['h64_ratio'] for r in rows),'rows':rows};Path('results/throughput.json').write_text(json.dumps(out,indent=2)+'\n');print('FINAL',out)
+          PY
+      - name: 96-game V13-guided pruning screen
+        run: |
+          python -u tools/v14_fixed_node_arena.py /tmp/v13 /tmp/base --nodes 16000 --pairs 48 --opening-file /tmp/prune-48.epd --opening-offset 0 --max-plies 220 --json-out results/v13-arena.json | tee results/v13-arena.log
+          grep '^FINAL ' results/v13-arena.log
+      - name: 96-game H64-guided pruning screen
+        run: |
+          python -u tools/v14_fixed_node_arena.py /tmp/h64 /tmp/base --nodes 16000 --pairs 48 --opening-file /tmp/prune-48.epd --opening-offset 0 --max-plies 220 --json-out results/h64-arena.json | tee results/h64-arena.log
+          grep '^FINAL ' results/h64-arena.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-learned-pruning-${{ github.sha }}
+          path: results/
+          retention-days: 30
