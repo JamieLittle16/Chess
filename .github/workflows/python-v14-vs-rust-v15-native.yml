@@ -64,7 +64,9 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: '3.12'}
       - uses: dtolnay/rust-toolchain@master
-        with: {toolchain: 1.98.1}
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
       - name: Install exact Python V14 runtime dependencies
         run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
       - name: Materialize accepted V14 base
