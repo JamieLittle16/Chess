@@ -3,6 +3,9 @@
 Unlike dual-perspective Chess768, this representation maintains one accumulator for an absolute
 signed-piece feature map. A trained value head would predict from White's perspective; search would
 negate for Black-to-move. This module is initially shadow-only so no score is consumed by V13.
+
+The hot-path parent-to-child transport deliberately uses explicit scalar loops. The dual-perspective
+slice-copy experiment showed that Numba slice assignment is substantially slower in this context.
 """
 from __future__ import annotations
 
@@ -27,8 +30,9 @@ def build_absolute768_accumulator_into(
     feature_bias: np.ndarray,
     out: np.ndarray,
 ) -> None:
-    out[:] = feature_bias
     hidden = out.shape[0]
+    for neuron in range(hidden):
+        out[neuron] = int(feature_bias[neuron])
     for square in range(64):
         signed_piece = int(board[square])
         if signed_piece == EMPTY:
@@ -61,7 +65,10 @@ def advance_absolute768_accumulator_into(
     child: np.ndarray,
     feature_weights: np.ndarray,
 ) -> None:
-    child[:] = parent
+    hidden = parent.shape[0]
+    for neuron in range(hidden):
+        child[neuron] = parent[neuron]
+
     from_square = move_from(move)
     to_square = move_to(move)
     promotion = move_promotion(move)
