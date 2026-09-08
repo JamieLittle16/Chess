@@ -89,19 +89,19 @@ impl Searcher {
             if generate_legal_moves_mut(position).is_empty() {
                 return Some(terminal_score(position, ply));
             }
-            return Some(evaluate(position));
+            return Some(self.leaf_evaluate(position));
         }
 
         // Legal terminal detection happened above. The qsearch budget is local to this nominal leaf,
         // so a deep main search still receives the same tactical stabilization as a shallow search.
         if qply >= MAX_QSEARCH_PLY {
-            return Some(evaluate(position));
+            return Some(self.leaf_evaluate(position));
         }
 
         let mut best = if in_check {
             -INFINITY
         } else {
-            evaluate(position)
+            self.leaf_evaluate(position)
         };
 
         if !in_check {
@@ -112,14 +112,16 @@ impl Searcher {
         }
 
         if path_len >= MAX_SEARCH_PLY {
-            return Some(evaluate(position));
+            return Some(self.leaf_evaluate(position));
         }
         self.path_keys[path_len] = repetition_key;
 
         let mut moves = moves;
         let mut picker = MovePicker::new(&mut moves, None, [None; 2]);
         while let Some(mv) = picker.next(position) {
+            let prepared = self.prepare_leaf_move(position, mv);
             let undo = position.make_move(mv);
+            self.apply_leaf_move(position, prepared);
             self.nodes = self.nodes.saturating_add(1);
             let child = self.quiescence_inner(
                 position,
@@ -132,6 +134,7 @@ impl Searcher {
                 control,
             );
             position.unmake_move(mv, undo);
+            self.restore_leaf_move(position, prepared);
             let score = -child?;
 
             best = best.max(score);

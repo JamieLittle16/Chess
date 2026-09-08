@@ -1,0 +1,148 @@
+name: M6 source-level gestalt production SPRT
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  sprt:
+    if: github.head_ref == 'm6/gestalt-production-v1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      RUSTFLAGS: -C target-cpu=native
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Strict committed candidate gate and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/bin .qualification/gestalt-source-sprt
+          grep -q 'struct GestaltSearchEvaluator' crates/chess-search/src/lib.rs
+          grep -q 'fn apply_delta(' crates/chess-eval/src/gestalt.rs
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/bin/gestalt-source
+          chmod +x .qualification/bin/gestalt-source
+          sha256sum .qualification/bin/gestalt-source > .qualification/gestalt-source-sprt/candidate.sha256
+
+      - name: Build exact current-main classical reference in separate worktree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git worktree add --detach /tmp/chess-reference origin/main
+          CARGO_TARGET_DIR=/tmp/chess-reference-target \
+            cargo build --release -p chess-uci --manifest-path /tmp/chess-reference/Cargo.toml
+          cp /tmp/chess-reference-target/release/chess-uci .qualification/bin/classical-main
+          chmod +x .qualification/bin/classical-main
+          sha256sum .qualification/bin/classical-main > .qualification/gestalt-source-sprt/reference.sha256
+          git -C /tmp/chess-reference rev-parse HEAD > .qualification/gestalt-source-sprt/reference-head.txt
+
+      - name: Download exact certified CC0 network
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' \
+            --output .qualification/gestalt-source-sprt/gestalt-b840.nnue
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  .qualification/gestalt-source-sprt/gestalt-b840.nnue' \
+            | sha256sum --check --strict
+
+      - name: Reproduce certified 5000-root M6 suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip' \
+            --output /tmp/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/UHO_Lichess_4852_v1.epd.zip' \
+            | sha256sum --check --strict
+          mkdir -p .qualification/m6-openings
+          python scripts/build_m6_opening_suite.py \
+            --archive /tmp/UHO_Lichess_4852_v1.epd.zip \
+            --output-dir .qualification/m6-openings
+          echo '5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e  .qualification/m6-openings/m6-uho-lichess-5000-v1.epd' \
+            | sha256sum --check --strict
+
+      - name: Build pinned Fastchess
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = 'f618e34540f94f4719ad3817950618dabe441318'
+          make -C .qualification/fastchess-src -j2
+
+      - name: Create fixed-network source launcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$PWD"
+          cat > .qualification/bin/gestalt-source-launcher <<EOF
+          #!/usr/bin/env bash
+          export CHESS_GESTALT_NETWORK='$ROOT/.qualification/gestalt-source-sprt/gestalt-b840.nnue'
+          exec '$ROOT/.qualification/bin/gestalt-source'
+          EOF
+          chmod +x .qualification/bin/gestalt-source-launcher
+
+      - name: Run frozen M6 source-level equal-time SPRT
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/sprt_match_harness.py \
+            --candidate .qualification/bin/gestalt-source-launcher \
+            --reference .qualification/bin/classical-main \
+            --candidate-name gestalt-source \
+            --reference-name classical-main \
+            --candidate-option Hash=32 \
+            --reference-option Hash=32 \
+            --fastchess .qualification/fastchess-src/fastchess \
+            --openings .qualification/m6-openings/m6-uho-lichess-5000-v1.epd \
+            --protocol match/protocols/m6-sprt-arch-v1.json \
+            --output-dir .qualification/gestalt-source-sprt/match
+
+      - name: Record source-candidate identity
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > .qualification/gestalt-source-sprt/candidate-head.txt
+          cat > .qualification/gestalt-source-sprt/evidence.txt <<'EOF'
+          purpose=source-level mature gestalt production acceptance
+          network_sha256=956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6
+          prior_equal_node=49W-43D-8L,+151.35+-54.58 Elo
+          prior_materialized_equal_time=65W-122D-21L,+74.62+-30.24 Elo,H1
+          sprt_protocol=m6-sprt-arch-v1
+          candidate_source=committed ordinary Rust source
+          pruning_oracle=classical
+          EOF
+
+      - name: Upload complete source SPRT evidence without network bytes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m6-gestalt-source-sprt-${{ github.sha }}
+          path: |
+            .qualification/gestalt-source-sprt/candidate.sha256
+            .qualification/gestalt-source-sprt/reference.sha256
+            .qualification/gestalt-source-sprt/candidate-head.txt
+            .qualification/gestalt-source-sprt/reference-head.txt
+            .qualification/gestalt-source-sprt/evidence.txt
+            .qualification/gestalt-source-sprt/match/
+          retention-days: 30
