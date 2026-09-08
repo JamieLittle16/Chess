@@ -1,0 +1,203 @@
+name: M6 incremental gestalt equal-nodes probe
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  equal-nodes:
+    if: github.head_ref == 'm6/gestalt-incremental-search-v1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Verify unpatched production control and build reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/bin .qualification/gestalt-search
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/bin/reference
+          chmod +x .qualification/bin/reference
+          sha256sum .qualification/bin/reference \
+            | tee .qualification/gestalt-search/reference.sha256
+
+      - name: Apply auditable incremental gestalt search patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/apply_gestalt_search_probe.py
+          cargo fmt --all
+          git diff --check
+          git diff -- crates/chess-search/src/lib.rs crates/chess-search/src/quiescence.rs \
+            > .qualification/gestalt-search/search-integration.patch
+          test -s .qualification/gestalt-search/search-integration.patch
+          sha256sum scripts/apply_gestalt_search_probe.py \
+            > .qualification/gestalt-search/patcher.sha256
+          sha256sum .qualification/gestalt-search/search-integration.patch \
+            > .qualification/gestalt-search/search-integration.sha256
+
+      - name: Strict patched candidate gate and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/bin/candidate
+          chmod +x .qualification/bin/candidate
+          sha256sum .qualification/bin/candidate \
+            | tee .qualification/gestalt-search/candidate.sha256
+
+      - name: Download exact certified CC0 gestalt network
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' \
+            --output .qualification/gestalt-search/gestalt-b840.nnue
+          test "$(stat -c%s .qualification/gestalt-search/gestalt-b840.nnue)" = '21242944'
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  .qualification/gestalt-search/gestalt-b840.nnue' \
+            | sha256sum --check --strict
+
+      - name: Reproduce certified 5000-root M6 opening suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip' \
+            --output /tmp/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/UHO_Lichess_4852_v1.epd.zip' \
+            | sha256sum --check --strict
+          mkdir -p .qualification/m6-openings
+          python scripts/build_m6_opening_suite.py \
+            --archive /tmp/UHO_Lichess_4852_v1.epd.zip \
+            --output-dir .qualification/m6-openings \
+            | tee .qualification/m6-openings/derivation.log
+          OPENINGS=.qualification/m6-openings/m6-uho-lichess-5000-v1.epd
+          test "$(wc -l < "$OPENINGS")" = '5000'
+          echo '5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e  .qualification/m6-openings/m6-uho-lichess-5000-v1.epd' \
+            | sha256sum --check --strict
+
+      - name: Build pinned Fastchess 1.8.2-alpha
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = 'f618e34540f94f4719ad3817950618dabe441318'
+          make -C .qualification/fastchess-src -j2
+          test -x .qualification/fastchess-src/fastchess
+
+      - name: Create candidate and reference launchers
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$PWD"
+          mkdir -p .qualification/launchers
+          cat > .qualification/launchers/candidate.sh <<EOF
+          #!/usr/bin/env bash
+          export CHESS_GESTALT_NETWORK='$ROOT/.qualification/gestalt-search/gestalt-b840.nnue'
+          exec '$ROOT/.qualification/bin/candidate'
+          EOF
+          cat > .qualification/launchers/reference.sh <<EOF
+          #!/usr/bin/env bash
+          unset CHESS_GESTALT_NETWORK
+          exec '$ROOT/.qualification/bin/reference'
+          EOF
+          chmod +x .qualification/launchers/candidate.sh .qualification/launchers/reference.sh
+
+      - name: Candidate UCI smoke with mature evaluator active
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            printf 'uci\n'
+            printf 'isready\n'
+            printf 'position startpos\n'
+            printf 'go nodes 1000\n'
+            printf 'quit\n'
+          } | .qualification/launchers/candidate.sh \
+            | tee .qualification/gestalt-search/candidate-smoke.txt
+          grep -q '^uciok$' .qualification/gestalt-search/candidate-smoke.txt
+          grep -q '^readyok$' .qualification/gestalt-search/candidate-smoke.txt
+          grep -q '^bestmove ' .qualification/gestalt-search/candidate-smoke.txt
+
+      - name: Run paired 100-game 25k-node signal screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/gestalt-search/match
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/.qualification/launchers/candidate.sh" name=gestalt-incremental nodes=25000 option.Hash=32 \
+            -engine cmd="$PWD/.qualification/launchers/reference.sh" name=classical-main nodes=25000 option.Hash=32 \
+            -openings file="$PWD/.qualification/m6-openings/m6-uho-lichess-5000-v1.epd" format=epd order=random \
+            -srand 20261121 \
+            -rounds 50 -repeat -concurrency 1 -maxmoves 300 \
+            -ratinginterval 20 \
+            -pgnout file=.qualification/gestalt-search/match/games.pgn notation=uci append=false nodes=true nps=true \
+            -log file=.qualification/gestalt-search/match/uci.log level=info engine=true append=false \
+            | tee .qualification/gestalt-search/match/fastchess.stdout.log
+
+      - name: Record immutable experiment identity
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/gestalt-search
+          cat > .qualification/gestalt-search/evidence.txt <<EOF
+          purpose=mature-network equal-search-work signal probe
+          production_base=0b741a2d7f3977e525bff55819300ed0e2eaddcb
+          candidate_leaf_eval=incremental CC0 gestalt-b840
+          pruning_static_eval=accepted classical
+          network_sha256=956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6
+          network_license=CC0-1.0
+          network_reference_parity=Viridithas-v13 exact in PR-122
+          incremental_reference_parity=256-push-256-pop exact in PR-123
+          nodes_per_move=25000
+          paired_games=100
+          opening_suite=m6-uho-lichess-5000-v1
+          opening_sha256=5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e
+          seed=20261121
+          hash_mib=32
+          concurrency=1
+          maxmoves=300
+          fastchess_commit=f618e34540f94f4719ad3817950618dabe441318
+          EOF
+          git rev-parse HEAD >> .qualification/gestalt-search/checkout-head.txt
+
+      - name: Upload complete signal evidence without network bytes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m6-gestalt-search-equal-nodes-${{ github.sha }}
+          path: |
+            .qualification/gestalt-search/reference.sha256
+            .qualification/gestalt-search/candidate.sha256
+            .qualification/gestalt-search/patcher.sha256
+            .qualification/gestalt-search/search-integration.patch
+            .qualification/gestalt-search/search-integration.sha256
+            .qualification/gestalt-search/candidate-smoke.txt
+            .qualification/gestalt-search/evidence.txt
+            .qualification/gestalt-search/checkout-head.txt
+            .qualification/gestalt-search/match/
+            .qualification/m6-openings/derivation.log
+          retention-days: 30
