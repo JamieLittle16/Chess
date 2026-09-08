@@ -1,0 +1,126 @@
+name: V14 narrow king-shell breach guard
+
+on:
+  push:
+    branches: [analysis/v14-shell-breach-guard-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact H64 model
+        uses: actions/download-artifact@v4
+        with:
+          pattern: v14-single-student-h64-bb7d2a4ed05ff78d344cc4374d54e35189584993
+          path: model-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34202820525
+
+      - name: Materialize lean H64 control and shell-guard candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODEL=$(find model-artifact -type f -name 'student-h64.npz' -print -quit);test -n "$MODEL"
+          echo '3422cecc3b1226767412e08746ffd6eef9f7e38602ac15b9256b475e6762b598  '"$MODEL" | sha256sum --check --strict
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum --check --strict
+          rm -rf /tmp/base /tmp/control /tmp/cand
+          for DIR in /tmp/base /tmp/control /tmp/cand; do
+            mkdir -p "$DIR";unzip -q /tmp/v13.zip -d "$DIR"
+            patch "$DIR/experiments/numba_search.py" < .analysis/v13_jit_refactor.patch
+            DIR="$DIR" python - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path(os.environ['DIR'])/'experiments/numba_search.py';s=p.read_text()
+          old='    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          new='    correction = correction // 6\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          assert s.count(old)==1;p.write_text(s.replace(old,new,1))
+          PY
+            python scripts/patch_v13_legality_context.py "$DIR/experiments/numba_core.py"
+            python scripts/patch_v13_qsearch_tactical.py "$DIR/experiments/numba_core.py" "$DIR/experiments/numba_search.py"
+          done
+          for DIR in /tmp/control /tmp/cand; do
+            cp "$MODEL" "$DIR/experiments/v14_student_h64.npz"
+            cp experiments/v14_student_single_runtime.py "$DIR/experiments/v14_student_single_runtime.py"
+            python scripts/patch_v14_single_student_search.py "$DIR/experiments/numba_search.py" --numerator 1 --denominator 12
+            python scripts/patch_v14_student_lean_qsearch.py "$DIR/experiments/numba_search.py"
+          done
+          python scripts/patch_v14_shell_breach_guard.py /tmp/cand/experiments/numba_search.py
+          python -m py_compile /tmp/base/experiments/*.py /tmp/control/experiments/*.py /tmp/cand/experiments/*.py
+          mkdir -p results
+
+      - name: Rated f3 sentinel must improve
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/v14_regression_probe.py --engine /tmp/cand --control /tmp/control \
+            --manifest match/regressions/v14-rated-game-1.json --budgets 30000,100000,300000,1000000 \
+            --json-out results/rated-f3.json | tee results/rated-f3.log
+          python - <<'PY'
+          import json
+          o=json.load(open('results/rated-f3.json'))
+          c=o['candidate']['v13-rated-1-f3-prophylaxis']['searches']
+          b=o['control']['v13-rated-1-f3-prophylaxis']['searches']
+          print('control',[(x['budget'],x['uci'],x['score']) for x in b])
+          print('candidate',[(x['budget'],x['uci'],x['score']) for x in c])
+          assert c[-1]['uci'] != 'f2f3', c
+          PY
+
+      - name: Root-only throughput guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/nps.py <<'PY'
+          import json,sys,chess,numpy as np
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful
+          for line in sys.stdin:
+              q=json.loads(line);b=chess.Board(q['fen']);e=encode_position(b);h=np.empty(0,dtype=np.uint64);o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,int(q['nodes']));print(json.dumps({'nodes':int(o[3])}),flush=True)
+          PY
+          python - <<'PY'
+          import json,os,statistics,subprocess,sys,time
+          from pathlib import Path
+          roots=[x.strip() for x in open('match/openings/m3-uho-lichess-100-v1.epd') if x.strip() and not x.startswith('#')][:40]
+          def st(path):e=os.environ.copy();e['PYTHONPATH']=path;return subprocess.Popen([sys.executable,'/tmp/nps.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=e)
+          def run(p,order):
+              n=0;t=time.perf_counter()
+              for f in order:p.stdin.write(json.dumps({'fen':f,'nodes':30000})+'\n');p.stdin.flush();n+=json.loads(p.stdout.readline())['nodes']
+              return time.perf_counter()-t,n
+          a=st('/tmp/control');b=st('/tmp/cand');rs=[]
+          try:
+              for p in (a,b):p.stdin.write(json.dumps({'fen':roots[0],'nodes':300})+'\n');p.stdin.flush();json.loads(p.stdout.readline())
+              for rep in range(3):
+                  order=roots if rep%2==0 else list(reversed(roots))
+                  if rep%2==0:at,an=run(a,order);bt,bn=run(b,order)
+                  else:bt,bn=run(b,order);at,an=run(a,order)
+                  r=(bn/bt)/(an/at);rs.append(r);print('rep',rep,r)
+          finally:a.terminate();b.terminate();a.wait();b.wait()
+          out={'median_guard_vs_control_nps':statistics.median(rs),'records':rs};Path('results/throughput.json').write_text(json.dumps(out,indent=2)+'\n');print(out)
+          PY
+
+      - name: Fresh paired screen versus lean neural control
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u tools/v14_fixed_node_arena.py /tmp/cand /tmp/control --nodes 16000 --pairs 32 --opening-offset 16 --max-plies 220 --opening-file match/openings/m3-uho-lichess-100-v1.epd --json-out results/guard-vs-control-64.json | tee results/guard-vs-control-64.log
+          grep '^FINAL ' results/guard-vs-control-64.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v14-shell-breach-guard-${{ github.sha }}
+          path: results/
+          retention-days: 30
