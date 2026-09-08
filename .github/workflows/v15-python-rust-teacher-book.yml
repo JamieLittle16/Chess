@@ -44,12 +44,14 @@ jobs:
           set -euo pipefail
           head -n 2 match/openings/chessathon-observed-starts-v1.tsv | tail -n 1 | cut -f3- > /tmp/one.fen
           target/release/examples/rust_teacher_candidates 2 3 < /tmp/one.fen | tee results/teacher-smoke.tsv
+          target/release/examples/rust_teacher_candidates 3 1 < /tmp/one.fen | tee results/teacher-best-smoke.tsv
           python - <<'PY'
           import chess
-          line=open('results/teacher-smoke.tsv').read().strip();fen,cs=line.split('\t',1);b=chess.Board(fen)
-          assert cs
-          for item in cs.split(','):
-              uci,_=item.rsplit(':',1); assert chess.Move.from_uci(uci) in b.legal_moves,(uci,fen)
+          for path in ('results/teacher-smoke.tsv','results/teacher-best-smoke.tsv'):
+              line=open(path).read().strip();fen,cs=line.split('\t',1);b=chess.Board(fen)
+              assert cs
+              for item in cs.split(','):
+                  uci,_=item.rsplit(':',1); assert chess.Move.from_uci(uci) in b.legal_moves,(uci,fen)
           print('teacher smoke legal')
           PY
       - name: Build six-ply observed-pool reply book
@@ -61,13 +63,14 @@ jobs:
           python -u scripts/build_v15_rust_teacher_book.py \
             --roots match/openings/chessathon-observed-starts-v1.tsv \
             --teacher-bin target/release/examples/rust_teacher_candidates \
-            --depth 4 --opponent-width 3 --plies 6 \
+            --our-depth 6 --opponent-depth 4 --opponent-width 3 --plies 6 \
             --output results/rust-teacher-book-v1.json | tee results/book-build.log
           python - <<'PY'
-          import json
+          import json,os
           p=json.load(open('results/rust-teacher-book-v1.json'))
           assert p['entries'] and p['roots'] >= 10
-          print('entries',len(p['entries']),'bytes',__import__('os').path.getsize('results/rust-teacher-book-v1.json'))
+          assert p['our_teacher_depth'] == 6 and p['opponent_teacher_depth'] == 4
+          print('entries',len(p['entries']),'bytes',os.path.getsize('results/rust-teacher-book-v1.json'))
           PY
           sha256sum results/rust-teacher-book-v1.json > results/book.sha256
       - uses: actions/upload-artifact@v4
