@@ -1,0 +1,67 @@
+name: V15 Python Gestalt absolute H64
+
+on:
+  push:
+    branches: [analysis/v15-python-gestalt-absolute-h64-20260908]
+    paths:
+      - .github/workflows/v15-python-gestalt-absolute-h64.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  train:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Download exact Gestalt teacher shards
+        uses: actions/download-artifact@v4
+        with:
+          pattern: v15-gestalt-labels-*-c3331960a207e4bb10e13252d62be27788d6af5d
+          path: labels
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34266694827
+      - name: Train exact-shape H64 residual
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
+          rm -rf /tmp/v14 results; mkdir -p /tmp/v14 results
+          unzip -q "$ZIP" -d /tmp/v14
+          cat labels/gestalt-*.jsonl > results/gestalt-teacher.jsonl
+          echo "records=$(wc -l < results/gestalt-teacher.jsonl)"
+          python -u scripts/train_v14_single_residual.py \
+            --teacher results/gestalt-teacher.jsonl \
+            --engine-dir /tmp/v14 \
+            --output-dir results/h64 \
+            --hidden 64 --baseline v13 \
+            --epochs 35 --batch-size 512 --learning-rate 0.002 --seed 20260908 \
+            | tee results/train.log
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          d=json.loads(Path('results/h64/training-metadata.json').read_text())
+          print('FINAL_HOLDOUT',json.dumps(d['metrics']['holdout'],sort_keys=True))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-gestalt-absolute-h64-${{ github.sha }}
+          path: results/
+          retention-days: 30
