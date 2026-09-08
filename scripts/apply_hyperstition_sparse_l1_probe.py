@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Apply a parity-preserving sparse L1 inference probe to Hyperstition.
 
-The v92 file already stores L1 weights as [4-input chunk][output][lane].  Production scalar
+The v92 file already stores L1 weights as [4-input chunk][output][lane]. Production scalar
 inference currently canonicalises those bytes into dense output-major rows, then visits all 2048
-inputs for every one of 16 outputs.  This experiment retains the serialized L1 matrix as a second,
-tiny (~256 KiB) view and skips four-input chunks whose activated bytes are all zero.
+inputs for every one of 16 outputs. This experiment keeps the native serialized L1 matrix directly
+and skips four-input chunks whose activated bytes are all zero.
 
-Arithmetic is deliberately scalar and in the same i32 accumulation domain as the certified oracle.
-This isolates the value of sparsity/native layout before introducing any target-specific SIMD.
+Arithmetic is deliberately scalar and in the same i32 accumulation domain/order as the certified
+oracle. This isolates the value of sparsity/native layout before introducing target-specific SIMD.
 """
 
 from __future__ import annotations
@@ -35,12 +35,10 @@ def main() -> int:
         """    /// Canonical output-major rows, converted from Viridithas's four-byte SIMD interleave at load.
     l1_weights: Box<[i8]>,
     l1_bias: Box<[f32]>,""",
-        """    /// Canonical output-major rows retained as the scalar parity oracle.
-    l1_weights: Box<[i8]>,
-    /// Native v92 `[four-input chunk][output][lane]` L1 storage used by the sparse hot path.
+        """    /// Native v92 `[four-input chunk][output][lane]` L1 storage.
     l1_weights_simd: Box<[i8]>,
     l1_bias: Box<[f32]>,""",
-        label="Network L1 fields",
+        label="Network L1 field",
     )
 
     text = replace_exact(
@@ -48,19 +46,16 @@ def main() -> int:
         """        let serialized_l1 = read_i8s(bytes, &mut cursor, L1_WEIGHTS)?;
         let l1_weights = canonicalize_simd_l1(&serialized_l1);
         let l1_bias = read_f32s(bytes, &mut cursor, L1_BIAS)?;""",
-        """        let serialized_l1 = read_i8s(bytes, &mut cursor, L1_WEIGHTS)?;
-        let l1_weights = canonicalize_simd_l1(&serialized_l1);
-        let l1_weights_simd = serialized_l1;
+        """        let l1_weights_simd = read_i8s(bytes, &mut cursor, L1_WEIGHTS)?;
         let l1_bias = read_f32s(bytes, &mut cursor, L1_BIAS)?;""",
-        label="retain serialized L1",
+        label="retain native L1",
     )
 
     text = replace_exact(
         text,
         """            l1_weights,
             l1_bias,""",
-        """            l1_weights,
-            l1_weights_simd,
+        """            l1_weights_simd,
             l1_bias,""",
         label="Network construction",
     )
@@ -89,8 +84,7 @@ def main() -> int:
             if inputs.iter().all(|&input| input == 0) {
                 continue;
             }
-            let weight_chunk_base =
-                l1_weight_base + chunk * L1_INPUT_CHUNK * L2;
+            let weight_chunk_base = l1_weight_base + chunk * L1_INPUT_CHUNK * L2;
             for (output, sum) in l1_sums.iter_mut().enumerate() {
                 let weights = &self.l1_weights_simd
                     [weight_chunk_base + output * L1_INPUT_CHUNK
@@ -110,8 +104,16 @@ def main() -> int:
 """
     text = replace_exact(text, dense, sparse, label="dense L1 hot loop")
 
-    # The canonical copy remains intentionally live as a loader/parity oracle during this first
-    # experiment.  Assert both views have the expected size so a malformed load cannot slip through.
+    # The canonicalizer is retained only as a layout-test oracle; shipping inference no longer pays
+    # for a duplicate L1 allocation.
+    text = replace_exact(
+        text,
+        """fn canonicalize_simd_l1(serialized: &[i8]) -> Box<[i8]> {""",
+        """#[cfg(test)]
+fn canonicalize_simd_l1(serialized: &[i8]) -> Box<[i8]> {""",
+        label="test-only L1 canonicalizer",
+    )
+
     marker = """    #[test]
     fn simd_layout_canonicalizers_preserve_known_coordinates() {
 """
