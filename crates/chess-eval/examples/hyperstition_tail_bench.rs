@@ -35,7 +35,9 @@ fn main() -> Result<(), String> {
     let network = Network::from_file(&path)?;
     let positions = FENS
         .iter()
-        .map(|fen| Position::from_fen(fen).map_err(|error| format!("invalid benchmark FEN: {error}")))
+        .map(|fen| {
+            Position::from_fen(fen).map_err(|error| format!("invalid benchmark FEN: {error}"))
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let states = positions
         .iter()
