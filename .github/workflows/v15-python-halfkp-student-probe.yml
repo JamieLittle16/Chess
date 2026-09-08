@@ -1,0 +1,63 @@
+name: V15 Python king-bucket student probe
+
+on:
+  push:
+    branches: [analysis/v15-python-halfkp-student-probe-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  train:
+    strategy:
+      fail-fast: false
+      matrix:
+        hidden: [16, 32]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208e8ac6f98df8515dc48aa79596
+          path: wrong-name-sentinel
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+        continue-on-error: true
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Download frozen gen2 teacher corpus
+        uses: actions/download-artifact@v4
+        with:
+          name: v14-gen2-teacher-d84d5bfa6135461389637ef70eed409693aa5a34
+          path: teacher-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34218142973
+      - name: Materialize exact V14 and train
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name 'Little-Gambit-V14.zip' -print -quit); test -n "$ZIP"
+          TEACHER=$(find teacher-artifact -type f -name 'teacher.jsonl' -print -quit); test -n "$TEACHER"
+          rm -rf /tmp/v14; mkdir /tmp/v14 results
+          unzip -q "$ZIP" -d /tmp/v14
+          python -u scripts/train_v15_bucket_student.py --teacher "$TEACHER" --engine-dir /tmp/v14 --output-dir results/h${{ matrix.hidden }} --hidden ${{ matrix.hidden }} --epochs 45 --batch-size 256 --seed 20260908 | tee results/h${{ matrix.hidden }}.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-bucket-h${{ matrix.hidden }}-${{ github.sha }}
+          path: results/
+          retention-days: 30
