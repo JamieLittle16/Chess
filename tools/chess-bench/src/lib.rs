@@ -6,27 +6,23 @@
 use chess_core::Position;
 use chess_search::Searcher;
 
-/// V8 adds the accepted E4 bishop-pair and rook open/semi-open-file terms on top of V7's tapered
-/// geometric PSQT and two-slot quiet killer ordering. The reviewed five-case report is:
+/// V9 promotes the V15 qsearch check-evasion correction on top of the H1-accepted V14 Search-v2
+/// baseline. The case set is unchanged; the reviewed five-case report is:
 ///
-/// - startpos d3: score +24, 649 nodes, 22 TT hits, best raw move 82 (`Nb1-c3`);
-/// - Kiwipete d2: score +17, 1,137 nodes, 2 TT hits, best raw move 3,427;
+/// - startpos d3: score +24, 647 nodes, 22 TT hits, best raw move 82 (`Nb1-c3`);
+/// - Kiwipete d2: score +17, 1,224 nodes, 1 TT hit, best raw move 17,192;
 /// - mate-net d2: mate score 29,999, 72 nodes, 1 TT hit, best raw move 3,446;
 /// - en-passant d3: score +167, 63 nodes, 7 TT hits, best raw move 22,827;
-/// - promotion d2: score +886, 62 nodes, 2 TT hits, best raw move 9 (`Ka1-b2`).
+/// - promotion d2: score +886, 63 nodes, 2 TT hits, best raw move 9 (`Ka1-b2`).
 ///
-/// E4 was first screened against exact V7 production and then qualified twice from materialized
-/// source. The original 200-game suite scored 60W/95D/45L (+26.11 +/- 32.35 Elo, LOS 94.43%).
-/// Because that was narrowly below the preferred confidence line, a fresh 100-position UHO holdout
-/// was selected deterministically from the pinned 2,632,036-position Stockfish source while
-/// explicitly excluding every source line used by the original suite. On that disjoint 200-game
-/// holdout E4 scored 70W/80D/50L (+34.86 +/- 35.54 Elo, LOS 97.40%). This independent validation
-/// accepts the evaluator drift as the new production baseline.
-pub const SUITE_NAME: &str = "reference-search-v8";
-/// Reviewed after the H1-accepted V14 Search-v2 promotion. The case set is unchanged;
-/// only the deterministic search trace changed. Frozen M6 SPRT: 132W/70D/6L over 208 games,
-/// +243.97 +/- 37.36 Elo, LLR 2.95 beyond the 2.94 H1 boundary.
-pub const EXPECTED_SIGNATURE: u64 = 0x3f02_47ab_79ca_e85a;
+/// The V15 correction leaves the ordinary four-ply qsearch tactical ceiling unchanged at non-check
+/// nodes, but forbids terminating at that local ceiling while the side to move is still in check.
+/// Checked nodes therefore resolve legal evasions until a non-check node (or the global search-ply
+/// guard) is reached. The exact source change was qualified against V14 over two paired suites:
+/// 100 fixed-node games scored 26W/58D/16L (+34.86 +/- 39.08 Elo), and 100 equal-time 1+0.01 games
+/// scored 23W/59D/18L (+17.39 +/- 40.28 Elo). Fixed-node NPS was effectively unchanged.
+pub const SUITE_NAME: &str = "reference-search-v9";
+pub const EXPECTED_SIGNATURE: u64 = 0xeba4_10d3_1bee_522d;
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;

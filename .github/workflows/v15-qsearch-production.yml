@@ -1,0 +1,36 @@
+name: V15 qsearch production gate
+
+on:
+  push:
+    branches: [v15/qsearch-production]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    env:
+      RUSTFLAGS: -C target-cpu=native
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - name: Strict source gate
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          git diff --check HEAD^
+      - name: Confirm candidate is exactly the qualified qsearch semantic change
+        run: |
+          set -euo pipefail
+          grep -F 'if qply >= MAX_QSEARCH_PLY && !in_check {' crates/chess-search/src/quiescence.rs
+          grep -F 'fn qsearch_local_ceiling_still_resolves_check_and_restores_position()' crates/chess-search/src/quiescence.rs
+          grep -F 'fn qsearch_local_ceiling_still_stops_a_non_check_leaf()' crates/chess-search/src/quiescence.rs
