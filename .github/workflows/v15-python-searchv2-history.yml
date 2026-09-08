@@ -38,6 +38,7 @@ jobs:
           rm -rf /tmp/base /tmp/cand; mkdir -p /tmp/base /tmp/cand results
           unzip -q "$ZIP" -d /tmp/base; cp -a /tmp/base/. /tmp/cand/
           python scripts/patch_v15_python_searchv2_history.py /tmp/cand/experiments/numba_search.py
+          python scripts/patch_v15_python_searchv2_rust_division.py /tmp/cand/experiments/numba_search.py
           python -m py_compile /tmp/base/agent.py /tmp/base/experiments/*.py /tmp/cand/agent.py /tmp/cand/experiments/*.py
           cmp /tmp/base/agent.py /tmp/cand/agent.py
           cmp /tmp/base/experiments/numba_core.py /tmp/cand/experiments/numba_core.py
@@ -140,6 +141,7 @@ jobs:
           lmr_thresholds=+4096,-4096
           history_limit=16384
           history_max_update=2048
+          signed_gravity=Rust-style truncation toward zero
           training=quiet scout-node evidence only
           EOF
 
