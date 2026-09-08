@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Move V14 reverse-futility cutoff ahead of full legal-move materialisation.
 
-The accepted Rust search proves a shallow non-check scout node nonterminal with an early-exit
-legal-move probe before paying for the complete legal list. Python V14 currently materialises every
-legal move first and only then performs the same RFP cutoff. This patch preserves the cutoff score
-and all terminal semantics while avoiding full move generation on successful RFP nodes.
+V2 computes the cheap classical RFP bound first and only calls the early-exit legal-move probe when
+the node is actually about to cut. This preserves all terminal semantics while avoiding both full
+move generation on successful RFP nodes and unnecessary legal probes on non-cutting scout nodes.
 """
 from pathlib import Path
 import sys
@@ -41,10 +40,10 @@ new = '''    alpha_original = alpha
     moves = move_stack[ply]
     checked = _state_in_check(board, side, eval_stack[ply])
 
-    # Search-v2 RFP early-exit shape: on the same shallow non-check scout nodes, first prove that
-    # at least one legal move exists with the core's early-exit probe. A successful RFP cutoff then
-    # avoids constructing and filtering the complete legal list. Because this branch is explicitly
-    # non-check, "no legal move" is stalemate and returns zero exactly as the old full-list path did.
+    # Compute the RFP bound before materialising the complete legal list. Only when the bound would
+    # actually cut do we pay for the core's early-exit legality probe, which distinguishes a real
+    # nonterminal cutoff from stalemate. Non-cutting nodes fall through to the exact old full-list
+    # path with no extra legal probe.
     pruning_static_eval = INFINITY
     pruning_eligible = (
         depth <= 3
@@ -54,18 +53,18 @@ new = '''    alpha_original = alpha
         and _has_nonpawn_material(board, side)
     )
     if pruning_eligible:
-        own_king = int(
-            eval_stack[ply][EVAL_WHITE_KING]
-            if side == WHITE
-            else eval_stack[ply][EVAL_BLACK_KING]
-        )
-        if not has_any_legal_move_with_king(
-            board, side, castling, ep_square, pseudo, own_king
-        ):
-            return 0, False
         pruning_static_eval = _evaluate_state_classical(side, eval_stack[ply])
         if pruning_static_eval - 120 * depth >= beta:
-            return pruning_static_eval, False
+            own_king = int(
+                eval_stack[ply][EVAL_WHITE_KING]
+                if side == WHITE
+                else eval_stack[ply][EVAL_BLACK_KING]
+            )
+            if has_any_legal_move_with_king(
+                board, side, castling, ep_square, pseudo, own_king
+            ):
+                return pruning_static_eval, False
+            return 0, False
 
     count = _legal_moves_for_state(
         board, side, castling, ep_square, pseudo, moves, eval_stack[ply]
