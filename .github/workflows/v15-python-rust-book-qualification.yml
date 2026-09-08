@@ -1,0 +1,79 @@
+name: V15 Python own-Rust book qualification
+
+on:
+  push:
+    branches: [analysis/v15-python-rust-opening-book-20260908]
+    paths:
+      - scripts/patch_v15_python_rust_book.py
+      - tools/v15_ladder_book_arena.py
+      - .github/workflows/v15-python-rust-book-qualification.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  ladder:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Download own-Rust book
+        uses: actions/download-artifact@v4
+        with:
+          name: v15-python-own-rust-ladder-book-c83b6752a9c9cd337bbc1bbb05fc3d0b99c22fc9
+          path: book-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34263675108
+      - name: Materialize book candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit)
+          BOOK=$(find book-artifact -type f -name v15_rust_ladder_book.json -print -quit)
+          test -n "$ZIP"; test -n "$BOOK"
+          rm -rf /tmp/base /tmp/cand results; mkdir -p /tmp/base /tmp/cand results
+          unzip -q "$ZIP" -d /tmp/base; cp -a /tmp/base/. /tmp/cand/
+          cp "$BOOK" /tmp/cand/v15_rust_ladder_book.json
+          python scripts/patch_v15_python_rust_book.py /tmp/cand/agent.py
+          python -m py_compile /tmp/cand/agent.py /tmp/cand/experiments/*.py
+          PYTHONPATH=/tmp/cand python - <<'PY'
+          import agent,chess
+          roots=agent._BOOK_PAYLOAD['opening_roots']
+          assert len(roots)==8 and len(agent._RUST_LADDER_BOOK)==9664
+          for fen in roots:
+              b=chess.Board(fen);m=agent._rust_book_move(b);assert m is not None and m in b.legal_moves
+          print('book_entries',len(agent._RUST_LADDER_BOOK),'root_hits',len(roots))
+          PY
+      - name: Rated-ladder-shaped timed A/B
+        run: |
+          python -u tools/v15_ladder_book_arena.py /tmp/cand /tmp/base \
+            --book /tmp/cand/v15_rust_ladder_book.json --base-ms 2500 --inc-ms 50 --max-plies 180 \
+            --json-out results/ladder.json | tee results/ladder.log
+      - name: Package candidate
+        if: always()
+        shell: bash
+        run: |
+          if [ -d /tmp/cand ]; then
+            (cd /tmp/cand && zip -q -9 -r "$GITHUB_WORKSPACE/results/Little-Gambit-V15-rust-book.zip" .)
+            sha256sum results/Little-Gambit-V15-rust-book.zip > results/package.sha256
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-rust-book-qualified-${{ github.sha }}
+          path: results/
+          retention-days: 30
