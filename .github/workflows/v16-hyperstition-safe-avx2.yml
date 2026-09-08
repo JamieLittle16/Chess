@@ -76,7 +76,7 @@ jobs:
           python scripts/apply_hyperstition_safe_avx2_probe.py
           cargo fmt --all
           git diff --check
-          grep -F 'safe_arch = "1.0.0"' crates/chess-eval/Cargo.toml
+          grep -F 'safe_arch = "=1.2.0"' crates/chess-eval/Cargo.toml
           grep -F 'propagate_l1_safe_avx2' crates/chess-eval/src/hyperstition.rs
 
       - name: Candidate strict gate under AVX2
@@ -127,7 +127,6 @@ jobs:
                   raise RuntimeError(f'unparseable benchmark output from {binary}: {cp.stdout!r}')
               return score_match.group(1), float(time_match.group(1))
 
-          # Warm both binaries before paired measurements.
           run(baseline)
           run(candidate)
 
@@ -222,7 +221,7 @@ jobs:
             echo "rustc=$(rustc --version)"
             echo "rustflags=$BENCH_RUSTFLAGS"
             echo "network_raw_sha256=$RAW_SHA256"
-            echo "safe_arch=1.0.0"
+            echo "safe_arch=1.2.0"
           } > .qualification/hyperstition-safe-avx2/identity.txt
 
       - name: Upload safe AVX2 evidence
