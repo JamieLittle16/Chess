@@ -8,6 +8,7 @@ on:
       - '.github/workflows/v16-python-strength-baseline.yml'
       - 'scripts/patch_v16_python_trusted_continuity.py'
       - 'scripts/patch_v16_python_presort_once.py'
+      - 'tools/v14_agent_runner.py'
 
 permissions:
   actions: read
