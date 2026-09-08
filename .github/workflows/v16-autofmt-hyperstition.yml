@@ -1,0 +1,35 @@
+name: V16 Hyperstition autofmt
+
+on:
+  push:
+    branches: [v16/hyperstition-eval-lab]
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v16/hyperstition-eval-lab
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt
+      - name: Format and push if needed
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all
+          if git diff --quiet; then
+            echo 'already formatted'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates/chess-eval/src/hyperstition.rs
+          git commit -m 'style(v16): rustfmt Hyperstition SIMD decoder'
+          git push origin HEAD:v16/hyperstition-eval-lab
