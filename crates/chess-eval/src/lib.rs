@@ -5,6 +5,8 @@
 //! copied from another engine. Runtime evaluation remains allocation-free: iterate the existing
 //! piece bitboards, perform table lookups, and interpolate one middle-game/end-game score pair.
 
+/// Research-only bit-exact runtime for the certified mature `gestalt` network.
+pub mod gestalt;
 pub mod nnue;
 #[cfg(feature = "search-trace")]
 mod search_trace;
@@ -142,8 +144,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
     let file_centrality = 7 - file_distance;
 
     match piece {
-        // Pawns gain more from safe advancement in the endgame. A tiny central-file bonus nudges
-        // healthy central occupation without attempting to model pawn structure yet.
         0 => {
             let advance = if end_game {
                 match rank {
@@ -168,7 +168,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
             };
             advance + file_centrality / 2
         }
-        // Knights are the strongest centralisation signal in v1.
         1 => {
             if end_game {
                 centre * 3 - 18
@@ -176,7 +175,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
                 centre * 4 - 24
             }
         }
-        // Bishops prefer activity but are less sensitive to central squares than knights.
         2 => {
             if end_game {
                 centre * 2 - 6
@@ -184,8 +182,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
                 centre * 2 - 8
             }
         }
-        // Rooks get a modest seventh-rank/activity signal. File structure is deliberately deferred
-        // to a separate experiment so E1 remains a pure placement baseline.
         3 => {
             let seventh = if rank == 6 { 14 } else { 0 };
             if end_game {
@@ -194,8 +190,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
                 seventh + rank
             }
         }
-        // Queen placement is intentionally weakly weighted to avoid paying for brittle opening
-        // assumptions before development/king-safety terms exist.
         4 => {
             if end_game {
                 centre * 2 - 8
@@ -203,8 +197,6 @@ const fn geometric_bonus(piece: usize, file: i32, rank: i32, end_game: bool) -> 
                 centre - 8
             }
         }
-        // Middle-game kings prefer the home rank and castled files. End-game kings reverse that
-        // preference and are rewarded for centralisation.
         5 => {
             if end_game {
                 centre * 4 - 24
