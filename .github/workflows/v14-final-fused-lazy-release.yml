@@ -1,0 +1,236 @@
+name: V14 fused-lazy release qualification
+
+on:
+  push:
+    branches: [analysis/v14-final-fused-lazy-release-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Download exact H64 student
+        uses: actions/download-artifact@v4
+        with:
+          pattern: v14-single-student-h64-bb7d2a4ed05ff78d344cc4374d54e35189584993
+          path: model-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34202820525
+
+      - name: Build exact KPK table
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/build_kpk.py https://raw.githubusercontent.com/JamieLittle16/Chess/22cfec2269f87ddf14a9f929f1eda2d6e4ec21d8/scripts/build_v14_kpk_bitbase.py
+          curl --fail --location --retry 3 -o /tmp/patch_kpk.py https://raw.githubusercontent.com/JamieLittle16/Chess/22cfec2269f87ddf14a9f929f1eda2d6e4ec21d8/scripts/patch_v14_kpk_exact.py
+          python /tmp/build_kpk.py /tmp/v14_kpk.u8 | tee /tmp/kpk.log
+          test "$(stat -c %s /tmp/v14_kpk.u8)" = 196608
+          echo 'c2cc0534a984124c5a75e250bab65f2756ade47341bbca84d6b6871fdb2977f2  /tmp/v14_kpk.u8' | sha256sum --check --strict
+
+      - name: Materialize exact V13 and fused-lazy V14
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODEL=$(find model-artifact -type f -name 'student-h64.npz' -print -quit); test -n "$MODEL"
+          echo '3422cecc3b1226767412e08746ffd6eef9f7e38602ac15b9256b475e6762b598  '"$MODEL" | sha256sum --check --strict
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum --check --strict
+          rm -rf /tmp/base /tmp/cand /tmp/prelazy
+          for DIR in /tmp/base /tmp/cand /tmp/prelazy; do
+            mkdir -p "$DIR"; unzip -q /tmp/v13.zip -d "$DIR"
+            patch "$DIR/experiments/numba_search.py" < .analysis/v13_jit_refactor.patch
+            DIR="$DIR" python - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path(os.environ['DIR'])/'experiments/numba_search.py';s=p.read_text()
+          old='    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          new='    correction = correction // 6\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          assert s.count(old)==1,s.count(old);p.write_text(s.replace(old,new,1))
+          PY
+            python scripts/patch_v13_legality_context.py "$DIR/experiments/numba_core.py"
+            python scripts/patch_v13_qsearch_tactical.py "$DIR/experiments/numba_core.py" "$DIR/experiments/numba_search.py"
+          done
+          echo 'df346b21be42832a0ae97e7faa15953ab460f0387fb0358961651466557ebde8  /tmp/base/agent.py' | sha256sum --check --strict
+          echo '0306e8145a453d91b9b5ac92e9980931510d9e18f8ba598a7548d08b85165c35  /tmp/base/experiments/numba_core.py' | sha256sum --check --strict
+          echo '401f6580028a72361286bd99bee1f0022c74e6c8a65da8acd47448835a1ff360  /tmp/base/experiments/numba_search.py' | sha256sum --check --strict
+          for DIR in /tmp/cand /tmp/prelazy; do
+            cp experiments/v14_student_single_runtime.py "$DIR/experiments/v14_student_single_runtime.py"
+            cp "$MODEL" "$DIR/experiments/v14_student_h64.npz"
+            python scripts/patch_v14_single_student_search.py "$DIR/experiments/numba_search.py" --numerator 1 --denominator 12
+            python scripts/patch_v14_student_lean_qsearch.py "$DIR/experiments/numba_search.py"
+          done
+          python scripts/patch_v14_lazy_stable_ordering.py /tmp/cand/experiments/numba_search.py
+          cp /tmp/v14_kpk.u8 /tmp/cand/v14_kpk.u8
+          python /tmp/patch_kpk.py /tmp/cand/agent.py
+          python -m py_compile /tmp/base/agent.py /tmp/base/experiments/*.py /tmp/prelazy/agent.py /tmp/prelazy/experiments/*.py /tmp/cand/agent.py /tmp/cand/experiments/*.py tools/v14_fixed_node_arena.py tools/v14_timed_agent_arena.py
+          mkdir -p release-results
+
+      - name: Prove fused+lazy search semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/sig.py <<'PY'
+          import json,sys,chess,numpy as np
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful
+          for line in sys.stdin:
+              q=json.loads(line);b=chess.Board(q['fen']);e=encode_position(b);h=np.empty(0,dtype=np.uint64)
+              o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,int(q['nodes']))
+              print(json.dumps([int(o[0]),int(o[1]),int(o[2]),int(o[3])]),flush=True)
+          PY
+          python - <<'PY'
+          import json,os,subprocess,sys
+          roots=[x.strip() for x in open('match/openings/m3-uho-lichess-100-v1.epd') if x.strip() and not x.startswith('#')][:40]
+          def st(path):
+              e=os.environ.copy();e['PYTHONPATH']=path
+              return subprocess.Popen([sys.executable,'/tmp/sig.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=e)
+          def ask(p,f,n):p.stdin.write(json.dumps({'fen':f,'nodes':n})+'\n');p.stdin.flush();return json.loads(p.stdout.readline())
+          a=st('/tmp/prelazy');b=st('/tmp/cand');checked=0
+          try:
+              for fen in roots:
+                  for n in (4000,16000,40000):
+                      x=ask(a,fen,n);y=ask(b,fen,n);assert x==y,(fen,n,x,y);checked+=1
+          finally:a.terminate();b.terminate();a.wait();b.wait()
+          print('identical_fused_lazy_searches',checked)
+          PY
+
+      - name: Exact KPK historical repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=/tmp/cand python - <<'PY'
+          import chess,agent
+          b=chess.Board('4k3/8/8/5K2/8/6P1/8/8 w - - 0 54');legal=list(b.legal_moves)
+          old=chess.Move.from_uci('g3g4');new=agent._kpk_exact_override(b,old,legal)
+          ov=agent._kpk_child_value(b,old);nv=agent._kpk_child_value(b,new)
+          print('KPK',old,ov,'->',new,nv)
+          assert ov is not None and nv is not None and nv[0] and not ov[0]
+          PY
+
+      - name: Five-repetition throughput
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/nps.py <<'PY'
+          import json,sys,chess,numpy as np
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful
+          for line in sys.stdin:
+              q=json.loads(line);b=chess.Board(q['fen']);e=encode_position(b);h=np.empty(0,dtype=np.uint64);o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,int(q['nodes']));print(json.dumps({'nodes':int(o[3])}),flush=True)
+          PY
+          python - <<'PY'
+          import json,os,statistics,subprocess,sys,time
+          from pathlib import Path
+          roots=[x.strip() for x in open('match/openings/m3-uho-lichess-100-v1.epd') if x.strip() and not x.startswith('#')][:40]
+          def st(path):e=os.environ.copy();e['PYTHONPATH']=path;return subprocess.Popen([sys.executable,'/tmp/nps.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=e)
+          def run(p,order):
+              n=0;t=time.perf_counter()
+              for f in order:p.stdin.write(json.dumps({'fen':f,'nodes':30000})+'\n');p.stdin.flush();n+=json.loads(p.stdout.readline())['nodes']
+              return time.perf_counter()-t,n
+          a=st('/tmp/base');b=st('/tmp/cand');rows=[]
+          try:
+              for p in (a,b):p.stdin.write(json.dumps({'fen':roots[0],'nodes':300})+'\n');p.stdin.flush();json.loads(p.stdout.readline())
+              for rep in range(5):
+                  order=roots if rep%2==0 else list(reversed(roots))
+                  if rep%2==0:at,an=run(a,order);bt,bn=run(b,order)
+                  else:bt,bn=run(b,order);at,an=run(a,order)
+                  r=(bn/bt)/(an/at);rows.append(r);print('rep',rep,'ratio',r)
+          finally:a.terminate();b.terminate();a.wait();b.wait()
+          out={'median_v14_vs_v13_nps':statistics.median(rows),'records':rows};Path('release-results/throughput.json').write_text(json.dumps(out,indent=2)+'\n');print(out)
+          PY
+
+      - name: Build fresh official UHO books
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/master/UHO_Lichess_4852_v1.epd.zip
+          rm -rf /tmp/uho && mkdir /tmp/uho && unzip -q /tmp/uho.zip -d /tmp/uho
+          UHO=$(find /tmp/uho -type f -name '*.epd' -print -quit);test -n "$UHO"
+          UHO="$UHO" python - <<'PY'
+          import os,chess
+          from pathlib import Path
+          rows=Path(os.environ['UHO']).read_text(errors='ignore').splitlines()
+          def build(lo,hi,n,path):
+              out=[]
+              for raw in rows[lo:hi]:
+                  f=raw.strip().split()
+                  if len(f)<4:continue
+                  fen=' '.join(f[:4])+' 0 1'
+                  try:b=chess.Board(fen)
+                  except ValueError:continue
+                  if b.is_game_over(claim_draw=False):continue
+                  out.append(fen)
+                  if len(out)==n:break
+              assert len(out)==n,(path,len(out));Path(path).write_text('\n'.join(out)+'\n')
+          build(3000,3700,48,'/tmp/equal.epd')
+          build(3900,4500,32,'/tmp/timed.epd')
+          PY
+
+      - name: 96-game equal-node confirmation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u tools/v14_fixed_node_arena.py /tmp/cand /tmp/base --nodes 16000 --pairs 48 --opening-file /tmp/equal.epd --max-plies 220 --json-out release-results/equal-96.json | tee release-results/equal-96.log
+          grep '^FINAL ' release-results/equal-96.log
+
+      - name: 64-game production-timed confirmation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u tools/v14_timed_agent_arena.py /tmp/cand /tmp/base --opening-file /tmp/timed.epd --pairs 32 --base-ms 2500 --increment-ms 50 --max-plies 180 --json-out release-results/timed-64.json | tee release-results/timed-64.log
+          grep '^FINAL ' release-results/timed-64.log
+
+      - name: Cold init-time gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/bin/time -f '%e' -o release-results/init-seconds.txt env PYTHONPATH=/tmp/cand python -c 'import agent'
+          INIT=$(cat release-results/init-seconds.txt)
+          python - <<PY
+          value=float('$INIT'); print('cold_init_seconds',value); assert value < 88.0, value
+          PY
+
+      - name: Package exact V14 release
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/pkg && mkdir -p /tmp/pkg/experiments
+          cp /tmp/cand/agent.py /tmp/pkg/agent.py
+          cp /tmp/cand/v14_kpk.u8 /tmp/pkg/v14_kpk.u8
+          cp /tmp/cand/experiments/__init__.py /tmp/pkg/experiments/__init__.py
+          cp /tmp/cand/experiments/numba_core.py /tmp/pkg/experiments/numba_core.py
+          cp /tmp/cand/experiments/numba_search.py /tmp/pkg/experiments/numba_search.py
+          cp /tmp/cand/experiments/v13_residual.i16 /tmp/pkg/experiments/v13_residual.i16
+          cp /tmp/cand/experiments/v14_student_single_runtime.py /tmp/pkg/experiments/v14_student_single_runtime.py
+          cp /tmp/cand/experiments/v14_student_h64.npz /tmp/pkg/experiments/v14_student_h64.npz
+          (cd /tmp/pkg && zip -q -r "$OLDPWD/Little-Gambit-V14.zip" .)
+          sha256sum Little-Gambit-V14.zip | tee release-results/package.sha256
+          unzip -l Little-Gambit-V14.zip | tee release-results/package-list.txt
+          rm -rf /tmp/smoke && mkdir /tmp/smoke && unzip -q Little-Gambit-V14.zip -d /tmp/smoke
+          PYTHONPATH=/tmp/smoke python - <<'PY'
+          import chess,agent
+          for fen in (chess.STARTING_FEN,'4k3/8/8/5K2/8/6P1/8/8 w - - 0 54'):
+              b=chess.Board(fen);m=chess.Move.from_uci(agent.get_move(fen,80000));assert m in b.legal_moves;print(fen,m)
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Little-Gambit-V14-FUSED-LAZY-${{ github.sha }}
+          path: |
+            Little-Gambit-V14.zip
+            release-results/
+          retention-days: 30
