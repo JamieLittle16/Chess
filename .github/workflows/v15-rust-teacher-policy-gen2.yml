@@ -1,0 +1,142 @@
+name: V15 ranked Rust teacher policy gen2
+
+on:
+  push:
+    branches: [analysis/v15-rust-teacher-policy-gen2-20260908]
+    paths:
+      - .github/workflows/v15-rust-teacher-policy-gen2.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  labels:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0,1,2,3,4,5,6,7]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 80
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2
+      - name: Build exact Rust V15 teacher
+        run: cargo build --release -p chess-search --example rust_v15_policy_teacher
+      - name: Download exact Gestalt production network
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/teacher
+          curl --fail --location --retry 5 'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' --output /tmp/teacher/gestalt-b840.nnue
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  /tmp/teacher/gestalt-b840.nnue' | sha256sum --check --strict
+      - name: Build root-grouped descendant corpus
+        shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6; mkdir /tmp/m6
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          import hashlib,json,os,random
+          from pathlib import Path
+          import chess
+          shard=int(os.environ['SHARD'])
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          # Reserve fresh[4400:] for completely unseen runtime qualification.
+          bases=fresh[550*shard:550*(shard+1)]
+          assert len(bases)==550, (shard,len(bases),len(fresh))
+          rows=[]; seen=set(); split_by_fen={}
+          for base in bases:
+              group=int.from_bytes(hashlib.sha256(('policy-gen2|'+base).encode()).digest()[:8],'big')%10
+              split='holdout' if group==0 else ('validation' if group==1 else 'train')
+              b=chess.Board(base)
+              seed=int.from_bytes(hashlib.sha256((base+'|rust-policy-gen2').encode()).digest()[:8],'big')
+              rng=random.Random(seed)
+              for step in range(9):
+                  if step in (0,2,4,6,8):
+                      fen=b.fen()
+                      if fen not in seen:
+                          seen.add(fen);rows.append(fen);split_by_fen[fen]=split
+                  if b.outcome(claim_draw=False) is not None: break
+                  legal=list(b.legal_moves)
+                  if not legal: break
+                  forcing=[m for m in legal if b.is_capture(m) or b.gives_check(m) or m.promotion]
+                  pool=forcing if forcing and rng.random()<0.40 else legal
+                  b.push(pool[rng.randrange(len(pool))])
+          Path('/tmp/teacher/positions.fen').write_text('\n'.join(rows)+'\n')
+          Path('/tmp/teacher/splits.json').write_text(json.dumps(split_by_fen,separators=(',',':')))
+          print({'shard':shard,'bases':len(bases),'positions':len(rows),'splits':{s:sum(v==s for v in split_by_fen.values()) for s in ('train','validation','holdout')}})
+          assert len(rows)>=2550
+          PY
+      - name: Label top six full-window Rust V15 candidates
+        shell: bash
+        env:
+          CHESS_GESTALT_NETWORK: /tmp/teacher/gestalt-b840.nnue
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          /usr/bin/time -v target/release/examples/rust_v15_policy_teacher 4 6 32 </tmp/teacher/positions.fen >/tmp/teacher/raw.tsv 2>/tmp/teacher/time.log
+          python - <<'PY'
+          import json,os
+          from pathlib import Path
+          shard=int(os.environ['SHARD']); splits=json.loads(Path('/tmp/teacher/splits.json').read_text());out=[]
+          for line in Path('/tmp/teacher/raw.tsv').read_text().splitlines():
+              fen,payload=line.split('\t',1); candidates=[]
+              for item in payload.split(','):
+                  move,score=item.rsplit(':',1);candidates.append({'move':move,'score':int(score)})
+              out.append(json.dumps({'split':splits[fen],'fen':fen,'candidates':candidates},separators=(',',':')))
+          Path(f'/tmp/teacher/labels-{shard}.jsonl').write_text('\n'.join(out)+'\n')
+          print({'shard':shard,'records':len(out)})
+          assert len(out)>=2500
+          PY
+          cat /tmp/teacher/time.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rust-v15-policy-gen2-labels-${{ matrix.shard }}-${{ github.sha }}
+          path: /tmp/teacher/labels-${{ matrix.shard }}.jsonl
+          retention-days: 30
+
+  train:
+    needs: labels
+    strategy:
+      fail-fast: false
+      matrix:
+        hidden: [64,96]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 80
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Install training runtime
+        run: |
+          python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2
+          python -m pip install --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cpu
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rust-v15-policy-gen2-labels-*-${{ github.sha }}
+          path: labels
+          merge-multiple: true
+      - name: Train soft policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          cat labels/labels-*.jsonl > results/teacher.jsonl
+          echo "records=$(wc -l < results/teacher.jsonl)"
+          python -u scripts/train_v15_rust_policy_soft.py --teacher results/teacher.jsonl --output results/root-policy-h${{ matrix.hidden }}.pt --hidden ${{ matrix.hidden }} --epochs 10 --temperature 60 --max-gap 600 | tee results/train.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rust-v15-policy-gen2-h${{ matrix.hidden }}-${{ github.sha }}
+          path: results/
+          retention-days: 30
