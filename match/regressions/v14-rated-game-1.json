@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "source": "V13 first rated-game causal Stockfish postmortem",
+  "fixtures": [
+    {
+      "id": "v13-rated-1-f3-prophylaxis",
+      "category": "king_safety_prophylaxis",
+      "fen": "2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23",
+      "source_reported_v13_uci": "f2f3",
+      "source_reported_v13_san": "f3",
+      "source_reported_teacher_uci": ["a1b1"],
+      "source_reported_teacher_san": "Rb1",
+      "source_reported_loss_cp_approx": 229,
+      "source_reported_position_eval_before_cp_approx": 21,
+      "source_reported_position_eval_after_cp_approx": -208,
+      "tactical_consequence": "The f-pawn move opens the c5-d4-e3-f2-g1 diagonal and permits ...Qc5+ while Black's rook is already active on d3.",
+      "expected_uci": ["a1b1"],
+      "expected_label_status": "reported_by_stockfish16_250k_pending_stockfish19_regression_lab_verification",
+      "purpose": "Primary V14 rated-game sentinel for attack-to-consolidation transition, enemy rook activity, king-ray exposure, and opponent forcing-reply awareness. V14 should reduce teacher loss here without hard-coding Rb1."
+    }
+  ]
+}
