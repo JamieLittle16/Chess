@@ -1,8 +1,8 @@
-name: V15 Python qcap6 plus presort timed
+name: V15 Python qcap6 plus presort 192 timed
 
 on:
   push:
-    branches: [analysis/v15-python-qcap6-presort-timed-20260908]
+    branches: [analysis/v15-python-qcap6-presort-192-timed-20260908]
     paths: [.github/workflows/v15-python-qcap6-presort-timed.yml]
   workflow_dispatch:
 
@@ -13,7 +13,7 @@ permissions:
 jobs:
   timed:
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -38,7 +38,7 @@ jobs:
           curl --fail --location --retry 3 -o /tmp/presort.py https://raw.githubusercontent.com/JamieLittle16/Chess/189348dc4e3ec49128eb412ddd647308d3a4006d/scripts/patch_v15_python_presort_once.py
           python /tmp/presort.py /tmp/cand/experiments/numba_search.py
           python -m py_compile tools/v14_agent_runner.py /tmp/base/agent.py /tmp/cand/agent.py /tmp/cand/experiments/*.py
-      - name: Build fresh 48-root book
+      - name: Build fresh 96-root book
         shell: bash
         run: |
           curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
@@ -48,11 +48,11 @@ jobs:
           from pathlib import Path
           old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
           large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
-          fresh=[x for x in large if x not in old]; chosen=fresh[1400:1448]
-          assert len(chosen)==48 and len(set(chosen))==48
+          fresh=[x for x in large if x not in old]; chosen=fresh[3000:3096]
+          assert len(chosen)==96 and len(set(chosen))==96
           Path('/tmp/qcap6-timed.epd').write_text('\n'.join(chosen)+'\n')
           PY
-      - name: Competition API timed A/B — 96 colour-swapped games
+      - name: Competition API timed A/B — 192 colour-swapped games
         shell: bash
         run: |
           python - <<'PY'
@@ -95,6 +95,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: v15-python-qcap6-presort-timed-${{ github.sha }}
+          name: v15-python-qcap6-presort-192-${{ github.sha }}
           path: results/
           retention-days: 30
