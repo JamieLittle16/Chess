@@ -81,7 +81,12 @@ jobs:
           git clone --quiet https://github.com/cosmobobak/viridithas.git /tmp/viridithas-v14
           git -C /tmp/viridithas-v14 checkout --quiet "$VIRI_COMMIT"
           test "$(git -C /tmp/viridithas-v14 rev-parse HEAD)" = "$VIRI_COMMIT"
-          EVALFILE="$PWD/.qualification/hyperstition/hyperstition-b400.nnue.zst" \
+          # The pinned v14 source has a wrapper-type bug in its AVX-512/VNNI branch on modern
+          # rustc. x86-64-v3 intentionally selects its mature AVX2 reference path instead. This is
+          # also a more reproducible parity oracle than inheriting whatever ISA GitHub's current
+          # runner happens to expose.
+          RUSTFLAGS="-C target-cpu=x86-64-v3" \
+            EVALFILE="$PWD/.qualification/hyperstition/hyperstition-b400.nnue.zst" \
             cargo build --release --manifest-path /tmp/viridithas-v14/Cargo.toml
           cp /tmp/viridithas-v14/target/release/viridithas \
             .qualification/hyperstition/viridithas-reference
@@ -197,6 +202,7 @@ jobs:
           {
             echo "candidate_commit=$(git rev-parse HEAD)"
             echo "viridithas_commit=$VIRI_COMMIT"
+            echo "viridithas_reference_cpu=x86-64-v3"
             echo "network_release=v92"
             echo "network_asset=hyperstition-b400.nnue.zst"
             echo "network_url=$NETWORK_URL"
