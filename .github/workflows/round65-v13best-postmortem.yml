@@ -1,0 +1,74 @@
+name: Round 65 V13 BEST Stockfish postmortem
+
+on:
+  push:
+    branches:
+      - analysis/round65-v13best-postmortem-20260908
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install python-chess and Stockfish
+        run: |
+          python -m pip install chess==1.11.2
+          sudo apt-get update -qq
+          sudo apt-get install -y stockfish
+      - name: Analyse exact Round 65 PGN
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p analysis-results/round65
+          cat > /tmp/game.pgn <<'PGN'
+          [Event "AI Chessathon Rated"]
+          [Site "aichessathon.com"]
+          [Date "2026.09.08"]
+          [Round "65"]
+          [White "OctaBasilissa"]
+          [Black "Little Gambit"]
+          [Result "1-0"]
+          [FEN "r1bqkb1r/1p3ppp/p1np1n2/4p3/P3P3/N1N5/1PP2PPP/R1BQKB1R b KQkq - 1 8"]
+          [SetUp "1"]
+          [Termination "checkmate"]
+
+          8... Be6 9. Bd3 Rc8 10. Nc4 Nb4 11. Ne3 Nxd3+ 12. cxd3 a5 13. Ned5 Nxd5 14. Nxd5 f5 15. O-O fxe4 16. dxe4 Bd7 17. Be3 Rc4 18. Bb6 Qg5 19. f3 h5 20. Bxa5 h4 21. Bd2 Qd8 22. Qb3 Rc8 23. Qxb7 Rb8 24. Nc7+ Kf7 25. Qd5+ Kf6 26. Qa5 h3 27. Rf2 Kg6 28. b4 Rh5 29. Nd5 Kf7 30. f4 Qxa5 31. bxa5 Kg8 32. gxh3 Bxh3 33. f5 Rh4 34. Re1 Kf7 35. Kh1 Rb2 36. a6 Rb8 37. Nc7 d5 38. a7 Rc8 39. Rc1 Ba3 40. Rc2 Rxe4 41. a8=Q Rxa8 42. Nxa8 Rxa4 43. Rc7+ Kg8 44. Nb6 Rd4 45. f6 gxf6 46. Rc3 Bb4 47. Rg3+ Kf7 48. Bxb4 Rxb4 49. Rxf6+ Kxf6 50. Nxd5+ Ke6 51. Nxb4 Bf5 52. h4 Kd6 53. h5 Kc5 54. Nc2 Be4+ 55. Kg1 Kd5 56. Ne3+ Kd6 57. Rg5 Bh7 58. Ng4 Bd3 59. Nxe5 Bh7 60. Ng6 Bg8 61. h6 Bh7 62. Nf8 Be4 63. Ng6 Ke6 64. h7 Kf6 65. Rg3 Bxg6 66. h8=Q+ Kf5 67. Qf8+ Ke4 68. Rxg6 Kd3 69. Qb4 Ke3 70. Rd6 Kf3 71. Rd3+ Ke2 72. Qe4# 1-0
+          PGN
+          python - <<'PY' | tee analysis-results/round65/postmortem.txt
+          import chess, chess.pgn, chess.engine, json
+          from pathlib import Path
+          game=chess.pgn.read_game(open('/tmp/game.pgn'))
+          engine=chess.engine.SimpleEngine.popen_uci('/usr/games/stockfish')
+          board=game.board(); rows=[]
+          for move in game.mainline_moves():
+              if board.turn == chess.BLACK:
+                  san=board.san(move); fen=board.fen()
+                  best=engine.analyse(board, chess.engine.Limit(nodes=250000))
+                  best_move=best['pv'][0]; best_san=board.san(best_move)
+                  best_score=best['score'].pov(chess.BLACK).score(mate_score=100000)
+                  played=engine.analyse(board, chess.engine.Limit(nodes=250000), root_moves=[move])
+                  played_score=played['score'].pov(chess.BLACK).score(mate_score=100000)
+                  loss=(best_score-played_score) if best_score is not None and played_score is not None else None
+                  rows.append({'fullmove':board.fullmove_number,'played':san,'best':best_san,'best_cp':best_score,'played_cp':played_score,'loss_cp':loss,'fen':fen,'best_pv':[board.variation_san(best['pv'][:8])]})
+              board.push(move)
+          engine.quit()
+          print('fullmove\tplayed\tbest\tbest_cp\tplayed_cp\tloss_cp')
+          for r in rows: print(f"{r['fullmove']}\t{r['played']}\t{r['best']}\t{r['best_cp']}\t{r['played_cp']}\t{r['loss_cp']}")
+          print('\nTOP LOSSES')
+          for r in sorted(rows,key=lambda r:r['loss_cp'] if r['loss_cp'] is not None else -1,reverse=True)[:15]: print(json.dumps(r))
+          Path('analysis-results/round65/postmortem.json').write_text(json.dumps(rows,indent=2))
+          PY
+      - name: Upload postmortem
+        uses: actions/upload-artifact@v4
+        with:
+          name: round65-v13best-stockfish-postmortem
+          path: analysis-results/round65
+          retention-days: 7
