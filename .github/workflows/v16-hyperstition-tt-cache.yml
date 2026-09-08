@@ -1,0 +1,202 @@
+name: V16 Hyperstition TT cache
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    if: github.head_ref == 'v16/hyperstition-tt-cache'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      RUSTFLAGS: -C target-cpu=x86-64-v3
+      HYPER_URL: https://github.com/cosmobobak/viridithas-networks/releases/download/v92/hyperstition-b400.nnue.zst
+      HYPER_RAW_SHA256: 36bcc6b3354ecbdb88fb95a341e494558b052223143f38ff6e6387aed99ab193
+      FASTCHESS_COMMIT: f618e34540f94f4719ad3817950618dabe441318
+      OPENING_SHA256: 5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Strict evaluator baseline gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/bin .qualification/hyper-tt
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --all-features --release
+
+      - name: Download exact Hyperstition v92 network
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 "$HYPER_URL" --output .qualification/hyper-tt/hyperstition-b400.nnue.zst
+          if ! command -v zstd >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y zstd
+          fi
+          zstd --decompress --force .qualification/hyper-tt/hyperstition-b400.nnue.zst -o .qualification/hyper-tt/hyperstition-b400.nnue
+          test "$(stat -c%s .qualification/hyper-tt/hyperstition-b400.nnue)" = '50616896'
+          echo "$HYPER_RAW_SHA256  .qualification/hyper-tt/hyperstition-b400.nnue" | sha256sum --check --strict
+
+      - name: Apply Hyperstition evaluator substitution and build control
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/apply_hyperstition_search_probe.py
+          cargo fmt --all
+          git diff --check
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --all-features --release
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/bin/hyper-control
+          chmod +x .qualification/bin/hyper-control
+          git diff -- crates/chess-search/src/lib.rs > .qualification/hyper-tt/hyper-only.patch
+          sha256sum .qualification/bin/hyper-control > .qualification/hyper-tt/control.sha256
+
+      - name: Apply TT static-eval cache and build candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/apply_tt_static_eval_cache.py
+          cargo fmt --all
+          git diff --check
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --all-features --release
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/bin/hyper-tt-cache
+          chmod +x .qualification/bin/hyper-tt-cache
+          git diff -- crates/chess-search/src/lib.rs > .qualification/hyper-tt/combined.patch
+          sha256sum .qualification/bin/hyper-tt-cache > .qualification/hyper-tt/candidate.sha256
+          grep -F 'assert_eq!(core::mem::size_of::<super::TtEntry>(), 24);' crates/chess-search/src/lib.rs
+
+      - name: Reproduce certified 5000-root opening suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 'https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip' --output /tmp/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/UHO_Lichess_4852_v1.epd.zip' | sha256sum --check --strict
+          mkdir -p .qualification/m6-openings
+          python scripts/build_m6_opening_suite.py --archive /tmp/UHO_Lichess_4852_v1.epd.zip --output-dir .qualification/m6-openings | tee .qualification/m6-openings/derivation.log
+          test "$(wc -l < .qualification/m6-openings/m6-uho-lichess-5000-v1.epd)" = '5000'
+          echo "$OPENING_SHA256  .qualification/m6-openings/m6-uho-lichess-5000-v1.epd" | sha256sum --check --strict
+
+      - name: Build pinned Fastchess
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet "$FASTCHESS_COMMIT"
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = "$FASTCHESS_COMMIT"
+          make -C .qualification/fastchess-src -j2
+
+      - name: Create identical-Hyperstition launchers
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$PWD"
+          mkdir -p .qualification/launchers
+          cat > .qualification/launchers/control.sh <<EOF
+          #!/usr/bin/env bash
+          unset CHESS_GESTALT_NETWORK
+          export CHESS_HYPERSTITION_NETWORK='$ROOT/.qualification/hyper-tt/hyperstition-b400.nnue'
+          exec '$ROOT/.qualification/bin/hyper-control'
+          EOF
+          cat > .qualification/launchers/candidate.sh <<EOF
+          #!/usr/bin/env bash
+          unset CHESS_GESTALT_NETWORK
+          export CHESS_HYPERSTITION_NETWORK='$ROOT/.qualification/hyper-tt/hyperstition-b400.nnue'
+          exec '$ROOT/.qualification/bin/hyper-tt-cache'
+          EOF
+          chmod +x .qualification/launchers/control.sh .qualification/launchers/candidate.sh
+
+      - name: UCI smoke both binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          for engine in control candidate; do
+            { printf 'uci\nisready\nposition startpos\ngo nodes 1000\nquit\n'; } | ".qualification/launchers/${engine}.sh" | tee ".qualification/hyper-tt/${engine}-smoke.txt"
+            grep -q '^uciok$' ".qualification/hyper-tt/${engine}-smoke.txt"
+            grep -q '^bestmove ' ".qualification/hyper-tt/${engine}-smoke.txt"
+          done
+
+      - name: Measure 40-game fixed-node runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/hyper-tt/fixed-nodes
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/.qualification/launchers/candidate.sh" name=hyper-tt nodes=25000 option.Hash=32 \
+            -engine cmd="$PWD/.qualification/launchers/control.sh" name=hyper-control nodes=25000 option.Hash=32 \
+            -openings file="$PWD/.qualification/m6-openings/m6-uho-lichess-5000-v1.epd" format=epd order=random \
+            -srand 20260912 -rounds 20 -repeat -concurrency 1 -maxmoves 300 -ratinginterval 20 \
+            -pgnout file=.qualification/hyper-tt/fixed-nodes/games.pgn notation=uci append=false nodes=true nps=true \
+            | tee .qualification/hyper-tt/fixed-nodes/fastchess.stdout.log
+          python scripts/analyze_fastchess_node_times.py .qualification/hyper-tt/fixed-nodes/games.pgn --output .qualification/hyper-tt/fixed-nodes/times.json
+          python - <<'PY' | tee .qualification/hyper-tt/performance-summary.txt
+          import json
+          from pathlib import Path
+          engines = json.loads(Path('.qualification/hyper-tt/fixed-nodes/times.json').read_text())['engines']
+          cand = engines['hyper-tt']['mean_seconds']
+          control = engines['hyper-control']['mean_seconds']
+          print(f'candidate_mean_seconds={cand:.9f}')
+          print(f'control_mean_seconds={control:.9f}')
+          print(f'time_ratio={cand/control:.4f}x')
+          print(f'speedup={control/cand:.4f}x')
+          PY
+
+      - name: Run paired 100-game equal-time interaction screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/hyper-tt/equal-time
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/.qualification/launchers/candidate.sh" name=hyper-tt tc=1+0.01 option.Hash=32 \
+            -engine cmd="$PWD/.qualification/launchers/control.sh" name=hyper-control tc=1+0.01 option.Hash=32 \
+            -openings file="$PWD/.qualification/m6-openings/m6-uho-lichess-5000-v1.epd" format=epd order=random \
+            -srand 20260913 -rounds 50 -repeat -concurrency 1 -maxmoves 300 -ratinginterval 20 \
+            -pgnout file=.qualification/hyper-tt/equal-time/games.pgn notation=uci append=false nodes=true nps=true \
+            | tee .qualification/hyper-tt/equal-time/fastchess.stdout.log
+
+      - name: Record experiment identity
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > .qualification/hyper-tt/evidence.txt <<EOF
+          purpose=measure TT static-eval cache specifically under optimized Hyperstition-v92
+          control=Hyperstition-v92 safe-AVX2 L1, V15 search
+          candidate=same Hyperstition-v92 plus semantics-preserving TT static-eval cache
+          network_sha256=$HYPER_RAW_SHA256
+          compile_target=x86-64-v3 both
+          tt_entry_bytes=24 unchanged
+          fixed_node_games=40
+          nodes_per_move=25000
+          equal_time_games=100
+          time_control=1+0.01
+          opening_sha256=$OPENING_SHA256
+          fastchess_commit=$FASTCHESS_COMMIT
+          EOF
+
+      - name: Upload complete evidence without network bytes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v16-hyperstition-tt-cache-${{ github.sha }}
+          path: |
+            .qualification/hyper-tt/
+            .qualification/m6-openings/derivation.log
+          retention-days: 30
