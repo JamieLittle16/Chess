@@ -1,0 +1,183 @@
+name: V14 cached H64 head qualification
+
+on:
+  push:
+    branches: [analysis/v14-student-cached-head-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact H64 model
+        uses: actions/download-artifact@v4
+        with:
+          pattern: v14-single-student-h64-bb7d2a4ed05ff78d344cc4374d54e35189584993
+          path: model-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34202820525
+
+      - name: Materialize V13, fused control and cached-head candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODEL=$(find model-artifact -type f -name 'student-h64.npz' -print -quit);test -n "$MODEL"
+          echo '3422cecc3b1226767412e08746ffd6eef9f7e38602ac15b9256b475e6762b598  '"$MODEL" | sha256sum --check --strict
+          curl --fail --location --retry 3 -o /tmp/fused_runtime.py https://raw.githubusercontent.com/JamieLittle16/Chess/4e9e5aec3c42f8b0b67138e7f5f107838c5f93ab/experiments/v14_student_single_runtime.py
+          curl --fail --location --retry 3 -o /tmp/fused_patch.py https://raw.githubusercontent.com/JamieLittle16/Chess/4e9e5aec3c42f8b0b67138e7f5f107838c5f93ab/scripts/patch_v14_single_student_search.py
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum --check --strict
+          rm -rf /tmp/base /tmp/fused /tmp/cached
+          for DIR in /tmp/base /tmp/fused /tmp/cached; do
+            mkdir -p "$DIR";unzip -q /tmp/v13.zip -d "$DIR"
+            patch "$DIR/experiments/numba_search.py" < .analysis/v13_jit_refactor.patch
+            DIR="$DIR" python - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path(os.environ['DIR'])/'experiments/numba_search.py';s=p.read_text()
+          old='    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          new='    correction = correction // 6\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          assert s.count(old)==1;p.write_text(s.replace(old,new,1))
+          PY
+            python scripts/patch_v13_legality_context.py "$DIR/experiments/numba_core.py"
+            python scripts/patch_v13_qsearch_tactical.py "$DIR/experiments/numba_core.py" "$DIR/experiments/numba_search.py"
+          done
+          cp "$MODEL" /tmp/fused/experiments/v14_student_h64.npz
+          cp "$MODEL" /tmp/cached/experiments/v14_student_h64.npz
+          cp /tmp/fused_runtime.py /tmp/fused/experiments/v14_student_single_runtime.py
+          cp experiments/v14_student_single_runtime.py /tmp/cached/experiments/v14_student_single_runtime.py
+          python /tmp/fused_patch.py /tmp/fused/experiments/numba_search.py --numerator 1 --denominator 12
+          python scripts/patch_v14_single_student_search.py /tmp/cached/experiments/numba_search.py --numerator 1 --denominator 12
+          python scripts/patch_v14_student_lean_qsearch.py /tmp/fused/experiments/numba_search.py
+          python scripts/patch_v14_student_lean_qsearch.py /tmp/cached/experiments/numba_search.py
+          python -m py_compile /tmp/base/experiments/*.py /tmp/fused/experiments/*.py /tmp/cached/experiments/*.py tools/v14_timed_agent_arena.py
+          mkdir -p results
+
+      - name: 5000-transition cached accumulator/raw oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=/tmp/cached python - <<'PY'
+          import random,chess,numpy as np
+          from experiments.numba_core import encode_position,generate_legal_moves,make_move_inplace,move_to_uci
+          from experiments.numba_search import EVAL_WIDTH,EVAL_V13_WIDTH,STUDENT_OFFSET,STUDENT_ACC_END,STUDENT_RAW,STUDENT_OUTPUT_WEIGHTS,_build_eval_state_into,_advance_eval_state_into
+          from experiments.v14_student_single_runtime import raw_screlu_output_sum
+          rng=random.Random(0xCA4ED);b=chess.Board();checked=0
+          for step in range(5000):
+              if b.is_game_over(claim_draw=False) or b.ply()>180 or rng.random()<.025:
+                  b=chess.Board()
+                  for _ in range(rng.randrange(0,32)):
+                      legal=list(b.legal_moves)
+                      if not legal:break
+                      b.push(rng.choice(legal))
+              e=encode_position(b);moves,count=generate_legal_moves(e.board,e.side,e.castling,e.ep_square)
+              if count==0:continue
+              move=int(moves[rng.randrange(int(count))]);parent=np.empty(EVAL_WIDTH,dtype=np.int32);child=np.empty(EVAL_WIDTH,dtype=np.int32);rebuilt=np.empty(EVAL_WIDTH,dtype=np.int32)
+              _build_eval_state_into(e.board,parent);_advance_eval_state_into(e.board,e.side,move,parent,child)
+              make_move_inplace(e.board,e.side,e.castling,e.ep_square,move);_build_eval_state_into(e.board,rebuilt)
+              assert np.array_equal(child,rebuilt),(step,move_to_uci(move))
+              raw=raw_screlu_output_sum(child[STUDENT_OFFSET:STUDENT_ACC_END],STUDENT_OUTPUT_WEIGHTS);assert int(child[STUDENT_RAW])==raw
+              b.push(chess.Move.from_uci(move_to_uci(move)));checked+=1
+          assert checked>=4900,checked;print('cached_oracle_ok',checked)
+          PY
+
+      - name: Exact fused-versus-cached search signatures
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/worker.py <<'PY'
+          import json,sys,chess,numpy as np
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful
+          for line in sys.stdin:
+              q=json.loads(line);b=chess.Board(q['fen']);e=encode_position(b);h=np.empty(0,dtype=np.uint64);o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,int(q['nodes']));print(json.dumps([int(o[0]),int(o[1]),int(o[2]),int(o[3])]),flush=True)
+          PY
+          python - <<'PY'
+          import json,os,subprocess,sys
+          roots=[x.strip() for x in open('match/openings/m3-uho-lichess-100-v1.epd') if x.strip() and not x.startswith('#')][:40]
+          def st(path):e=os.environ.copy();e['PYTHONPATH']=path;return subprocess.Popen([sys.executable,'/tmp/worker.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=e)
+          def ask(p,f,n):p.stdin.write(json.dumps({'fen':f,'nodes':n})+'\n');p.stdin.flush();return json.loads(p.stdout.readline())
+          a=st('/tmp/fused');b=st('/tmp/cached');checked=0
+          try:
+              for fen in roots:
+                  for n in (4000,16000,40000):
+                      x=ask(a,fen,n);y=ask(b,fen,n);assert x==y,(fen,n,x,y);checked+=1
+          finally:a.terminate();b.terminate();a.wait();b.wait()
+          print('identical',checked)
+          PY
+
+      - name: Five-repetition cached throughput
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/nps.py <<'PY'
+          import json,sys,chess,numpy as np
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful
+          for line in sys.stdin:
+              q=json.loads(line);b=chess.Board(q['fen']);e=encode_position(b);h=np.empty(0,dtype=np.uint64);o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,int(q['nodes']));print(json.dumps({'nodes':int(o[3])}),flush=True)
+          PY
+          python - <<'PY'
+          import json,os,statistics,subprocess,sys,time
+          from pathlib import Path
+          roots=[x.strip() for x in open('match/openings/m3-uho-lichess-100-v1.epd') if x.strip() and not x.startswith('#')][:40]
+          def st(path):e=os.environ.copy();e['PYTHONPATH']=path;return subprocess.Popen([sys.executable,'/tmp/nps.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=e)
+          def run(p,order):
+              n=0;t=time.perf_counter()
+              for f in order:p.stdin.write(json.dumps({'fen':f,'nodes':30000})+'\n');p.stdin.flush();n+=json.loads(p.stdout.readline())['nodes']
+              return time.perf_counter()-t,n
+          ps={k:st(v) for k,v in {'base':'/tmp/base','fused':'/tmp/fused','cached':'/tmp/cached'}.items()};rows=[]
+          try:
+              for p in ps.values():p.stdin.write(json.dumps({'fen':roots[0],'nodes':300})+'\n');p.stdin.flush();json.loads(p.stdout.readline())
+              for rep in range(5):
+                  order=roots if rep%2==0 else list(reversed(roots));seq=['base','fused','cached'] if rep%2==0 else ['cached','fused','base'];rec={}
+                  for k in seq:rec[k]=run(ps[k],order)
+                  nps={k:v[1]/v[0] for k,v in rec.items()};row={'rep':rep,'fused_vs_v13':nps['fused']/nps['base'],'cached_vs_v13':nps['cached']/nps['base'],'cached_vs_fused':nps['cached']/nps['fused']};rows.append(row);print(row)
+          finally:
+              for p in ps.values():p.terminate();p.wait()
+          out={'median_fused_vs_v13':statistics.median(x['fused_vs_v13'] for x in rows),'median_cached_vs_v13':statistics.median(x['cached_vs_v13'] for x in rows),'median_cached_vs_fused':statistics.median(x['cached_vs_fused'] for x in rows),'records':rows};Path('results/throughput.json').write_text(json.dumps(out,indent=2)+'\n');print(out)
+          PY
+
+      - name: Same final official-UHO timed slice
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/master/UHO_Lichess_4852_v1.epd.zip
+          rm -rf /tmp/uho && mkdir /tmp/uho && unzip -q /tmp/uho.zip -d /tmp/uho
+          UHO=$(find /tmp/uho -type f -name '*.epd' -print -quit);test -n "$UHO"
+          UHO="$UHO" python - <<'PY'
+          import os,chess
+          from pathlib import Path
+          rows=Path(os.environ['UHO']).read_text(errors='ignore').splitlines();out=[]
+          for raw in rows[3900:4500]:
+              f=raw.strip().split()
+              if len(f)<4:continue
+              fen=' '.join(f[:4])+' 0 1'
+              try:b=chess.Board(fen)
+              except ValueError:continue
+              if b.is_game_over(claim_draw=False):continue
+              out.append(fen)
+              if len(out)==32:break
+          assert len(out)==32;Path('/tmp/timed.epd').write_text('\n'.join(out)+'\n')
+          PY
+          python -u tools/v14_timed_agent_arena.py /tmp/cached /tmp/base --opening-file /tmp/timed.epd --pairs 32 --base-ms 2500 --increment-ms 50 --max-plies 180 --json-out results/timed-64.json | tee results/timed-64.log
+          grep '^FINAL ' results/timed-64.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v14-student-cached-head-${{ github.sha }}
+          path: results/
+          retention-days: 30
