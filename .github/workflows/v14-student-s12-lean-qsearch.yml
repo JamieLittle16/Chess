@@ -1,0 +1,144 @@
+name: V14 H64 student lean-qsearch qualification
+
+on:
+  push:
+    branches: [analysis/v14-student-s12-lean-qsearch-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact fixed H64 model
+        uses: actions/download-artifact@v4
+        with:
+          name: v14-single-student-h64-bb7d2a4ed05ff78d344cc4374d54e35189584993
+          path: model-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34202820525
+
+      - name: Materialize V13, full 1/12 and lean 1/12
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODEL=$(find model-artifact -type f -name 'student-h64.npz' -print -quit); test -n "$MODEL"
+          echo '3422cecc3b1226767412e08746ffd6eef9f7e38602ac15b9256b475e6762b598  '"$MODEL" | sha256sum --check --strict
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum --check --strict
+          rm -rf /tmp/base /tmp/full /tmp/lean
+          for DIR in /tmp/base /tmp/full /tmp/lean; do
+            mkdir -p "$DIR"; unzip -q /tmp/v13.zip -d "$DIR"
+            patch "$DIR/experiments/numba_search.py" < .analysis/v13_jit_refactor.patch
+            DIR="$DIR" python - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path(os.environ['DIR'])/'experiments/numba_search.py';s=p.read_text()
+          old='    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          new='    correction = correction // 6\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          assert s.count(old)==1;p.write_text(s.replace(old,new,1))
+          PY
+            python scripts/patch_v13_legality_context.py "$DIR/experiments/numba_core.py"
+            python scripts/patch_v13_qsearch_tactical.py "$DIR/experiments/numba_core.py" "$DIR/experiments/numba_search.py"
+          done
+          echo '401f6580028a72361286bd99bee1f0022c74e6c8a65da8acd47448835a1ff360  /tmp/base/experiments/numba_search.py' | sha256sum --check --strict
+          for DIR in /tmp/full /tmp/lean; do
+            cp experiments/v14_student_single_runtime.py "$DIR/experiments/v14_student_single_runtime.py"
+            cp "$MODEL" "$DIR/experiments/v14_student_h64.npz"
+            python scripts/patch_v14_single_student_search.py "$DIR/experiments/numba_search.py" --numerator 1 --denominator 12
+          done
+          python scripts/patch_v14_student_lean_qsearch.py /tmp/lean/experiments/numba_search.py
+          python -m py_compile /tmp/base/agent.py /tmp/base/experiments/*.py /tmp/full/agent.py /tmp/full/experiments/*.py /tmp/lean/agent.py /tmp/lean/experiments/*.py
+          mkdir -p results
+
+      - name: Fixed-node runtime ladder
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/worker.py <<'PY'
+          import json,sys,chess,numpy as np
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful
+          for line in sys.stdin:
+              q=json.loads(line);b=chess.Board(q['fen']);e=encode_position(b);h=np.empty(0,dtype=np.uint64)
+              o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,int(q['nodes']))
+              print(json.dumps({'move':int(o[0]),'score':int(o[1]),'depth':int(o[2]),'nodes':int(o[3])}),flush=True)
+          PY
+          python - <<'PY'
+          import json,os,statistics,subprocess,sys,time
+          from pathlib import Path
+          roots=[x.strip() for x in open('match/openings/m3-uho-lichess-100-v1.epd') if x.strip() and not x.startswith('#')][:40]
+          def start(path):
+              env=os.environ.copy();env['PYTHONPATH']=path
+              return subprocess.Popen([sys.executable,'/tmp/worker.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=env)
+          def run(p,order):
+              n=0;t=time.perf_counter()
+              for fen in order:
+                  p.stdin.write(json.dumps({'fen':fen,'nodes':30000})+'\n');p.stdin.flush();n+=json.loads(p.stdout.readline())['nodes']
+              return time.perf_counter()-t,n
+          ps={k:start(v) for k,v in {'base':'/tmp/base','full':'/tmp/full','lean':'/tmp/lean'}.items()};rows=[]
+          try:
+              for p in ps.values():p.stdin.write(json.dumps({'fen':roots[0],'nodes':300})+'\n');p.stdin.flush();json.loads(p.stdout.readline())
+              for rep in range(3):
+                  order=roots if rep%2==0 else list(reversed(roots));rec={};seq=['base','full','lean'] if rep%2==0 else ['lean','full','base']
+                  for k in seq:rec[k]=run(ps[k],order)
+                  nps={k:v[1]/v[0] for k,v in rec.items()};row={'rep':rep,'full_vs_v13':nps['full']/nps['base'],'lean_vs_v13':nps['lean']/nps['base'],'lean_vs_full':nps['lean']/nps['full']};rows.append(row);print(row)
+          finally:
+              for p in ps.values():p.terminate();p.wait()
+          out={'median_full_vs_v13':statistics.median(x['full_vs_v13'] for x in rows),'median_lean_vs_v13':statistics.median(x['lean_vs_v13'] for x in rows),'median_lean_vs_full':statistics.median(x['lean_vs_full'] for x in rows),'records':rows};Path('results/throughput.json').write_text(json.dumps(out,indent=2)+'\n');print(out)
+          PY
+
+      - name: Build disjoint official-UHO quality book
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/master/UHO_Lichess_4852_v1.epd.zip
+          rm -rf /tmp/uho && mkdir /tmp/uho && unzip -q /tmp/uho.zip -d /tmp/uho
+          UHO=$(find /tmp/uho -type f -name '*.epd' -print -quit); test -n "$UHO"
+          UHO="$UHO" python - <<'PY'
+          import os,chess
+          from pathlib import Path
+          rows=Path(os.environ['UHO']).read_text(errors='ignore').splitlines();out=[]
+          for raw in rows[2200:2700]:
+              f=raw.strip().split()
+              if len(f)<4:continue
+              fen=' '.join(f[:4])+' 0 1'
+              try:b=chess.Board(fen)
+              except ValueError:continue
+              if b.is_game_over(claim_draw=False):continue
+              out.append(fen)
+              if len(out)==48:break
+          assert len(out)==48,len(out);Path('/tmp/quality.epd').write_text('\n'.join(out)+'\n')
+          PY
+
+      - name: Preserve full-student chess signal
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u tools/v14_fixed_node_arena.py /tmp/lean /tmp/full --nodes 16000 --pairs 32 --opening-offset 0 --max-plies 220 --opening-file /tmp/quality.epd --json-out results/lean-vs-full.json | tee results/lean-vs-full.log
+          python -u tools/v14_fixed_node_arena.py /tmp/lean /tmp/base --nodes 16000 --pairs 32 --opening-offset 0 --max-plies 220 --opening-file /tmp/quality.epd --json-out results/lean-vs-v13.json | tee results/lean-vs-v13.log
+
+      - name: Regression sentinels
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/v14_regression_probe.py --engine /tmp/lean --control /tmp/base --manifest match/regressions/v14-rated-game-1.json --budgets 30000,300000 --json-out results/rated.json >/dev/null
+          python tools/v14_regression_probe.py --engine /tmp/lean --control /tmp/base --manifest match/regressions/v14-v13-seed.json --budgets 30000 --json-out results/seed.json >/dev/null
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v14-student-s12-lean-qsearch-${{ github.sha }}
+          path: results/
+          retention-days: 30
