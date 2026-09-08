@@ -23,7 +23,10 @@ use chess_search::Searcher;
 /// holdout E4 scored 70W/80D/50L (+34.86 +/- 35.54 Elo, LOS 97.40%). This independent validation
 /// accepts the evaluator drift as the new production baseline.
 pub const SUITE_NAME: &str = "reference-search-v8";
-pub const EXPECTED_SIGNATURE: u64 = 0x4c3b_be87_01fb_bb68;
+/// Reviewed after the H1-accepted V14 Search-v2 promotion. The case set is unchanged;
+/// only the deterministic search trace changed. Frozen M6 SPRT: 132W/70D/6L over 208 games,
+/// +243.97 +/- 37.36 Elo, LLR 2.95 beyond the 2.94 H1 boundary.
+pub const EXPECTED_SIGNATURE: u64 = 0x3f02_47ab_79ca_e85a;
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;

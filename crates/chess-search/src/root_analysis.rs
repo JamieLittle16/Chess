@@ -55,6 +55,8 @@ impl Searcher {
         self.nodes = 0;
         self.tt_hits = 0;
         self.killers = [[None; 2]; MAX_SEARCH_PLY];
+        self.history.clear();
+        self.move_contexts = [None; MAX_SEARCH_PLY];
         // Root analysis must use the same derived learned-evaluation state as ordinary search.
         // Rebuild at the supplied root even when the Searcher was previously used on another
         // position; otherwise a configured Gestalt evaluator could fall back to classical scoring
@@ -85,6 +87,7 @@ impl Searcher {
 
         for order in 0..moves.len() {
             let mv = moves[order];
+            self.move_contexts[0] = Some(super::move_context(position, mv));
             let prepared = self.prepare_leaf_move(position, mv);
             let undo = position.make_move(mv);
             self.apply_leaf_move(position, prepared);

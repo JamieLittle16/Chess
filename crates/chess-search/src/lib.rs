@@ -4,6 +4,7 @@
 //! negamax/alpha-beta search with deterministic move ordering and a bounded direct-mapped
 //! transposition table. It is the control group for later tactical and strategic search research.
 
+mod history;
 mod move_picker;
 mod quiescence;
 mod root_analysis;
@@ -18,6 +19,7 @@ use chess_eval::{
         PreparedAccumulatorUpdate as GestaltPreparedUpdate,
     },
 };
+use history::{HistoryTables, MoveContext, depth_bonus};
 use move_picker::MovePicker;
 
 /// Scores at or above this range encode forced mate rather than static evaluation.
@@ -97,6 +99,8 @@ pub struct Searcher {
     tt_hits: u64,
     path_keys: [u64; MAX_SEARCH_PLY],
     killers: [[Option<ChessMove>; 2]; MAX_SEARCH_PLY],
+    history: HistoryTables,
+    move_contexts: [Option<MoveContext>; MAX_SEARCH_PLY],
     gestalt: Option<GestaltSearchEvaluator>,
 }
 
@@ -109,6 +113,8 @@ impl Searcher {
             tt_hits: 0,
             path_keys: [0; MAX_SEARCH_PLY],
             killers: [[None; 2]; MAX_SEARCH_PLY],
+            history: HistoryTables::new(),
+            move_contexts: [None; MAX_SEARCH_PLY],
             gestalt: GestaltSearchEvaluator::from_environment(),
         }
     }
@@ -202,6 +208,8 @@ impl Searcher {
         self.nodes = 1;
         self.tt_hits = 0;
         self.killers = [[None; 2]; MAX_SEARCH_PLY];
+        self.history.clear();
+        self.move_contexts = [None; MAX_SEARCH_PLY];
         self.reset_leaf_evaluator(position);
         let result = self
             .search_root(position, prior_history, depth, &NeverStop)
@@ -272,6 +280,8 @@ impl Searcher {
         self.nodes = 0;
         self.tt_hits = 0;
         self.killers = [[None; 2]; MAX_SEARCH_PLY];
+        self.history.clear();
+        self.move_contexts = [None; MAX_SEARCH_PLY];
         self.reset_leaf_evaluator(position);
         let mut last_completed = None;
 
@@ -374,7 +384,12 @@ impl Searcher {
         let mut moves = moves;
         let mut picker = MovePicker::new(&mut moves, hint, [None; 2]);
         let mut first_move = true;
-        while let Some(mv) = picker.next(position) {
+        while let Some(mv) = picker.next_scored(position, &mut |mv| {
+            let context = move_context(position, mv);
+            self.history.score(position.side_to_move(), None, context)
+        }) {
+            let context = move_context(position, mv);
+            self.move_contexts[0] = Some(context);
             let prepared = self.prepare_leaf_move(position, mv);
             let undo = position.make_move(mv);
             self.apply_leaf_move(position, prepared);
@@ -511,7 +526,7 @@ impl Searcher {
                     .store(key, depth, score_to_tt(score, ply), Bound::Exact, None);
                 return Some(score);
             }
-            Some(evaluate(position))
+            Some(self.leaf_evaluate(position))
         } else {
             None
         };
@@ -542,9 +557,21 @@ impl Searcher {
         let mut picker = MovePicker::new(&mut moves, hint, killers);
         let mut first_move = true;
         let mut move_index = 0usize;
-        while let Some(mv) = picker.next(position) {
+        let previous_context = if ply == 0 {
+            None
+        } else {
+            self.move_contexts[usize::from(ply - 1)]
+        };
+        while let Some(mv) = picker.next_scored(position, &mut |mv| {
+            let context = move_context(position, mv);
+            self.history
+                .score(position.side_to_move(), previous_context, context)
+        }) {
             let quiet = !mv.kind().is_capture() && !mv.kind().is_promotion();
             let protected_killer = killers.contains(&Some(mv));
+            let side = position.side_to_move();
+            let context = move_context(position, mv);
+            self.move_contexts[usize::from(ply)] = Some(context);
             let prepared = self.prepare_leaf_move(position, mv);
             let undo = position.make_move(mv);
             let gives_check = position.is_in_check(position.side_to_move());
@@ -587,7 +614,11 @@ impl Searcher {
                 // Any reduced alpha raise is re-probed at full depth before normal PVS verification,
                 // so a reduced result can never directly become a principal score or beta cutoff.
                 let reduction = if !in_check && quiet && !protected_killer && !gives_check {
-                    lmr_v3_reduction(depth, move_index)
+                    history_adjusted_lmr_reduction(
+                        depth,
+                        move_index,
+                        self.history.score(side, previous_context, context),
+                    )
                 } else {
                     0
                 };
@@ -636,6 +667,14 @@ impl Searcher {
             let score = -child?;
             first_move = false;
             move_index = move_index.saturating_add(1);
+
+            // Train only on scout-node evidence. Quiet fail-highs receive a strong positive
+            // gravity update; searched quiets that fail to cut receive a smaller malus.
+            if quiet && null_window {
+                let bonus = depth_bonus(depth);
+                let update = if score >= beta { bonus } else { -(bonus / 2) };
+                self.history.update(side, previous_context, context, update);
+            }
 
             if score > best {
                 best = score;
@@ -773,6 +812,17 @@ fn lmr_v3_reduction(depth: u8, move_index: usize) -> u8 {
     }
 }
 
+fn history_adjusted_lmr_reduction(depth: u8, move_index: usize, history_score: i32) -> u8 {
+    let base = lmr_v3_reduction(depth, move_index);
+    if history_score >= 4_096 {
+        return base.saturating_sub(1);
+    }
+    if history_score <= -4_096 && depth >= 5 && move_index >= 4 {
+        return base.saturating_add(1).min(3);
+    }
+    base
+}
+
 #[allow(clippy::too_many_arguments)]
 fn should_prune_late_quiet_futility(
     depth: u8,
@@ -797,6 +847,13 @@ fn should_prune_late_quiet_futility(
         && beta.abs() < MATE_TT_THRESHOLD
         && static_eval.saturating_add(LATE_QUIET_FUTILITY_MARGIN_PER_DEPTH * i32::from(depth))
             <= alpha
+}
+
+fn move_context(position: &Position, mv: ChessMove) -> MoveContext {
+    let piece = position
+        .piece_at(mv.from())
+        .expect("generated legal move has a moving piece");
+    MoveContext::new(piece.kind(), mv.to())
 }
 
 fn has_reverse_futility_material(position: &Position) -> bool {
