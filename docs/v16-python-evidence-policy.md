@@ -1,0 +1,1 @@
+Promotion rule: no evaluator/search experiment is accepted from RMSE, node reduction, throughput or a single noisy match alone. Require correctness/parity gates first, then equal-node chess and competition-clock chess. Larger confirmation follows any small positive screen.
