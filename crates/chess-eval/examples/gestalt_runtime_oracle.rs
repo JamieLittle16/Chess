@@ -5,9 +5,16 @@ use chess_eval::gestalt::Network;
 
 fn main() {
     let mut args = env::args().skip(1);
-    let network_path = args.next().expect("usage: gestalt_runtime_oracle NETWORK FEN");
-    let fen = args.next().expect("usage: gestalt_runtime_oracle NETWORK FEN");
-    assert!(args.next().is_none(), "usage: gestalt_runtime_oracle NETWORK FEN");
+    let network_path = args
+        .next()
+        .expect("usage: gestalt_runtime_oracle NETWORK FEN");
+    let fen = args
+        .next()
+        .expect("usage: gestalt_runtime_oracle NETWORK FEN");
+    assert!(
+        args.next().is_none(),
+        "usage: gestalt_runtime_oracle NETWORK FEN"
+    );
 
     let network = Network::from_file(Path::new(&network_path))
         .unwrap_or_else(|error| panic!("failed to load network: {error}"));
