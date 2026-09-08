@@ -1,0 +1,89 @@
+name: V15 Python full fusion screen
+
+on:
+  push:
+    branches: [analysis/v15-python-full-fusion-screen-20260909]
+    paths: [.github/workflows/v15-python-full-fusion-screen.yml]
+  workflow_dispatch:
+
+permissions: {contents: read, actions: read}
+
+jobs:
+  screen:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Download proven b200 evaluator
+        uses: actions/download-artifact@v4
+        with:
+          name: v15-python-h64-finetune-b200-bb9ec0a83c41ed648c9f70755dee5623a786b662
+          path: eval-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34286341719
+      - name: Materialize full-fusion candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit)
+          MODEL=$(find eval-artifact -type f -name v14_student_h64.npz -print -quit)
+          test -n "$ZIP"; test -n "$MODEL"
+          rm -rf /tmp/base /tmp/cand /tmp/m6 results;mkdir -p /tmp/base /tmp/cand /tmp/m6 results
+          unzip -q "$ZIP" -d /tmp/base;cp -a /tmp/base/. /tmp/cand/
+          python scripts/patch_v15_python_presort_once.py /tmp/cand/experiments/numba_search.py
+          python scripts/patch_v15_python_lazy_h64_chain.py /tmp/cand/experiments/numba_search.py
+          python scripts/patch_v15_python_scoremeta_hotloop.py /tmp/cand/experiments/numba_search.py
+          python scripts/patch_v15_python_fused_h64_direct.py /tmp/cand/experiments/v14_student_single_runtime.py
+          python scripts/patch_v15_python_inline_fused_h64.py /tmp/cand/experiments/v14_student_single_runtime.py
+          python scripts/patch_v15_python_lmr_schedule.py /tmp/cand/experiments/numba_search.py 3 3 5 7 8 10
+          python scripts/patch_v15_python_lmp.py /tmp/cand/experiments/numba_search.py 5 9 999
+          cp "$MODEL" /tmp/cand/experiments/v14_student_h64.npz
+          python -m py_compile tools/v14_agent_runner.py /tmp/base/agent.py /tmp/cand/agent.py /tmp/base/experiments/*.py /tmp/cand/experiments/*.py
+          PYTHONPATH=/tmp/cand python - <<'PY'
+          import chess,numpy as np
+          from experiments.numba_core import encode_position,move_to_uci
+          from experiments.numba_search import iterative_search_stateful
+          b=chess.Board();e=encode_position(b);h=np.empty(0,dtype=np.uint64)
+          o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,10000)
+          m=chess.Move.from_uci(move_to_uci(int(o[0])));assert m in b.legal_moves;print(tuple(int(x) for x in o),m)
+          PY
+      - name: Build fresh 48-root suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old];roots=fresh[4200:4248]
+          assert len(roots)==48 and len(set(roots))==48
+          Path('/tmp/full-fusion-48.epd').write_text('\n'.join(roots)+'\n')
+          PY
+      - name: 96-game competition-clock screen vs exact V14
+        run: python -u scripts/v15_competition_gate.py --candidate /tmp/cand --control /tmp/base --openings /tmp/full-fusion-48.epd --output results/timed-96.json --label full-fusion-b200-vs-v14 --base-ms 2500 --inc-ms 50 --max-plies 180 | tee results/timed-96.log
+      - name: Package candidate
+        if: always()
+        shell: bash
+        run: |
+          if [ -d /tmp/cand ]; then
+            (cd /tmp/cand && zip -q -9 -r "$GITHUB_WORKSPACE/results/Little-Gambit-V15-full-fusion.zip" .)
+            sha256sum results/Little-Gambit-V15-full-fusion.zip > results/package.sha256
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: {name: v15-python-full-fusion-${{ github.sha }}, path: results/, retention-days: 30}
