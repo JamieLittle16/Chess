@@ -128,18 +128,43 @@ jobs:
               return int(cp.stdout.strip())
 
           def run_reference(fen: str) -> int:
-              commands = f'position fen {fen}\nraweval\nquit\n'
-              cp = subprocess.run(
+              proc = subprocess.Popen(
                   [str(reference)],
-                  input=commands,
+                  stdin=subprocess.PIPE,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE,
                   text=True,
-                  capture_output=True,
-                  check=True,
+                  bufsize=1,
               )
-              integers = [int(line) for line in cp.stdout.splitlines() if re.fullmatch(r'-?\d+', line.strip())]
-              if not integers:
-                  raise RuntimeError(f'no raweval integer for {fen!r}: {cp.stdout!r} stderr={cp.stderr!r}')
-              return integers[-1]
+              assert proc.stdin is not None
+              assert proc.stdout is not None
+              try:
+                  proc.stdin.write('uci\n')
+                  proc.stdin.write('isready\n')
+                  proc.stdin.write(f'position fen {fen}\n')
+                  proc.stdin.write('raweval\n')
+                  proc.stdin.flush()
+                  transcript = []
+                  for _ in range(128):
+                      line = proc.stdout.readline()
+                      if line == '':
+                          break
+                      transcript.append(line.rstrip())
+                      stripped = line.strip()
+                      if re.fullmatch(r'-?\d+', stripped):
+                          score = int(stripped)
+                          proc.stdin.write('quit\n')
+                          proc.stdin.flush()
+                          proc.wait(timeout=5)
+                          return score
+                  stderr = proc.stderr.read() if proc.stderr is not None else ''
+                  raise RuntimeError(
+                      f'no raweval integer for {fen!r}: stdout={transcript!r} stderr={stderr!r}'
+                  )
+              finally:
+                  if proc.poll() is None:
+                      proc.kill()
+                      proc.wait(timeout=5)
 
           rows = []
           bad = []
