@@ -1,0 +1,70 @@
+name: V15 Python Rust-teacher root policy
+
+on:
+  push:
+    branches: [analysis/v15-python-rust-policy-train-20260908]
+    paths:
+      - .github/workflows/v15-python-rust-policy-train.yml
+      - scripts/train_v15_root_policy.py
+      - scripts/train_v15_root_policy_runtime_exact.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  train:
+    strategy:
+      fail-fast: false
+      matrix:
+        epochs: [1, 2, 4, 6]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Install training runtime
+        run: |
+          python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2
+          python -m pip install --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Download Rust V15 teacher shards
+        uses: actions/download-artifact@v4
+        with:
+          pattern: v15-rust-policy-teacher-shard-*-b83edcd6e6b7b1c1c1b324944f616e00628b8d74
+          path: teacher-shards
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34262447113
+      - name: Merge and verify 5k corpus
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          find teacher-shards -type f -name 'teacher-shard-*.jsonl' -print0 | sort -z | xargs -0 cat > /tmp/rust-teacher.jsonl
+          test "$(wc -l </tmp/rust-teacher.jsonl)" = '5000'
+          python - <<'PY'
+          import json
+          from collections import Counter
+          rows=[json.loads(x) for x in open('/tmp/rust-teacher.jsonl')]
+          assert len(rows)==5000 and len({r['source_index'] for r in rows})==5000
+          c=Counter(r['split'] for r in rows);print(c)
+          assert c['train'] and c['validation'] and c['holdout']
+          PY
+      - name: Train runtime-exact H64 policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u scripts/train_v15_root_policy_runtime_exact.py \
+            --teacher /tmp/rust-teacher.jsonl \
+            --output results/rust-policy-h64-e${{ matrix.epochs }}.pt \
+            --hidden 64 --epochs ${{ matrix.epochs }} \
+            | tee results/train-e${{ matrix.epochs }}.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-rust-policy-h64-e${{ matrix.epochs }}-${{ github.sha }}
+          path: results/
+          retention-days: 30
