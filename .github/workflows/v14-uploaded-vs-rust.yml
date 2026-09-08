@@ -1,0 +1,143 @@
+name: V14 uploaded vs Rust diagnostic
+
+on:
+  push:
+    branches:
+      - analysis/v14-uploaded-vs-rust-20260908
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  diagnostic:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: fast-a, start: 0, count: 6, base_ms: 2500, inc_ms: 50, nodes: 10000}
+          - {name: fast-b, start: 6, count: 6, base_ms: 2500, inc_ms: 50, nodes: 10000}
+          - {name: fast-c, start: 12, count: 6, base_ms: 2500, inc_ms: 50, nodes: 10000}
+          - {name: fast-d, start: 18, count: 6, base_ms: 2500, inc_ms: 50, nodes: 10000}
+          - {name: slow-a, start: 24, count: 3, base_ms: 8000, inc_ms: 100, nodes: 25000}
+          - {name: slow-b, start: 27, count: 3, base_ms: 8000, inc_ms: 100, nodes: 25000}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact runtime and Stockfish
+        run: |
+          python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+          sudo apt-get update -qq
+          sudo apt-get install -y stockfish
+      - name: Download exact V14 H64 model
+        uses: actions/download-artifact@v4
+        with:
+          name: v14-single-student-h64-bb7d2a4ed05ff78d344cc4374d54e35189584993
+          path: model-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34202820525
+      - name: Materialize source-exact uploaded V14
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODEL=$(find model-artifact -type f -name 'student-h64.npz' -print -quit); test -n "$MODEL"
+          echo '3422cecc3b1226767412e08746ffd6eef9f7e38602ac15b9256b475e6762b598  '"$MODEL" | sha256sum --check --strict
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum --check --strict
+          rm -rf /tmp/v14 && mkdir /tmp/v14 && unzip -q /tmp/v13.zip -d /tmp/v14
+          patch /tmp/v14/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          DIR=/tmp/v14 python - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path(os.environ['DIR'])/'experiments/numba_search.py';s=p.read_text()
+          old='    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          new='    correction = correction // 6\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          assert s.count(old)==1;p.write_text(s.replace(old,new,1))
+          PY
+          python scripts/patch_v13_legality_context.py /tmp/v14/experiments/numba_core.py
+          python scripts/patch_v13_qsearch_tactical.py /tmp/v14/experiments/numba_core.py /tmp/v14/experiments/numba_search.py
+          echo '0306e8145a453d91b9b5ac92e9980931510d9e18f8ba598a7548d08b85165c35  /tmp/v14/experiments/numba_core.py' | sha256sum --check --strict
+          echo '401f6580028a72361286bd99bee1f0022c74e6c8a65da8acd47448835a1ff360  /tmp/v14/experiments/numba_search.py' | sha256sum --check --strict
+          cp experiments/v14_student_single_runtime.py /tmp/v14/experiments/v14_student_single_runtime.py
+          cp "$MODEL" /tmp/v14/experiments/v14_student_h64.npz
+          python scripts/patch_v14_single_student_search.py /tmp/v14/experiments/numba_search.py --numerator 1 --denominator 12
+          python scripts/patch_v14_student_lean_qsearch.py /tmp/v14/experiments/numba_search.py
+          python scripts/patch_v14_lazy_stable_ordering.py /tmp/v14/experiments/numba_search.py
+          curl --fail --location --retry 3 -o /tmp/build_kpk.py https://raw.githubusercontent.com/JamieLittle16/Chess/22cfec2269f87ddf14a9f929f1eda2d6e4ec21d8/scripts/build_v14_kpk_bitbase.py
+          curl --fail --location --retry 3 -o /tmp/patch_kpk.py https://raw.githubusercontent.com/JamieLittle16/Chess/22cfec2269f87ddf14a9f929f1eda2d6e4ec21d8/scripts/patch_v14_kpk_exact.py
+          python /tmp/build_kpk.py /tmp/v14/v14_kpk.u8
+          python /tmp/patch_kpk.py /tmp/v14/agent.py
+          echo '136c4e8064e32568e16b722695a6531064ca315cbd223f3553afffecdfe826c0  /tmp/v14/agent.py' | sha256sum --check --strict
+          echo '0306e8145a453d91b9b5ac92e9980931510d9e18f8ba598a7548d08b85165c35  /tmp/v14/experiments/numba_core.py' | sha256sum --check --strict
+          echo '334e026abdcfccb334d835fadd8a9396a9dd3532ff089e029a78768f02444007  /tmp/v14/experiments/numba_search.py' | sha256sum --check --strict
+          echo '7d0fc5f7a186e79317cf12a2ff285d7716c651fbd045c53d65a3cc6eb1b15319  /tmp/v14/experiments/v13_residual.i16' | sha256sum --check --strict
+          echo '3422cecc3b1226767412e08746ffd6eef9f7e38602ac15b9256b475e6762b598  /tmp/v14/experiments/v14_student_h64.npz' | sha256sum --check --strict
+          echo 'a295826488040e2c2f33974dce461186b7de233b14e518f0b88e26a090d585c0  /tmp/v14/experiments/v14_student_single_runtime.py' | sha256sum --check --strict
+          echo 'c2cc0534a984124c5a75e250bab65f2756ade47341bbca84d6b6871fdb2977f2  /tmp/v14/v14_kpk.u8' | sha256sum --check --strict
+          python -m py_compile /tmp/v14/agent.py /tmp/v14/experiments/*.py
+      - name: Build pinned Rust UCI engine
+        run: cargo build --release -p chess-uci
+      - name: Smoke-test under competition init cap
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/bin/time -f 'v14_init_wall_s=%e v14_init_maxrss_kb=%M' -o /tmp/v14-init.txt \
+            timeout 90s python tools/v9_agent_runner.py /tmp/v14 <<'EOF' >/tmp/v14-smoke.json
+          {"fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1","time_left_ms":2000}
+          EOF
+          cat /tmp/v14-init.txt
+          cat /tmp/v14-smoke.json
+          grep -q '"ready": true' /tmp/v14-smoke.json
+          grep -q '"move":' /tmp/v14-smoke.json
+      - name: Run paired games and Stockfish diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          STOCKFISH="$(command -v stockfish || true)"; if [ -z "$STOCKFISH" ]; then STOCKFISH=/usr/games/stockfish; fi
+          OUT="analysis-results/${{ matrix.name }}"; mkdir -p "$OUT"
+          python tools/v9_rust_diagnostic.py \
+            --agent /tmp/v14 \
+            --runner tools/v9_agent_runner.py \
+            --engine target/release/chess-uci \
+            --stockfish "$STOCKFISH" \
+            --openings match/openings/m3-uho-lichess-100-v1.epd \
+            --opening-start ${{ matrix.start }} \
+            --opening-count ${{ matrix.count }} \
+            --base-ms ${{ matrix.base_ms }} \
+            --increment-ms ${{ matrix.inc_ms }} \
+            --analysis-nodes ${{ matrix.nodes }} \
+            --out-dir "$OUT" | tee "$OUT/run.log"
+          {
+            echo 'candidate=Little-Gambit-V14 uploaded source-exact'
+            echo 'uploaded_zip_sha256=cbcc24c006068d8386e3c7db255fa4577744d5bb0d913dbb423e62aea628049e'
+            echo 'agent_sha256=136c4e8064e32568e16b722695a6531064ca315cbd223f3553afffecdfe826c0'
+            echo 'core_sha256=0306e8145a453d91b9b5ac92e9980931510d9e18f8ba598a7548d08b85165c35'
+            echo 'search_sha256=334e026abdcfccb334d835fadd8a9396a9dd3532ff089e029a78768f02444007'
+            echo 'runtime_sha256=a295826488040e2c2f33974dce461186b7de233b14e518f0b88e26a090d585c0'
+            echo 'student_sha256=3422cecc3b1226767412e08746ffd6eef9f7e38602ac15b9256b475e6762b598'
+            echo 'kpk_sha256=c2cc0534a984124c5a75e250bab65f2756ade47341bbca84d6b6871fdb2977f2'
+            echo 'rust_sha=44c1e16d3713cdca1ff1bd71f7596ef3b5804037'
+            echo 'shard=${{ matrix.name }}'
+            cat /tmp/v14-init.txt
+            python --version
+            rustc --version
+          } > "$OUT/provenance.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v14-uploaded-vs-rust-${{ matrix.name }}
+          path: analysis-results/${{ matrix.name }}
+          if-no-files-found: error
+          retention-days: 7
