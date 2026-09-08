@@ -111,9 +111,14 @@ jobs:
           def send(line): engine.stdin.write(line+'\n'); engine.stdin.flush()
           def wait_for(prefix):
               while True:
-                  line=engine.stdout.readline().strip()
-                  if not line: raise RuntimeError('stockfish exited')
-                  if line.startswith(prefix): return line
+                  raw=engine.stdout.readline()
+                  if raw == '':
+                      raise RuntimeError(f'stockfish exited with {engine.poll()}')
+                  line=raw.strip()
+                  if not line:
+                      continue
+                  if line.startswith(prefix):
+                      return line
           send('uci'); wait_for('uciok')
           send('setoption name Threads value 1')
           send('setoption name Hash value 64')
@@ -132,8 +137,6 @@ jobs:
               rows.append(row); print(row)
           send('quit'); engine.wait(timeout=5)
           Path('v14-lab-results/stockfish-seed-verification.json').write_text(json.dumps(rows,indent=2)+'\n')
-          # These two moves came from the original Stockfish diagnostic; require the pinned SF19
-          # reproduction before treating the fixtures as hard regression labels.
           assert all(row['matches_expected'] for row in rows),rows
           PY
 
