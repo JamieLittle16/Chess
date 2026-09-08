@@ -1,0 +1,82 @@
+name: V16 Python balanced four-head leaf model
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v16/python-leaf-phase-balanced]
+    paths:
+      - '.github/workflows/v16-python-leaf-phase-balanced.yml'
+      - 'scripts/patch_v16_balanced_phase_bins.py'
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  train:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Download frozen Rust-search-leaf corpus
+        uses: actions/download-artifact@v4
+        with:
+          name: v15-rust-search-leaf-gestalt-70736f6f056d42aa8ceee37e0b282e4f02d34556
+          path: leaf-corpus
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34277063353
+      - name: Download frozen H16 initializer
+        uses: actions/download-artifact@v4
+        with:
+          name: v15-leaf-gestalt-topology-h16-70736f6f056d42aa8ceee37e0b282e4f02d34556
+          path: leaf-h16
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34277063353
+      - name: Train balanced four-head model
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit)
+          TEACHER=$(find leaf-corpus -type f -name '*.jsonl' -print -quit)
+          INIT=$(find leaf-h16 -type f -name gestalt-topology-h16.npz -print -quit)
+          test -n "$ZIP";test -n "$TEACHER";test -n "$INIT"
+          rm -rf /tmp/v14 model
+          mkdir -p /tmp/v14
+          unzip -q "$ZIP" -d /tmp/v14
+          cp scripts/train_v16_leaf_phase_head.py /tmp/train-balanced.py
+          python scripts/patch_v16_balanced_phase_bins.py /tmp/train-balanced.py
+          python -u /tmp/train-balanced.py \
+            --teacher "$TEACHER" --engine-dir /tmp/v14 --init-model "$INIT" \
+            --output-dir model --phase-heads 4 \
+            --epochs 18 --batch-size 256 --lr 0.00045 --weight-decay 0.00001 --seed 20260911 \
+            | tee training.log
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          m=json.loads(Path('model/metadata.json').read_text())
+          assert m['phase_counts'][0] > 20000 and m['phase_counts'][1] > 15000 and m['phase_counts'][2] > 10000 and m['phase_counts'][3] > 30000, m['phase_counts']
+          print('FINAL_HOLDOUT',json.dumps(m['metrics']['holdout'],sort_keys=True))
+          print('PHASE_COUNTS',m['phase_counts'])
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v16-python-leaf-phase-balanced-${{ github.sha }}
+          path: |
+            model/
+            training.log
+          retention-days: 30
