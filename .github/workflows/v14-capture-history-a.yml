@@ -47,7 +47,7 @@ jobs:
           done
           echo '401f6580028a72361286bd99bee1f0022c74e6c8a65da8acd47448835a1ff360  /tmp/base/experiments/numba_search.py' | sha256sum --check --strict
           python scripts/patch_v14_capture_history.py /tmp/cand/experiments/numba_search.py
-          python -m py_compile /tmp/base/agent.py /tmp/base/experiments/*.py /tmp/cand/agent.py /tmp/cand/experiments/*.py
+          python -m py_compile tools/v14_fixed_node_arena.py /tmp/base/agent.py /tmp/base/experiments/*.py /tmp/cand/agent.py /tmp/cand/experiments/*.py
           cmp /tmp/base/agent.py /tmp/cand/agent.py
           cmp /tmp/base/experiments/numba_core.py /tmp/cand/experiments/numba_core.py
           cmp /tmp/base/experiments/v13_residual.i16 /tmp/cand/experiments/v13_residual.i16
@@ -99,7 +99,6 @@ jobs:
               return time.perf_counter()-t,total_nodes,out
           base=start('/tmp/base');cand=start('/tmp/cand');ratios=[];rows=[]
           try:
-              # JIT warmup
               for p in (base,cand):
                   p.stdin.write(json.dumps({'fen':roots[0],'nodes':300})+'\n');p.stdin.flush();json.loads(p.stdout.readline())
               for rep in range(3):
@@ -121,9 +120,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          /usr/bin/time -f 'ARENA_WALL_SEC=%e MAX_RSS_KB=%M' \
-            python -u .v13/v13_arena.py /tmp/cand /tmp/base 16000 32 2026090801 220 \
-              match/openings/m3-uho-lichess-100-v1.epd 0 \
+          python -u tools/v14_fixed_node_arena.py /tmp/cand /tmp/base \
+            --nodes 16000 --pairs 32 --opening-offset 0 --max-plies 220 \
+            --opening-file match/openings/m3-uho-lichess-100-v1.epd \
+            --json-out capture-history-results/arena.json \
             | tee capture-history-results/arena.log
           grep '^FINAL ' capture-history-results/arena.log
 
