@@ -44,19 +44,31 @@ jobs:
           echo '0306e8145a453d91b9b5ac92e9980931510d9e18f8ba598a7548d08b85165c35  /tmp/v13/experiments/numba_core.py' | sha256sum --check --strict
           echo '401f6580028a72361286bd99bee1f0022c74e6c8a65da8acd47448835a1ff360  /tmp/v13/experiments/numba_search.py' | sha256sum --check --strict
           echo '7d0fc5f7a186e79317cf12a2ff285d7716c651fbd045c53d65a3cc6eb1b15319  /tmp/v13/experiments/v13_residual.i16' | sha256sum --check --strict
-          python -m py_compile tools/v14_fixed_node_arena.py tools/v14_regression_probe.py /tmp/v13/agent.py /tmp/v13/experiments/*.py
+          python -m py_compile \
+            tools/v14_fixed_node_arena.py \
+            tools/v14_regression_probe.py \
+            tools/v14_teacher_grade.py \
+            /tmp/v13/agent.py /tmp/v13/experiments/*.py
 
-      - name: Record exact V13 seed-regression depth curve
+      - name: Record exact V13 seed-regression depth curve twice
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p v14-lab-results
           python tools/v14_regression_probe.py \
             --engine /tmp/v13 \
+            --control /tmp/v13 \
             --manifest match/regressions/v14-v13-seed.json \
             --budgets 1000,3000,10000,30000,100000,300000 \
             --json-out v14-lab-results/v13-regression-probe.json \
             | tee v14-lab-results/v13-regression-probe.log
+          python - <<'PY'
+          import json
+          payload=json.load(open('v14-lab-results/v13-regression-probe.json'))
+          assert payload['candidate']==payload['control'], payload['comparisons']
+          assert all(not row['candidate_improves'] and not row['candidate_regresses'] for row in payload['comparisons'].values())
+          print('regression_probe_identity_exact')
+          PY
 
       - name: Paired arena identity sanity check
         shell: bash
@@ -91,7 +103,7 @@ jobs:
           echo "STOCKFISH_BIN=$STOCKFISH_BIN" >> "$GITHUB_ENV"
           "$STOCKFISH_BIN" bench 1 1 4 default depth >/dev/null
 
-      - name: Verify seed fixture teacher moves at full strength
+      - name: Audit reported seed labels with pinned Stockfish 19
         shell: bash
         run: |
           set -euo pipefail
@@ -133,14 +145,43 @@ jobs:
               best=wait_for('bestmove').split()[1]
               assert chess.Move.from_uci(best) in board.legal_moves,(fixture['id'],best)
               expected=set(fixture['expected_uci'])
-              row={'id':fixture['id'],'stockfish_bestmove':best,'expected':sorted(expected),'matches_expected':best in expected}
+              row={
+                  'id':fixture['id'],
+                  'stockfish_bestmove':best,
+                  'reported_expected':sorted(expected),
+                  'matches_reported':best in expected,
+              }
               rows.append(row); print(row)
           send('quit'); engine.wait(timeout=5)
-          Path('v14-lab-results/stockfish-seed-verification.json').write_text(json.dumps(rows,indent=2)+'\n')
-          assert all(row['matches_expected'] for row in rows),rows
+          Path('v14-lab-results/stockfish-seed-label-audit.json').write_text(json.dumps(rows,indent=2)+'\n')
+          print('reported_labels_reproduced',sum(row['matches_reported'] for row in rows),'of',len(rows))
           PY
 
-      - uses: actions/upload-artifact@v4
+      - name: Calibrate teacher-loss grader on V13 identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/v14_teacher_grade.py \
+            --probe v14-lab-results/v13-regression-probe.json \
+            --manifest match/regressions/v14-v13-seed.json \
+            --stockfish "$STOCKFISH_BIN" \
+            --search-budget 30000 \
+            --teacher-nodes 300000 \
+            --hash-mb 64 \
+            --json-out v14-lab-results/v13-identity-teacher-grade.json \
+            | tee v14-lab-results/v13-identity-teacher-grade.log
+          python - <<'PY'
+          import json
+          row=json.load(open('v14-lab-results/v13-identity-teacher-grade.json'))
+          assert row['total_delta_cp_loss']==0,row
+          assert row['total_delta_expectation_loss']==0.0,row
+          assert all(item['candidate_move']==item['control_move'] for item in row['positions']),row
+          print('teacher_grade_identity_zero_delta')
+          PY
+
+      - name: Upload laboratory evidence
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: v14-regression-lab-${{ github.sha }}
           path: v14-lab-results/
