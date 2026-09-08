@@ -1,9 +1,12 @@
 """Incremental absolute768 student runtime for Python V14 search experiments.
 
-The trained student predicts a White-perspective correction on top of exact V13.  This module keeps
-one quantised piece-square accumulator and provides exact scalar SCReLU inference.  Parent-to-child
-transport deliberately uses scalar loops: the shadow-cost qualification showed that this is the
-fastest Numba shape for the target runtime.
+The trained student predicts a White-perspective correction on top of exact V13. This module keeps
+one quantised piece-square accumulator and provides exact scalar SCReLU inference.
+
+V14 fused transport computes the complete parent->child accumulator in one neuron pass. Ordinary
+moves therefore read/write each accumulator cell once rather than copying the whole vector and then
+walking it again for every feature delta. Empty accumulator slices (used by lean qsearch below qply
+0) return immediately, avoiding all neural move-decoding work on tactical continuation plies.
 """
 from __future__ import annotations
 
@@ -42,20 +45,6 @@ def build_absolute768_accumulator_into(
             out[neuron] += int(feature_weights[feature, neuron])
 
 
-@njit(cache=False, inline="always")
-def _apply_absolute_delta(
-    accumulator: np.ndarray,
-    feature_weights: np.ndarray,
-    signed_piece: int,
-    square: int,
-    sign: int,
-) -> None:
-    feature = absolute768_feature_index(signed_piece, square)
-    hidden = accumulator.shape[0]
-    for neuron in range(hidden):
-        accumulator[neuron] += sign * int(feature_weights[feature, neuron])
-
-
 @njit(cache=False)
 def advance_absolute768_accumulator_into(
     board: np.ndarray,
@@ -66,8 +55,8 @@ def advance_absolute768_accumulator_into(
     feature_weights: np.ndarray,
 ) -> None:
     hidden = parent.shape[0]
-    for neuron in range(hidden):
-        child[neuron] = parent[neuron]
+    if hidden == 0:
+        return
 
     from_square = move_from(move)
     to_square = move_to(move)
@@ -81,11 +70,14 @@ def advance_absolute768_accumulator_into(
         captured_signed = int(board[captured_square])
 
     placed_signed = side * promotion if promotion else moving_signed
-    _apply_absolute_delta(child, feature_weights, moving_signed, from_square, -1)
+    from_feature = absolute768_feature_index(moving_signed, from_square)
+    to_feature = absolute768_feature_index(placed_signed, to_square)
+    captured_feature = -1
     if captured_signed != EMPTY:
-        _apply_absolute_delta(child, feature_weights, captured_signed, captured_square, -1)
-    _apply_absolute_delta(child, feature_weights, placed_signed, to_square, 1)
+        captured_feature = absolute768_feature_index(captured_signed, captured_square)
 
+    rook_from_feature = -1
+    rook_to_feature = -1
     if move & FLAG_CASTLE:
         if to_square == 6:
             rook_from, rook_to = 7, 5
@@ -96,8 +88,21 @@ def advance_absolute768_accumulator_into(
         else:
             rook_from, rook_to = 56, 59
         rook_signed = side * ROOK
-        _apply_absolute_delta(child, feature_weights, rook_signed, rook_from, -1)
-        _apply_absolute_delta(child, feature_weights, rook_signed, rook_to, 1)
+        rook_from_feature = absolute768_feature_index(rook_signed, rook_from)
+        rook_to_feature = absolute768_feature_index(rook_signed, rook_to)
+
+    # One complete pass preserves the exact integer result while avoiding 4-6 separate walks over
+    # the H64 vector. The accumulator's conservative legal-position bound is far below int32 range.
+    for neuron in range(hidden):
+        value = int(parent[neuron])
+        value -= int(feature_weights[from_feature, neuron])
+        if captured_feature >= 0:
+            value -= int(feature_weights[captured_feature, neuron])
+        value += int(feature_weights[to_feature, neuron])
+        if rook_from_feature >= 0:
+            value -= int(feature_weights[rook_from_feature, neuron])
+            value += int(feature_weights[rook_to_feature, neuron])
+        child[neuron] = value
 
 
 @njit(cache=False, inline="always")
