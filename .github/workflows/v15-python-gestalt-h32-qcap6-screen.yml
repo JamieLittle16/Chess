@@ -1,0 +1,112 @@
+name: V15 Python Gestalt H32 over qcap6 screen
+
+on:
+  push:
+    branches: [analysis/v15-python-gestalt-h32-qcap6-gate-20260908]
+    paths: [.github/workflows/v15-python-gestalt-h32-qcap6-screen.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  screen:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Download Gestalt-distilled H32
+        uses: actions/download-artifact@v4
+        with:
+          name: v15-gestalt-student-h32-c3331960a207e4bb10e13252d62be27788d6af5d
+          path: model-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34266694827
+      - name: Materialize qcap6 control and H32 candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit)
+          MODEL=$(find model-artifact -type f -name bucket-h32.npz -print -quit)
+          test -n "$ZIP"; test -n "$MODEL"
+          rm -rf /tmp/base /tmp/cand /tmp/m6 results; mkdir -p /tmp/base /tmp/cand /tmp/m6 results
+          unzip -q "$ZIP" -d /tmp/base
+          python scripts/patch_v15_python_qsearch_cap.py /tmp/base/experiments/numba_search.py 6
+          cp -a /tmp/base/. /tmp/cand/
+          cp "$MODEL" /tmp/cand/experiments/v15_bucket_student.npz
+          python scripts/patch_v15_python_bucket_student_runtime.py /tmp/cand/experiments/numba_search.py 32
+          python -m py_compile tools/v14_agent_runner.py /tmp/base/agent.py /tmp/cand/agent.py /tmp/base/experiments/*.py /tmp/cand/experiments/*.py
+      - name: Build disjoint untouched holdout roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          fixed=fresh[4280:4312]; timed=fresh[4312:4328]
+          assert len(fixed)==32 and len(timed)==16 and not set(fixed)&set(timed)
+          Path('/tmp/h32-fixed.epd').write_text('\n'.join(fixed)+'\n'); Path('/tmp/h32-timed.epd').write_text('\n'.join(timed)+'\n')
+          PY
+      - name: Throughput
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/worker.py <<'PY'
+          import json,sys,chess,numpy as np
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful
+          for line in sys.stdin:
+              q=json.loads(line);b=chess.Board(q['fen']);e=encode_position(b);h=np.empty(0,dtype=np.uint64)
+              o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,int(q['nodes']))
+              print(json.dumps({'nodes':int(o[3])}),flush=True)
+          PY
+          python - <<'PY'
+          import json,os,statistics,subprocess,sys,time
+          from pathlib import Path
+          roots=Path('/tmp/h32-fixed.epd').read_text().splitlines()[:12]
+          def start(d):
+              e=os.environ.copy();e['PYTHONPATH']=d;return subprocess.Popen([sys.executable,'/tmp/worker.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=e)
+          def one(p,f,n):p.stdin.write(json.dumps({'fen':f,'nodes':n})+'\n');p.stdin.flush();return json.loads(p.stdout.readline())
+          def run(p,order):
+              n=0;t=time.perf_counter()
+              for f in order:n+=one(p,f,25000)['nodes']
+              return n/(time.perf_counter()-t)
+          b=start('/tmp/base');c=start('/tmp/cand');rs=[]
+          try:
+              one(b,roots[0],500);one(c,roots[0],500)
+              for r in range(3):
+                  order=roots if r%2==0 else list(reversed(roots))
+                  if r%2==0:bn=run(b,order);cn=run(c,order)
+                  else:cn=run(c,order);bn=run(b,order)
+                  rs.append(cn/bn)
+          finally:b.terminate();c.terminate();b.wait();c.wait()
+          out={'candidate':'qcap6+Gestalt-H32','control':'qcap6+V14-H64','median_nps_ratio':statistics.median(rs),'ratios':rs};Path('results/throughput.json').write_text(json.dumps(out,indent=2)+'\n');print('FINAL',out)
+          PY
+      - name: Equal-node 64-game screen
+        run: python -u tools/v14_fixed_node_arena.py /tmp/cand /tmp/base --nodes 18000 --pairs 32 --opening-file /tmp/h32-fixed.epd --opening-offset 0 --max-plies 220 --json-out results/fixed.json | tee results/fixed.log
+      - name: Timed 32-game screen
+        run: python -u scripts/v15_competition_gate.py --control /tmp/base --candidate /tmp/cand --openings /tmp/h32-timed.epd --output results/timed.json --label 'qcap6+Gestalt-H32 vs qcap6+V14-H64' --base-ms 2500 --inc-ms 50 --max-plies 180 | tee results/timed.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-gestalt-h32-qcap6-screen-${{ github.sha }}
+          path: results/
+          retention-days: 30
