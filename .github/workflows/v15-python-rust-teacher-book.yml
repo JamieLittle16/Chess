@@ -1,0 +1,78 @@
+name: V15 Python Rust-teacher competition book
+
+on:
+  push:
+    branches: [analysis/v15-python-rust-teacher-book-20260908]
+    paths:
+      - crates/chess-search/examples/rust_teacher_candidates.rs
+      - scripts/build_v15_rust_teacher_book.py
+      - match/openings/chessathon-observed-starts-v1.tsv
+      - .github/workflows/v15-python-rust-teacher-book.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-book:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Install book builder runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2
+      - name: Download certified Gestalt network
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/v15-python-teacher results
+          curl --fail --location --retry 5 \
+            'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' \
+            --output .qualification/v15-python-teacher/gestalt-b840.nnue
+          test "$(stat -c%s .qualification/v15-python-teacher/gestalt-b840.nnue)" = '21242944'
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  .qualification/v15-python-teacher/gestalt-b840.nnue' | sha256sum --check --strict
+      - name: Build production Rust teacher oracle
+        run: cargo build --locked --release -p chess-search --example rust_teacher_candidates
+      - name: Teacher smoke and legality check
+        shell: bash
+        env:
+          CHESS_GESTALT_NETWORK: ${{ github.workspace }}/.qualification/v15-python-teacher/gestalt-b840.nnue
+        run: |
+          set -euo pipefail
+          head -n 2 match/openings/chessathon-observed-starts-v1.tsv | tail -n 1 | cut -f3- > /tmp/one.fen
+          target/release/examples/rust_teacher_candidates 2 3 < /tmp/one.fen | tee results/teacher-smoke.tsv
+          python - <<'PY'
+          import chess
+          line=open('results/teacher-smoke.tsv').read().strip();fen,cs=line.split('\t',1);b=chess.Board(fen)
+          assert cs
+          for item in cs.split(','):
+              uci,_=item.rsplit(':',1); assert chess.Move.from_uci(uci) in b.legal_moves,(uci,fen)
+          print('teacher smoke legal')
+          PY
+      - name: Build six-ply observed-pool reply book
+        shell: bash
+        env:
+          CHESS_GESTALT_NETWORK: ${{ github.workspace }}/.qualification/v15-python-teacher/gestalt-b840.nnue
+        run: |
+          set -euo pipefail
+          python -u scripts/build_v15_rust_teacher_book.py \
+            --roots match/openings/chessathon-observed-starts-v1.tsv \
+            --teacher-bin target/release/examples/rust_teacher_candidates \
+            --depth 4 --opponent-width 3 --plies 6 \
+            --output results/rust-teacher-book-v1.json | tee results/book-build.log
+          python - <<'PY'
+          import json
+          p=json.load(open('results/rust-teacher-book-v1.json'))
+          assert p['entries'] and p['roots'] >= 10
+          print('entries',len(p['entries']),'bytes',__import__('os').path.getsize('results/rust-teacher-book-v1.json'))
+          PY
+          sha256sum results/rust-teacher-book-v1.json > results/book.sha256
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-rust-teacher-book-${{ github.sha }}
+          path: results/
+          retention-days: 30
