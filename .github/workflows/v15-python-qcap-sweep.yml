@@ -104,3 +104,5 @@ jobs:
           name: v15-python-qcap-${{ matrix.cap }}-${{ github.sha }}
           path: results/
           retention-days: 30
+
+# Qualification-only matrix; checked qsearch semantics remain unbounded by this local ceiling.
