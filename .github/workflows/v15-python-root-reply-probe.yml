@@ -1,0 +1,134 @@
+name: V15 Python root reply-probe qualification
+
+on:
+  push:
+    branches: [analysis/v15-python-root-reply-probe-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Materialize A/B
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name 'Little-Gambit-V14.zip' -print -quit); test -n "$ZIP"
+          rm -rf /tmp/base /tmp/cand; mkdir -p /tmp/base /tmp/cand results
+          unzip -q "$ZIP" -d /tmp/base; cp -a /tmp/base/. /tmp/cand/
+          python scripts/patch_v15_python_root_reply_probe.py /tmp/cand/experiments/numba_search.py
+          python -m py_compile /tmp/cand/experiments/numba_search.py
+      - name: Build fresh roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6;mkdir /tmp/m6;python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]; chosen=fresh[624:656]
+          assert len(chosen)==32
+          Path('/tmp/reply-32.epd').write_text('\n'.join(chosen)+'\n')
+          PY
+      - name: Prove emergency-result equivalence and measure tiny-budget cost
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/fallback_worker.py <<'PY'
+          import json,sys,time,chess,numpy as np
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful_timed_cached,TT_STORAGE_SIZE,HASH_MOVE_SIZE
+          hk=np.zeros(HASH_MOVE_SIZE,dtype=np.uint64);hm=np.full(HASH_MOVE_SIZE,-1,dtype=np.int32);tt=np.zeros(TT_STORAGE_SIZE,dtype=np.uint64)
+          for line in sys.stdin:
+              q=json.loads(line);b=chess.Board(q['fen']);e=encode_position(b);h=np.empty(0,dtype=np.uint64);t=time.perf_counter()
+              o=iterative_search_stateful_timed_cached(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,1,1,1,hk,hm,tt)
+              print(json.dumps({'out':[int(x) for x in o],'ms':(time.perf_counter()-t)*1000}),flush=True)
+          PY
+          python - <<'PY'
+          import json,os,statistics,subprocess,sys
+          roots=[x.strip() for x in open('/tmp/reply-32.epd') if x.strip()]
+          def start(d):
+              e=os.environ.copy();e['PYTHONPATH']=d;return subprocess.Popen([sys.executable,'/tmp/fallback_worker.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=e)
+          def one(p,fen):p.stdin.write(json.dumps({'fen':fen})+'\n');p.stdin.flush();return json.loads(p.stdout.readline())
+          b=start('/tmp/base');c=start('/tmp/cand');bm=[];cm=[]
+          try:
+              one(b,roots[0]);one(c,roots[0])
+              for fen in roots:
+                  x=one(b,fen);y=one(c,fen)
+                  if x['out']!=y['out']:raise SystemExit(f'emergency output drift {fen} {x} {y}')
+                  bm.append(x['ms']);cm.append(y['ms'])
+          finally:b.terminate();c.terminate();b.wait();c.wait()
+          out={'equivalent_roots':len(roots),'base_median_ms':statistics.median(bm),'candidate_median_ms':statistics.median(cm),'ratio':statistics.median(cm)/statistics.median(bm)}
+          open('results/fallback.json','w').write(json.dumps(out,indent=2)+'\n');print('FINAL',out)
+          PY
+      - name: 64-game competition-clock screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json,math,queue,subprocess,sys,threading,time
+          from pathlib import Path
+          import chess
+          BASE_MS=2500;INC_MS=50;MAX_PLIES=180;GRACE_MS=1200
+          roots=[x.strip() for x in Path('/tmp/reply-32.epd').read_text().splitlines() if x.strip()]
+          class A:
+              def __init__(self,d):
+                  self.p=subprocess.Popen([sys.executable,'tools/v14_agent_runner.py',d],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,bufsize=1);self.q=queue.Queue();threading.Thread(target=self.ro,daemon=True).start();assert json.loads(self.line(95)).get('ready')
+              def ro(self):
+                  for x in self.p.stdout:self.q.put(x.rstrip())
+                  self.q.put(None)
+              def line(self,t):
+                  x=self.q.get(timeout=t)
+                  if x is None:raise RuntimeError('closed')
+                  return x
+              def reset(self):self.p.stdin.write('{"reset":true}\n');self.p.stdin.flush();assert json.loads(self.line(5)).get('reset')
+              def move(self,b,ms):self.p.stdin.write(json.dumps({'fen':b.fen(),'time_left_ms':max(0,int(ms))})+'\n');self.p.stdin.flush();return chess.Move.from_uci(json.loads(self.line((ms+GRACE_MS)/1000))['move'])
+              def stop(self):
+                  if self.p.poll() is None:self.p.kill()
+                  self.p.wait()
+          ba=A('/tmp/base');ca=A('/tmp/cand');rows=[]
+          def play(fen,cw):
+              b=chess.Board(fen);cl={True:float(BASE_MS),False:float(BASE_MS)};ba.reset();ca.reset();ct=[];bt=[]
+              for _ in range(MAX_PLIES):
+                  o=b.outcome(claim_draw=True)
+                  if o:return (0.5 if o.winner is None else float(o.winner==cw)),ct,bt
+                  use=b.turn==cw;e=ca if use else ba;t=time.monotonic();m=e.move(b,cl[b.turn]);dt=(time.monotonic()-t)*1000;cl[b.turn]-=dt
+                  if cl[b.turn]<0:return (0.0 if use else 1.0),ct,bt
+                  (ct if use else bt).append(dt);b.push(m);cl[not b.turn]+=INC_MS
+              return 0.5,ct,bt
+          try:
+              for i,fen in enumerate(roots):
+                  for cw in (True,False):
+                      s,ct,bt=play(fen,cw);rows.append({'i':i,'cw':cw,'score':s,'ct':ct,'bt':bt});print(i,cw,s,flush=True)
+          finally:ba.stop();ca.stop()
+          score=sum(r['score'] for r in rows);f=score/len(rows);elo=400*math.log10(f/(1-f)) if 0<f<1 else None;ct=[x for r in rows for x in r['ct']];bt=[x for r in rows for x in r['bt']]
+          out={'games':len(rows),'score':score,'score_fraction':f,'naive_elo_from_score':elo,'candidate_mean_move_ms':sum(ct)/len(ct),'control_mean_move_ms':sum(bt)/len(bt),'details':rows};Path('results/timed.json').write_text(json.dumps(out,indent=2)+'\n');print('FINAL',json.dumps({k:v for k,v in out.items() if k!='details'}))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-root-reply-probe-${{ github.sha }}
+          path: results/
+          retention-days: 30
