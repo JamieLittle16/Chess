@@ -1,0 +1,272 @@
+name: M6 gestalt AVX2 performance probe
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  avx2-perf:
+    if: github.head_ref == 'm6/gestalt-avx2-perf-v1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Strict unpatched correctness gate and classical build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/bin .qualification/gestalt-avx2
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/bin/classical
+          chmod +x .qualification/bin/classical
+          sha256sum .qualification/bin/classical \
+            | tee .qualification/gestalt-avx2/classical.sha256
+
+      - name: Build scalar mature-evaluator search control
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/apply_gestalt_search_probe.py
+          cargo fmt --all
+          git diff --check
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/bin/gestalt-scalar
+          chmod +x .qualification/bin/gestalt-scalar
+          sha256sum .qualification/bin/gestalt-scalar \
+            | tee .qualification/gestalt-avx2/scalar.sha256
+          git checkout -- crates/chess-search/src/lib.rs crates/chess-search/src/quiescence.rs
+
+      - name: Apply AVX2/fused kernels and mature search integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/apply_gestalt_avx2_probe.py
+          python scripts/apply_gestalt_search_probe.py
+          cargo fmt --all
+          git diff --check
+          git diff -- crates/chess-eval/src/gestalt.rs \
+            > .qualification/gestalt-avx2/avx2-kernels.patch
+          git diff -- crates/chess-search/src/lib.rs crates/chess-search/src/quiescence.rs \
+            > .qualification/gestalt-avx2/search-integration.patch
+          test -s .qualification/gestalt-avx2/avx2-kernels.patch
+          test -s .qualification/gestalt-avx2/search-integration.patch
+          sha256sum scripts/apply_gestalt_avx2_probe.py \
+            > .qualification/gestalt-avx2/avx2-patcher.sha256
+
+      - name: Strict optimized candidate gate and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          cargo build --release -p chess-uci
+          cargo build --release -p chess-eval \
+            --example viri13_oracle --example gestalt_runtime_oracle
+          cp target/release/chess-uci .qualification/bin/gestalt-avx2
+          chmod +x .qualification/bin/gestalt-avx2
+          sha256sum .qualification/bin/gestalt-avx2 \
+            | tee .qualification/gestalt-avx2/avx2.sha256
+
+      - name: Download exact certified CC0 gestalt network
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' \
+            --output .qualification/gestalt-avx2/gestalt-b840.nnue
+          test "$(stat -c%s .qualification/gestalt-avx2/gestalt-b840.nnue)" = '21242944'
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  .qualification/gestalt-avx2/gestalt-b840.nnue' \
+            | sha256sum --check --strict
+
+      - name: Require optimized runtime parity with independent scalar oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > .qualification/gestalt-avx2/oracle-parity.txt
+          FENS=(
+            'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+            '2k5/5p2/8/3N4/6b1/1P6/8/4K3 w - - 0 1'
+            'r3k2r/pppq1ppp/2npbn2/3Np3/4P3/2N1B3/PPP2PPP/R2Q1RK1 b kq - 4 10'
+            '8/2p5/3p4/1P1P4/2K5/8/6k1/8 w - - 0 45'
+            '3r2k1/5pp1/2p4p/1pPp4/1P1P1Q2/6P1/5PKP/8 b - - 2 31'
+          )
+          for fen in "${FENS[@]}"; do
+            scalar="$(target/release/examples/viri13_oracle \
+              .qualification/gestalt-avx2/gestalt-b840.nnue "$fen")"
+            optimized="$(target/release/examples/gestalt_runtime_oracle \
+              .qualification/gestalt-avx2/gestalt-b840.nnue "$fen")"
+            printf '%s | scalar=%s avx2=%s\n' "$fen" "$scalar" "$optimized" \
+              | tee -a .qualification/gestalt-avx2/oracle-parity.txt
+            test "$optimized" = "$scalar"
+          done
+
+      - name: Reproduce certified 5000-root M6 opening suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip' \
+            --output /tmp/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/UHO_Lichess_4852_v1.epd.zip' \
+            | sha256sum --check --strict
+          mkdir -p .qualification/m6-openings
+          python scripts/build_m6_opening_suite.py \
+            --archive /tmp/UHO_Lichess_4852_v1.epd.zip \
+            --output-dir .qualification/m6-openings \
+            | tee .qualification/m6-openings/derivation.log
+          OPENINGS=.qualification/m6-openings/m6-uho-lichess-5000-v1.epd
+          test "$(wc -l < "$OPENINGS")" = '5000'
+          echo '5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e  .qualification/m6-openings/m6-uho-lichess-5000-v1.epd' \
+            | sha256sum --check --strict
+
+      - name: Build pinned Fastchess 1.8.2-alpha
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = 'f618e34540f94f4719ad3817950618dabe441318'
+          make -C .qualification/fastchess-src -j2
+          test -x .qualification/fastchess-src/fastchess
+
+      - name: Create fixed-network launchers
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$PWD"
+          mkdir -p .qualification/launchers
+          cat > .qualification/launchers/scalar.sh <<EOF
+          #!/usr/bin/env bash
+          export CHESS_GESTALT_NETWORK='$ROOT/.qualification/gestalt-avx2/gestalt-b840.nnue'
+          exec '$ROOT/.qualification/bin/gestalt-scalar'
+          EOF
+          cat > .qualification/launchers/avx2.sh <<EOF
+          #!/usr/bin/env bash
+          export CHESS_GESTALT_NETWORK='$ROOT/.qualification/gestalt-avx2/gestalt-b840.nnue'
+          exec '$ROOT/.qualification/bin/gestalt-avx2'
+          EOF
+          cat > .qualification/launchers/classical.sh <<EOF
+          #!/usr/bin/env bash
+          unset CHESS_GESTALT_NETWORK
+          exec '$ROOT/.qualification/bin/classical'
+          EOF
+          chmod +x .qualification/launchers/*.sh
+
+      - name: Measure AVX2 speedup over scalar mature evaluator
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/gestalt-avx2/scalar-v-avx2
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/.qualification/launchers/avx2.sh" name=gestalt-avx2 nodes=25000 option.Hash=32 \
+            -engine cmd="$PWD/.qualification/launchers/scalar.sh" name=gestalt-scalar nodes=25000 option.Hash=32 \
+            -openings file="$PWD/.qualification/m6-openings/m6-uho-lichess-5000-v1.epd" format=epd order=random \
+            -srand 20261129 -rounds 10 -repeat -concurrency 1 -maxmoves 300 \
+            -ratinginterval 20 \
+            -pgnout file=.qualification/gestalt-avx2/scalar-v-avx2/games.pgn notation=uci append=false nodes=true nps=true \
+            | tee .qualification/gestalt-avx2/scalar-v-avx2/fastchess.stdout.log
+          python scripts/analyze_fastchess_node_times.py \
+            .qualification/gestalt-avx2/scalar-v-avx2/games.pgn \
+            --output .qualification/gestalt-avx2/scalar-v-avx2/times.json
+
+      - name: Measure residual AVX2 tax versus classical search
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/gestalt-avx2/avx2-v-classical
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/.qualification/launchers/avx2.sh" name=gestalt-avx2 nodes=25000 option.Hash=32 \
+            -engine cmd="$PWD/.qualification/launchers/classical.sh" name=classical-main nodes=25000 option.Hash=32 \
+            -openings file="$PWD/.qualification/m6-openings/m6-uho-lichess-5000-v1.epd" format=epd order=random \
+            -srand 20261130 -rounds 10 -repeat -concurrency 1 -maxmoves 300 \
+            -ratinginterval 20 \
+            -pgnout file=.qualification/gestalt-avx2/avx2-v-classical/games.pgn notation=uci append=false nodes=true nps=true \
+            | tee .qualification/gestalt-avx2/avx2-v-classical/fastchess.stdout.log
+          python scripts/analyze_fastchess_node_times.py \
+            .qualification/gestalt-avx2/avx2-v-classical/games.pgn \
+            --output .qualification/gestalt-avx2/avx2-v-classical/times.json
+
+      - name: Require material kernel speedup and record summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' | tee .qualification/gestalt-avx2/performance-summary.txt
+          import json
+          from pathlib import Path
+
+          first = json.loads(Path('.qualification/gestalt-avx2/scalar-v-avx2/times.json').read_text())['engines']
+          second = json.loads(Path('.qualification/gestalt-avx2/avx2-v-classical/times.json').read_text())['engines']
+          scalar = first['gestalt-scalar']['mean_seconds']
+          avx_same = first['gestalt-avx2']['mean_seconds']
+          avx = second['gestalt-avx2']['mean_seconds']
+          classical = second['classical-main']['mean_seconds']
+          speedup = scalar / avx_same
+          residual_tax = avx / classical
+          print(f'scalar_mean_seconds={scalar:.9f}')
+          print(f'avx2_mean_seconds_same_match={avx_same:.9f}')
+          print(f'avx2_speedup={speedup:.4f}x')
+          print(f'avx2_mean_seconds_vs_classical={avx:.9f}')
+          print(f'classical_mean_seconds={classical:.9f}')
+          print(f'residual_time_ratio={residual_tax:.4f}x')
+          if speedup < 1.50:
+              raise SystemExit(f'AVX2 speedup too small for the equal-time lane: {speedup:.3f}x')
+          PY
+
+      - name: Record immutable experiment identity
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > .qualification/gestalt-avx2/evidence.txt <<EOF
+          purpose=bit-exact mature-network AVX2/fused-kernel performance qualification
+          production_base=cf8c396061ef2fb8f4af3b7f942cf210483e0722
+          network_sha256=956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6
+          equal_node_strength_prior=49W-43D-8L,+151.35+-54.58 Elo
+          optimized_kernels=AVX2 i16 wrapping feature updates + fused deltas + AVX2 exact SCReLU dot
+          scalar_fallback=retained
+          opening_suite=m6-uho-lichess-5000-v1
+          opening_sha256=5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e
+          nodes_per_move=25000
+          performance_games_per_match=20
+          fastchess_commit=f618e34540f94f4719ad3817950618dabe441318
+          EOF
+          git rev-parse HEAD > .qualification/gestalt-avx2/checkout-head.txt
+
+      - name: Upload complete AVX2 evidence without network bytes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m6-gestalt-avx2-perf-${{ github.sha }}
+          path: |
+            .qualification/gestalt-avx2/classical.sha256
+            .qualification/gestalt-avx2/scalar.sha256
+            .qualification/gestalt-avx2/avx2.sha256
+            .qualification/gestalt-avx2/avx2-patcher.sha256
+            .qualification/gestalt-avx2/avx2-kernels.patch
+            .qualification/gestalt-avx2/search-integration.patch
+            .qualification/gestalt-avx2/oracle-parity.txt
+            .qualification/gestalt-avx2/performance-summary.txt
+            .qualification/gestalt-avx2/evidence.txt
+            .qualification/gestalt-avx2/checkout-head.txt
+            .qualification/gestalt-avx2/scalar-v-avx2/
+            .qualification/gestalt-avx2/avx2-v-classical/
+            .qualification/m6-openings/derivation.log
+          retention-days: 30
