@@ -1,0 +1,137 @@
+name: V14 root-qsearch slider checks B fast
+
+on:
+  push:
+    branches: [analysis/v14-qcheck-root-b-fast-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Reconstruct V13, qcheck A and qcheck B
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum --check --strict
+          rm -rf /tmp/base /tmp/a /tmp/b
+          for DIR in /tmp/base /tmp/a /tmp/b; do
+            mkdir -p "$DIR"; unzip -q /tmp/v13.zip -d "$DIR"
+            patch "$DIR/experiments/numba_search.py" < .analysis/v13_jit_refactor.patch
+            DIR="$DIR" python - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path(os.environ['DIR'])/'experiments/numba_search.py'; s=p.read_text()
+          old='    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          new='    correction = correction // 6\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          assert s.count(old)==1,s.count(old); p.write_text(s.replace(old,new,1))
+          PY
+            python scripts/patch_v13_legality_context.py "$DIR/experiments/numba_core.py"
+            python scripts/patch_v13_qsearch_tactical.py "$DIR/experiments/numba_core.py" "$DIR/experiments/numba_search.py"
+          done
+          echo '401f6580028a72361286bd99bee1f0022c74e6c8a65da8acd47448835a1ff360  /tmp/base/experiments/numba_search.py' | sha256sum --check --strict
+          python scripts/patch_v14_qcheck_root.py /tmp/a/experiments/numba_search.py
+          python scripts/patch_v14_qcheck_root_fast.py /tmp/b/experiments/numba_search.py
+          python -m py_compile /tmp/base/experiments/*.py /tmp/a/experiments/*.py /tmp/b/experiments/*.py
+          mkdir -p results
+
+      - name: Directed Qc5 check and API smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=/tmp/b python - <<'PY'
+          import chess,numpy as np,agent
+          from experiments.numba_core import encode_position,move_to_uci,generate_legal_tactical_moves_into_with_king
+          from experiments.numba_search import EVAL_WIDTH,_build_eval_state_into,_append_root_qsearch_quiet_slider_checks_fast
+          for fen in (chess.STARTING_FEN,'2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23'):
+              b=chess.Board(fen); m=chess.Move.from_uci(agent.get_move(fen,120000)); assert m in b.legal_moves
+          b=chess.Board('2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr1PP1/P5B1/R1Q2RK1 b - - 0 23')
+          e=encode_position(b); pseudo=np.empty(256,dtype=np.int32);moves=np.empty(256,dtype=np.int32);state=np.empty(EVAL_WIDTH,dtype=np.int32);_build_eval_state_into(e.board,state)
+          own=int(state[5]);opp=int(state[4]);before=e.board.copy()
+          count=generate_legal_tactical_moves_into_with_king(e.board,e.side,e.ep_square,pseudo,moves,own)
+          count=_append_root_qsearch_quiet_slider_checks_fast(e.board,e.side,e.castling,e.ep_square,moves,count,own,opp)
+          assert np.array_equal(before,e.board)
+          retained=[move_to_uci(int(moves[i])) for i in range(count)]
+          print('retained',retained); assert 'e7c5' in retained
+          PY
+
+      - name: Throughput B versus V13 and A
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/worker.py <<'PY'
+          import json,sys,chess,numpy as np
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful
+          for line in sys.stdin:
+              q=json.loads(line);b=chess.Board(q['fen']);e=encode_position(b);h=np.empty(0,dtype=np.uint64)
+              o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,int(q['nodes']))
+              print(json.dumps({'move':int(o[0]),'score':int(o[1]),'depth':int(o[2]),'nodes':int(o[3])}),flush=True)
+          PY
+          python - <<'PY'
+          import json,os,statistics,subprocess,sys,time
+          from pathlib import Path
+          roots=[x.strip() for x in open('match/openings/m3-uho-lichess-100-v1.epd') if x.strip() and not x.startswith('#')][:40]
+          def start(path):
+              env=os.environ.copy();env['PYTHONPATH']=path
+              return subprocess.Popen([sys.executable,'/tmp/worker.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=env)
+          def run(p,order):
+              n=0;t=time.perf_counter()
+              for fen in order:
+                  p.stdin.write(json.dumps({'fen':fen,'nodes':30000})+'\n');p.stdin.flush();n+=json.loads(p.stdout.readline())['nodes']
+              return time.perf_counter()-t,n
+          ps={k:start(v) for k,v in {'base':'/tmp/base','a':'/tmp/a','b':'/tmp/b'}.items()}; rows=[]
+          try:
+              for p in ps.values(): p.stdin.write(json.dumps({'fen':roots[0],'nodes':300})+'\n');p.stdin.flush();json.loads(p.stdout.readline())
+              for rep in range(3):
+                  order=roots if rep%2==0 else list(reversed(roots)); rec={}
+                  seq=['base','a','b'] if rep%2==0 else ['b','a','base']
+                  for k in seq: rec[k]=run(ps[k],order)
+                  bn=rec['base'][1]/rec['base'][0];an=rec['a'][1]/rec['a'][0];cn=rec['b'][1]/rec['b'][0]
+                  row={'rep':rep,'b_vs_v13_nps':cn/bn,'b_vs_a_nps':cn/an,'a_vs_v13_nps':an/bn};rows.append(row);print(row)
+          finally:
+              for p in ps.values():p.terminate();p.wait()
+          out={'median_b_vs_v13_nps':statistics.median(x['b_vs_v13_nps'] for x in rows),'median_b_vs_a_nps':statistics.median(x['b_vs_a_nps'] for x in rows),'records':rows}
+          Path('results/throughput.json').write_text(json.dumps(out,indent=2)+'\n');print(out)
+          PY
+
+      - name: Search-quality preservation B versus A
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u tools/v14_fixed_node_arena.py /tmp/b /tmp/a \
+            --nodes 16000 --pairs 32 --opening-offset 48 --max-plies 220 \
+            --opening-file match/openings/m3-uho-lichess-100-v1.epd \
+            --json-out results/b-vs-a.json | tee results/b-vs-a.log
+          grep '^FINAL ' results/b-vs-a.log
+
+      - name: B versus exact V13 fresh screen and regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u tools/v14_fixed_node_arena.py /tmp/b /tmp/base \
+            --nodes 16000 --pairs 24 --opening-offset 0 --max-plies 220 \
+            --opening-file match/openings/m3-uho-lichess-100-v1.epd \
+            --json-out results/b-vs-v13.json | tee results/b-vs-v13.log
+          python tools/v14_regression_probe.py --engine /tmp/b --control /tmp/base \
+            --manifest match/regressions/v14-rated-game-1.json --budgets 30000,300000 \
+            --json-out results/rated-game.json >/dev/null
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v14-qcheck-root-b-fast-${{ github.sha }}
+          path: results/
+          retention-days: 30
