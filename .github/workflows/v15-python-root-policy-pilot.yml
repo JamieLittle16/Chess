@@ -1,0 +1,54 @@
+name: V15 Python root policy pilot
+
+on:
+  push:
+    branches: [analysis/v15-python-bucket-student-runtime-20260908]
+    paths:
+      - scripts/train_v15_root_policy.py
+      - .github/workflows/v15-python-root-policy-pilot.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  train:
+    strategy:
+      fail-fast: false
+      matrix:
+        hidden: [32, 64, 96]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Install training runtime
+        run: |
+          python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2
+          python -m pip install --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Download frozen labelled corpus
+        uses: actions/download-artifact@v4
+        with:
+          name: v14-gen2-teacher-d84d5bfa6135461389637ef70eed409693aa5a34
+          path: teacher-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34218142973
+      - name: Train root policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          TEACHER=$(find teacher-artifact -type f -name teacher.jsonl -print -quit); test -n "$TEACHER"
+          mkdir -p results/h${{ matrix.hidden }}
+          python -u scripts/train_v15_root_policy.py \
+            --teacher "$TEACHER" \
+            --output results/h${{ matrix.hidden }}/root-policy-h${{ matrix.hidden }}.pt \
+            --hidden ${{ matrix.hidden }} --epochs 12 | tee results/h${{ matrix.hidden }}/train.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-root-policy-h${{ matrix.hidden }}-${{ github.sha }}
+          path: results/h${{ matrix.hidden }}/
+          retention-days: 30
