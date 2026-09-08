@@ -1,0 +1,108 @@
+name: V15 Python quiet-only direct qsearch checks
+
+on:
+  push:
+    branches: [analysis/v15-python-quiet-only-direct-qcheck-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  screen:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Materialize control and quiet-only candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name 'Little-Gambit-V14.zip' -print -quit); test -n "$ZIP"
+          rm -rf /tmp/base /tmp/cand; mkdir -p /tmp/base /tmp/cand results
+          unzip -q "$ZIP" -d /tmp/base; cp -a /tmp/base/. /tmp/cand/
+          python scripts/patch_v15_python_quiet_only_direct_qcheck.py /tmp/cand/experiments/numba_search.py
+          python -m py_compile /tmp/cand/experiments/numba_search.py
+          PYTHONPATH=/tmp/cand python - <<'PY'
+          import chess,agent
+          b=chess.Board();m=chess.Move.from_uci(agent.get_move(b.fen(),80000));assert m in b.legal_moves;print(m)
+          PY
+      - name: Build fresh disjoint roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          curl --fail --location --retry 3 -o /tmp/build_m6.py https://raw.githubusercontent.com/JamieLittle16/Chess/91c8f05f6cebb78605f86c4b483d87d906533bcc/scripts/build_m6_opening_suite.py
+          mkdir -p /tmp/m6; python /tmp/build_m6.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old];chosen=fresh[224:256]
+          assert len(chosen)==32 and len(set(chosen))==32
+          Path('/tmp/quiet-only-32.epd').write_text('\n'.join(chosen)+'\n')
+          PY
+          sha256sum /tmp/quiet-only-32.epd | tee results/openings.sha256
+      - name: Throughput
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/worker.py <<'PY'
+          import json,sys,chess,numpy as np
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful
+          for line in sys.stdin:
+              q=json.loads(line);b=chess.Board(q['fen']);e=encode_position(b);h=np.empty(0,dtype=np.uint64)
+              o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,int(q['nodes']))
+              print(json.dumps({'nodes':int(o[3])}),flush=True)
+          PY
+          python - <<'PY'
+          import json,os,statistics,subprocess,sys,time
+          from pathlib import Path
+          roots=[x.strip() for x in Path('/tmp/quiet-only-32.epd').read_text().splitlines() if x.strip()][:16]
+          def start(d):
+              e=os.environ.copy();e['PYTHONPATH']=d
+              return subprocess.Popen([sys.executable,'/tmp/worker.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=e)
+          def run(p,order):
+              n=0;t=time.perf_counter()
+              for fen in order:p.stdin.write(json.dumps({'fen':fen,'nodes':25000})+'\n');p.stdin.flush();n+=json.loads(p.stdout.readline())['nodes']
+              return time.perf_counter()-t,n
+          b=start('/tmp/base');c=start('/tmp/cand');rs=[];rows=[]
+          try:
+              for p in (b,c):p.stdin.write(json.dumps({'fen':roots[0],'nodes':500})+'\n');p.stdin.flush();json.loads(p.stdout.readline())
+              for i in range(3):
+                  order=roots if i%2==0 else list(reversed(roots))
+                  if i%2==0:bt,bn=run(b,order);ct,cn=run(c,order)
+                  else:ct,cn=run(c,order);bt,bn=run(b,order)
+                  r=(cn/ct)/(bn/bt);rs.append(r);rows.append({'rep':i,'base_nps':bn/bt,'candidate_nps':cn/ct,'ratio':r})
+          finally:
+              for p in (b,c):p.terminate();p.wait()
+          out={'median_nps_ratio':statistics.median(rs),'rows':rows};Path('results/throughput.json').write_text(json.dumps(out,indent=2)+'\n');print(out)
+          PY
+      - name: Fresh 64-game equal-node screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u tools/v14_fixed_node_arena.py /tmp/cand /tmp/base --nodes 16000 --pairs 32 --opening-offset 0 --max-plies 220 --opening-file /tmp/quiet-only-32.epd --json-out results/arena.json | tee results/arena.log
+          grep '^FINAL ' results/arena.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-quiet-only-direct-qcheck-${{ github.sha }}
+          path: results/
+          retention-days: 30
