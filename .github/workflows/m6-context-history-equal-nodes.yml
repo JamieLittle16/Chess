@@ -124,6 +124,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p .qualification/context-history
           cat > .qualification/context-history/evidence.txt <<EOF
           purpose=main-plus-one-ply-continuation-history equal-search-work screen
           production_base=0b741a2d7f3977e525bff55819300ed0e2eaddcb
