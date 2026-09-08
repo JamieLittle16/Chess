@@ -1,0 +1,31 @@
+name: V15 materialize certified Gestalt network
+
+on:
+  push:
+    branches:
+      - v15/materialize-gestalt-net
+
+permissions:
+  contents: read
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download and verify certified network
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p v15-net
+          curl --fail --location --retry 5 \
+            'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' \
+            --output v15-net/gestalt-b840.nnue
+          test "$(stat -c%s v15-net/gestalt-b840.nnue)" = '21242944'
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  v15-net/gestalt-b840.nnue' | sha256sum -c -
+      - name: Upload certified network
+        uses: actions/upload-artifact@v4
+        with:
+          name: v15-gestalt-b840
+          path: v15-net/gestalt-b840.nnue
+          compression-level: 0
+          retention-days: 1
