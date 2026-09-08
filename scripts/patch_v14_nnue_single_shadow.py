@@ -88,7 +88,8 @@ def _repetition_piece_index""",
 def _repetition_piece_index""",
         "incremental accumulator update",
     )
-    if source.count("SHADOW_FEATURE_WEIGHTS") != 4:
+    # Definition + root build + incremental update.
+    if source.count("SHADOW_FEATURE_WEIGHTS") != 3:
         raise SystemExit("single-shadow integration structure drifted")
     path.write_text(source)
 
