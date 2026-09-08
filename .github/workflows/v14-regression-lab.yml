@@ -1,0 +1,144 @@
+name: V14 regression laboratory
+
+on:
+  push:
+    branches: [analysis/v14-regression-lab-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lab:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Reconstruct immutable V13 BEST baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum --check --strict
+          rm -rf /tmp/v13
+          mkdir /tmp/v13
+          unzip -q /tmp/v13.zip -d /tmp/v13
+          patch /tmp/v13/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/v13/experiments/numba_search.py'); s=p.read_text()
+          old='    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          new='    correction = correction // 6\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          assert s.count(old)==1,s.count(old)
+          p.write_text(s.replace(old,new,1))
+          PY
+          python scripts/patch_v13_legality_context.py /tmp/v13/experiments/numba_core.py
+          python scripts/patch_v13_qsearch_tactical.py /tmp/v13/experiments/numba_core.py /tmp/v13/experiments/numba_search.py
+          echo 'df346b21be42832a0ae97e7faa15953ab460f0387fb0358961651466557ebde8  /tmp/v13/agent.py' | sha256sum --check --strict
+          echo '0306e8145a453d91b9b5ac92e9980931510d9e18f8ba598a7548d08b85165c35  /tmp/v13/experiments/numba_core.py' | sha256sum --check --strict
+          echo '401f6580028a72361286bd99bee1f0022c74e6c8a65da8acd47448835a1ff360  /tmp/v13/experiments/numba_search.py' | sha256sum --check --strict
+          echo '7d0fc5f7a186e79317cf12a2ff285d7716c651fbd045c53d65a3cc6eb1b15319  /tmp/v13/experiments/v13_residual.i16' | sha256sum --check --strict
+          python -m py_compile tools/v14_fixed_node_arena.py tools/v14_regression_probe.py /tmp/v13/agent.py /tmp/v13/experiments/*.py
+
+      - name: Record exact V13 seed-regression depth curve
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p v14-lab-results
+          python tools/v14_regression_probe.py \
+            --engine /tmp/v13 \
+            --manifest match/regressions/v14-v13-seed.json \
+            --budgets 1000,3000,10000,30000,100000,300000 \
+            --json-out v14-lab-results/v13-regression-probe.json \
+            | tee v14-lab-results/v13-regression-probe.log
+
+      - name: Paired arena identity sanity check
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u tools/v14_fixed_node_arena.py /tmp/v13 /tmp/v13 \
+            --nodes 6000 --pairs 8 --opening-offset 80 --max-plies 180 \
+            --opening-file match/openings/m3-uho-lichess-100-v1.epd \
+            --json-out v14-lab-results/identity-arena.json \
+            | tee v14-lab-results/identity-arena.log
+          python - <<'PY'
+          import json
+          row=json.load(open('v14-lab-results/identity-arena.json'))
+          assert row['games']==16,row
+          assert row['score']==8.0,row
+          assert row['score_fraction']==0.5,row
+          print('identity_arena_exact_50_percent')
+          PY
+
+      - name: Fetch pinned Stockfish 19
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/stockfish
+          curl --fail --location --retry 3 \
+            --output .qualification/stockfish.tar.gz \
+            https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  .qualification/stockfish.tar.gz' | sha256sum --check --strict
+          tar -xzf .qualification/stockfish.tar.gz -C .qualification/stockfish
+          STOCKFISH_BIN=$(find "$PWD/.qualification/stockfish" -type f -name 'stockfish*' -perm -111 -print -quit)
+          test -n "$STOCKFISH_BIN"
+          echo "STOCKFISH_BIN=$STOCKFISH_BIN" >> "$GITHUB_ENV"
+          "$STOCKFISH_BIN" bench 1 1 4 default depth >/dev/null
+
+      - name: Verify seed fixture teacher moves at full strength
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+          import chess
+
+          manifest=json.load(open('match/regressions/v14-v13-seed.json'))
+          engine=subprocess.Popen(
+              [os.environ['STOCKFISH_BIN']],
+              stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,
+          )
+          assert engine.stdin is not None and engine.stdout is not None
+          def send(line): engine.stdin.write(line+'\n'); engine.stdin.flush()
+          def wait_for(prefix):
+              while True:
+                  line=engine.stdout.readline().strip()
+                  if not line: raise RuntimeError('stockfish exited')
+                  if line.startswith(prefix): return line
+          send('uci'); wait_for('uciok')
+          send('setoption name Threads value 1')
+          send('setoption name Hash value 64')
+          send('setoption name UCI_LimitStrength value false')
+          send('isready'); wait_for('readyok')
+          rows=[]
+          for fixture in manifest['fixtures']:
+              board=chess.Board(fixture['fen'])
+              send('ucinewgame'); send('isready'); wait_for('readyok')
+              send('position fen '+fixture['fen'])
+              send('go nodes 300000')
+              best=wait_for('bestmove').split()[1]
+              assert chess.Move.from_uci(best) in board.legal_moves,(fixture['id'],best)
+              expected=set(fixture['expected_uci'])
+              row={'id':fixture['id'],'stockfish_bestmove':best,'expected':sorted(expected),'matches_expected':best in expected}
+              rows.append(row); print(row)
+          send('quit'); engine.wait(timeout=5)
+          Path('v14-lab-results/stockfish-seed-verification.json').write_text(json.dumps(rows,indent=2)+'\n')
+          # These two moves came from the original Stockfish diagnostic; require the pinned SF19
+          # reproduction before treating the fixtures as hard regression labels.
+          assert all(row['matches_expected'] for row in rows),rows
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v14-regression-lab-${{ github.sha }}
+          path: v14-lab-results/
+          retention-days: 30
