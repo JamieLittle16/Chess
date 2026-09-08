@@ -1,0 +1,40 @@
+name: V15 Python opening repertoire
+
+on:
+  push:
+    branches: [analysis/v15-python-bucket-student-runtime-20260908]
+    paths:
+      - scripts/build_v15_repertoire_book.py
+      - .github/workflows/v15-python-opening-book.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2
+      - name: Fetch pinned Stockfish 19
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/sf.tar.gz https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  /tmp/sf.tar.gz' | sha256sum --check --strict
+          mkdir /tmp/sf; tar -xzf /tmp/sf.tar.gz -C /tmp/sf
+          SF=$(find /tmp/sf -type f -name 'stockfish*' -perm -111 -print -quit); test -n "$SF"; echo "SF=$SF" >> "$GITHUB_ENV"
+      - name: Build two-colour repertoire
+        run: |
+          mkdir results
+          python -u scripts/build_v15_repertoire_book.py --stockfish "$SF" --output results/v15_opening_book.json --plies 14 --opponent-width 3 --nodes 25000 | tee results/build.log
+          sha256sum results/v15_opening_book.json | tee results/book.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v15-python-opening-book-${{ github.sha }}
+          path: results/
+          retention-days: 30
