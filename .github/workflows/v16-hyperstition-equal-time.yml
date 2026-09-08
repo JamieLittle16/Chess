@@ -17,7 +17,7 @@ jobs:
       # Gestalt receives the same compiler/ISA flags so CPU code generation is otherwise fair.
       RUSTFLAGS: -C target-cpu=x86-64-v3
       HYPER_URL: https://github.com/cosmobobak/viridithas-networks/releases/download/v92/hyperstition-b400.nnue.zst
-      HYPER_RAW_SHA256: 36bcc6b3354ecb88fb95a341e494558b052223143f38ff6e6387aed99ab193
+      HYPER_RAW_SHA256: 36bcc6b3354ecbdb88fb95a341e494558b052223143f38ff6e6387aed99ab193
       GESTALT_URL: https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue
       GESTALT_SHA256: 956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6
       FASTCHESS_COMMIT: f618e34540f94f4719ad3817950618dabe441318
