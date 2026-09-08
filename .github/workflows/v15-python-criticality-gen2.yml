@@ -1,0 +1,169 @@
+name: V15 Python criticality model gen2
+
+on:
+  push:
+    branches: [analysis/v15-python-criticality-gen2-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  train:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Install exact runtime, modelling tools, and Stockfish
+        run: |
+          python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0 scikit-learn==1.7.2
+          sudo apt-get update -qq
+          sudo apt-get install -y stockfish
+      - uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Build exact V14 and disjoint 384-position corpus
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name 'Little-Gambit-V14.zip' -print -quit); test -n "$ZIP"
+          rm -rf /tmp/v14 /tmp/m6; mkdir -p /tmp/v14 /tmp/m6 results
+          unzip -q "$ZIP" -d /tmp/v14
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          chosen=fresh[944:1328]
+          assert len(chosen)==384 and len(set(chosen))==384
+          Path('/tmp/criticality-384.epd').write_text('\n'.join(chosen)+'\n')
+          PY
+      - name: Label marginal search value and train candidate models
+        shell: bash
+        env:
+          PYTHONPATH: /tmp/v14
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+          import hashlib,json,math
+          from pathlib import Path
+          import chess,chess.engine,numpy as np
+          from sklearn.ensemble import GradientBoostingRegressor,RandomForestRegressor
+          from sklearn.linear_model import Ridge
+          from sklearn.metrics import average_precision_score,roc_auc_score
+          from sklearn.neural_network import MLPRegressor
+          from sklearn.pipeline import make_pipeline
+          from sklearn.preprocessing import StandardScaler
+          from experiments.numba_core import encode_position,move_to_uci
+          from experiments.numba_search import (
+              EVAL_WIDTH,_build_eval_state_into,_evaluate_state,_evaluate_state_classical,
+              _evaluate_state_v13_only,iterative_search_stateful,
+          )
+
+          roots=[x.strip() for x in Path('/tmp/criticality-384.epd').read_text().splitlines() if x.strip()]
+          def search(b,n):
+              e=encode_position(b); h=np.empty(0,dtype=np.uint64)
+              o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,n)
+              return {'move':move_to_uci(int(o[0])),'score':int(o[1]),'depth':int(o[2]),'nodes':int(o[3])}
+          def eval_triplet(b):
+              e=encode_position(b); st=np.empty(EVAL_WIDTH,dtype=np.int32); _build_eval_state_into(e.board,st)
+              c=int(_evaluate_state_classical(e.side,st)); v13=int(_evaluate_state_v13_only(e.side,st)); v14=int(_evaluate_state(e.side,st))
+              return c,v13,v14
+          def features(b,s4,s8):
+              legal=list(b.legal_moves)
+              caps=sum(int(b.is_capture(m)) for m in legal)
+              promos=sum(int(m.promotion is not None) for m in legal)
+              checks=sum(int(b.gives_check(m)) for m in legal)
+              pm=b.piece_map(); own=b.turn; opp=not own
+              counts=[len(b.pieces(pt,chess.WHITE))+len(b.pieces(pt,chess.BLACK)) for pt in (chess.PAWN,chess.KNIGHT,chess.BISHOP,chess.ROOK,chess.QUEEN)]
+              values={chess.PAWN:1,chess.KNIGHT:3,chess.BISHOP:3,chess.ROOK:5,chess.QUEEN:9}
+              balance=sum((1 if p.color==own else -1)*values.get(p.piece_type,0) for p in pm.values())
+              attacked=sum(int(p.color==own and b.is_attacked_by(opp,sq)) for sq,p in pm.items())
+              loose=sum(int(p.color==own and b.is_attacked_by(opp,sq) and not b.is_attacked_by(own,sq)) for sq,p in pm.items())
+              king=b.king(own); king_ring=0
+              if king is not None:
+                  ring=chess.SquareSet(chess.BB_KING_ATTACKS[king])
+                  king_ring=sum(int(b.is_attacked_by(opp,sq)) for sq in ring)
+              classical,v13,v14=eval_triplet(b)
+              return [
+                  len(legal),caps,promos,checks,int(b.is_check()),len(pm),*counts,balance,attacked,loose,king_ring,
+                  b.halfmove_clock,b.fullmove_number,classical/100.0,v13/100.0,v14/100.0,
+                  (v13-classical)/100.0,(v14-v13)/100.0,abs(v14-v13)/100.0,
+                  s4['score']/100.0,s8['score']/100.0,abs(s8['score'])/100.0,(s8['score']-s4['score'])/100.0,
+                  int(s8['move']!=s4['move']),s4['depth'],s8['depth'],s8['depth']-s4['depth'],
+                  math.log1p(max(1,s8['nodes']))-math.log1p(max(1,s4['nodes'])),
+              ]
+
+          sf_path='/usr/games/stockfish' if Path('/usr/games/stockfish').exists() else 'stockfish'
+          sf=chess.engine.SimpleEngine.popen_uci(sf_path); rows=[]
+          try:
+              search(chess.Board(roots[0]),500)
+              for i,fen in enumerate(roots):
+                  b=chess.Board(fen); s4=search(b,4000); s8=search(b,8000); s32=search(b,32000)
+                  m8=chess.Move.from_uci(s8['move']); m32=chess.Move.from_uci(s32['move'])
+                  def sf_score(m):
+                      info=sf.analyse(b,chess.engine.Limit(depth=11),root_moves=[m])
+                      score=info['score'].pov(b.turn).score(mate_score=2000)
+                      return int(max(-2000,min(2000,0 if score is None else score)))
+                  v8=sf_score(m8); v32=v8 if m32==m8 else sf_score(m32)
+                  raw=max(-600,min(600,v32-v8)); gain=max(0,raw)
+                  rows.append({'i':i,'fen':fen,'features':features(b,s4,s8),'gain_cp':gain,'signed_delta_cp':raw,'sf_8k':v8,'sf_32k':v32,'s4':s4,'s8':s8,'s32':s32})
+                  if i%16==0: print('label',i,'gain',gain,'changed',m8!=m32,flush=True)
+          finally: sf.quit()
+
+          X=np.asarray([r['features'] for r in rows],dtype=np.float64); y=np.asarray([r['gain_cp'] for r in rows],dtype=np.float64); ylog=np.log1p(y)
+          buckets=np.asarray([int(hashlib.sha256(r['fen'].encode()).hexdigest()[:8],16)%5 for r in rows])
+          tr=np.where(buckets<=2)[0]; va=np.where(buckets==3)[0]; te=np.where(buckets==4)[0]
+          assert min(len(tr),len(va),len(te))>40
+          critical=(y>=30).astype(np.int32)
+
+          models={
+              'ridge_log': make_pipeline(StandardScaler(),Ridge(alpha=8.0)),
+              'gbr_log': GradientBoostingRegressor(n_estimators=48,max_depth=2,min_samples_leaf=8,learning_rate=0.05,loss='huber',random_state=20260908),
+              'rf_log': RandomForestRegressor(n_estimators=32,max_depth=4,min_samples_leaf=8,max_features=0.75,n_jobs=-1,random_state=20260908),
+              'mlp_log': make_pipeline(StandardScaler(),MLPRegressor(hidden_layer_sizes=(16,),activation='tanh',alpha=0.02,max_iter=1200,random_state=20260908,early_stopping=True,validation_fraction=0.15,n_iter_no_change=40)),
+          }
+          for model in models.values(): model.fit(X[tr],ylog[tr])
+
+          def metrics(signal,idx):
+              truth=y[idx]; crit=critical[idx]; signal=np.asarray(signal,dtype=float)
+              corr=float(np.corrcoef(signal,truth)[0,1]) if np.std(signal)>1e-9 and np.std(truth)>1e-9 else 0.0
+              order=np.argsort(signal); nq=max(1,len(idx)//4); nd=max(1,len(idx)//10)
+              q=order[-nq:]; d=order[-nd:]
+              ap=float(average_precision_score(crit,signal)) if len(np.unique(crit))>1 else 0.0
+              auc=float(roc_auc_score(crit,signal)) if len(np.unique(crit))>1 else 0.5
+              return {'corr':corr,'ap30':ap,'auc30':auc,'top_quartile_mean_cp':float(truth[q].mean()),'top_decile_mean_cp':float(truth[d].mean()),'top_quartile_ge30_fraction':float((truth[q]>=30).mean()),'overall_mean_cp':float(truth.mean())}
+
+          val={name:metrics(np.expm1(model.predict(X[va])),va) for name,model in models.items()}
+          # A deliberately simple current-style baseline using move churn and score volatility only.
+          hand_va=80.0*X[va,-5]+35.0*np.abs(X[va,-6])
+          val['hand']=metrics(hand_va,va)
+          best=max(models,key=lambda n:(val[n]['ap30'],val[n]['top_quartile_mean_cp']))
+          pred=np.expm1(models[best].predict(X[te])); test=metrics(pred,te)
+          hand_te=80.0*X[te,-5]+35.0*np.abs(X[te,-6]); hand_test=metrics(hand_te,te)
+          result={
+              'examples':len(rows),'train':len(tr),'validation':len(va),'test':len(te),
+              'positive_fraction':float((y>0).mean()),'ge30_fraction':float((y>=30).mean()),'ge50_fraction':float((y>=50).mean()),'mean_gain_cp':float(y.mean()),
+              'validation':val,'selected_model':best,'test_selected':test,'test_hand':hand_test,
+              'feature_count':int(X.shape[1]),'feature_names':['legal','captures','promotions','checks','in_check','pieces','pawns','knights','bishops','rooks','queens','material_balance','attacked_own','loose_own','king_ring_attacked','halfmove','fullmove','classical','v13','v14','v13_minus_classical','student_delta','abs_student_delta','score4k','score8k','abs_score8k','score_delta_8k_4k','move_changed_8k_4k','depth4k','depth8k','depth_delta','log_node_growth'],
+              'rows':rows,
+          }
+          Path('results/criticality-gen2.json').write_text(json.dumps(result,indent=2)+'\n')
+          print('FINAL',json.dumps({k:v for k,v in result.items() if k!='rows'},sort_keys=True))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-criticality-gen2-${{ github.sha }}
+          path: results/
+          retention-days: 30
