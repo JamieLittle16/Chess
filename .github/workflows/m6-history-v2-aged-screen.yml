@@ -1,0 +1,160 @@
+name: M6 aged History-v2 equal-nodes screen
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  aged-history:
+    if: github.head_ref == 'm6/history-v2-aged'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      RUSTFLAGS: -C target-cpu=native
+      PRODUCTION_BASE: f6ac75d644b844fabf35195d6054703e68bcc60f
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Strict dormant-substrate gate
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+
+      - name: Build exact production reference
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/bin .qualification/history-aged
+          git worktree add --detach /tmp/chess-reference "$PRODUCTION_BASE"
+          cargo build --release -p chess-uci --manifest-path /tmp/chess-reference/Cargo.toml
+          cp /tmp/chess-reference/target/release/chess-uci .qualification/bin/reference
+          chmod +x .qualification/bin/reference
+
+      - name: Apply aged History-v2 candidate
+        run: |
+          set -euo pipefail
+          python scripts/apply_history_v2_aged_probe.py
+          cargo fmt --all
+          git diff --check
+          git diff -- crates/chess-search/src/lib.rs crates/chess-search/src/root_analysis.rs > .qualification/history-aged/integration.patch
+          test -s .qualification/history-aged/integration.patch
+
+      - name: Strict candidate gate and build
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release --exclude chess-bench
+          cargo test -p chess-bench --release tests::suite_is_deterministic_within_the_same_build
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/bin/history-aged
+          chmod +x .qualification/bin/history-aged
+
+      - name: Download exact certified network
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' \
+            --output .qualification/history-aged/gestalt-b840.nnue
+          test "$(stat -c%s .qualification/history-aged/gestalt-b840.nnue)" = '21242944'
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  .qualification/history-aged/gestalt-b840.nnue' | sha256sum --check --strict
+
+      - name: Reproduce frozen M6 openings
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip' \
+            --output /tmp/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/UHO_Lichess_4852_v1.epd.zip' | sha256sum --check --strict
+          mkdir -p .qualification/m6-openings
+          python scripts/build_m6_opening_suite.py --archive /tmp/UHO_Lichess_4852_v1.epd.zip --output-dir .qualification/m6-openings
+          echo '5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e  .qualification/m6-openings/m6-uho-lichess-5000-v1.epd' | sha256sum --check --strict
+
+      - name: Build pinned Fastchess
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          make -C .qualification/fastchess-src -j2
+
+      - name: Create identical-network launchers
+        run: |
+          set -euo pipefail
+          ROOT="$PWD"
+          mkdir -p .qualification/launchers
+          cat > .qualification/launchers/reference.sh <<EOF
+          #!/usr/bin/env bash
+          export CHESS_GESTALT_NETWORK='$ROOT/.qualification/history-aged/gestalt-b840.nnue'
+          exec '$ROOT/.qualification/bin/reference'
+          EOF
+          cat > .qualification/launchers/candidate.sh <<EOF
+          #!/usr/bin/env bash
+          export CHESS_GESTALT_NETWORK='$ROOT/.qualification/history-aged/gestalt-b840.nnue'
+          exec '$ROOT/.qualification/bin/history-aged'
+          EOF
+          chmod +x .qualification/launchers/*.sh
+
+      - name: Run 100-game paired 25k-node screen
+        run: |
+          set -euo pipefail
+          OUT=.qualification/history-aged/match
+          mkdir -p "$OUT"
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/.qualification/launchers/candidate.sh" name=history-aged nodes=25000 option.Hash=32 \
+            -engine cmd="$PWD/.qualification/launchers/reference.sh" name=production-main nodes=25000 option.Hash=32 \
+            -openings file="$PWD/.qualification/m6-openings/m6-uho-lichess-5000-v1.epd" format=epd order=random \
+            -srand 20260910 -rounds 50 -repeat -concurrency 1 -maxmoves 300 \
+            -ratinginterval 20 \
+            -pgnout file="$OUT/games.pgn" notation=uci append=false nodes=true nps=true \
+            -log file="$OUT/uci.log" level=info engine=true append=false \
+            | tee "$OUT/fastchess.stdout.log"
+          python scripts/analyze_fastchess_node_times.py "$OUT/games.pgn" --output "$OUT/times.json"
+
+      - name: Summarize cost and evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/history-aged
+          git rev-parse HEAD > .qualification/history-aged/checkout-head.txt
+          if test -f .qualification/history-aged/match/times.json; then
+            python - <<'PY' | tee .qualification/history-aged/timing-summary.txt
+          import json
+          from pathlib import Path
+          engines = json.loads(Path('.qualification/history-aged/match/times.json').read_text())['engines']
+          r = engines['production-main']['mean_seconds']
+          c = engines['history-aged']['mean_seconds']
+          print(f'reference_mean_seconds={r:.9f}')
+          print(f'candidate_mean_seconds={c:.9f}')
+          print(f'candidate/reference={c/r:.4f}x')
+          PY
+          fi
+          cat > .qualification/history-aged/evidence.txt <<EOF
+          production_base=$PRODUCTION_BASE
+          policy=once-scored main+1ply continuation history; retain across game moves; age entries by 3/4 at each search
+          nodes_per_move=25000
+          games=100
+          opening_sha256=5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e
+          network_sha256=956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6
+          seed=20260910
+          EOF
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m6-history-aged-${{ github.sha }}
+          path: .qualification/history-aged/
+          retention-days: 30
