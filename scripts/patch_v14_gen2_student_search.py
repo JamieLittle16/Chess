@@ -6,9 +6,8 @@ Two deployment modes are supported:
 * additive: classical + qualified V13 residual/6 + scaled student;
 * replacement: classical + scaled student, skipping V13 residual transport at searched moves.
 
-Both modes use the student at ordinary alpha-beta nodes and at qsearch entry only.  Deeper qsearch
-falls back to the corresponding cheap baseline and transports only the state prefix it needs.  This
-keeps tactical capture chains fast while preserving exact incremental student state in normal search.
+Both modes use the student at ordinary alpha-beta nodes and at qsearch entry only. Deeper qsearch
+falls back to the corresponding cheap baseline and transports only the state prefix it needs.
 """
 from __future__ import annotations
 
@@ -92,17 +91,23 @@ QSEARCH_EVAL_WIDTH = EVAL_CLASSICAL_WIDTH if STUDENT_GEN2_MODE_REPLACEMENT else 
         "eval width",
     )
 
-    source = replace_once(
-        source,
-        """    state[EVAL_RESIDUAL_WHITE] = white_residual
+    old_build = """    state[EVAL_RESIDUAL_WHITE] = white_residual
     state[EVAL_RESIDUAL_BLACK] = black_residual
 
 
 @njit(cache=False, inline="always")
-def _evaluate_state_classical""",
-        """    state[EVAL_RESIDUAL_WHITE] = white_residual
+def _evaluate_state_classical"""
+    if mode == "additive":
+        residual_store = """    state[EVAL_RESIDUAL_WHITE] = white_residual
     state[EVAL_RESIDUAL_BLACK] = black_residual
-    build_absolute768_accumulator_into(
+"""
+    else:
+        residual_store = """    # Replacement mode deliberately makes the legacy residual cells inert. Keeping them
+    # deterministic gives us exact full-refresh/incremental state parity without paying its lookup path.
+    state[EVAL_RESIDUAL_WHITE] = 0
+    state[EVAL_RESIDUAL_BLACK] = 0
+"""
+    new_build = residual_store + """    build_absolute768_accumulator_into(
         board,
         STUDENT_FEATURE_WEIGHTS,
         STUDENT_FEATURE_BIAS,
@@ -111,9 +116,8 @@ def _evaluate_state_classical""",
 
 
 @njit(cache=False, inline="always")
-def _evaluate_state_classical""",
-        "root accumulator build",
-    )
+def _evaluate_state_classical"""
+    source = replace_once(source, old_build, new_build, "root accumulator build")
 
     old_eval = """    correction = correction // 6
     return score + correction
@@ -131,7 +135,7 @@ def _evaluate_state_classical""",
     return score + correction + student_cp
 """
     else:
-        new_eval = """    # The generation-2 replacement student is trained directly against the classical baseline.
+        new_eval = """    # Replacement student is trained directly against the classical baseline.
     student_cp = infer_absolute768_student_cp(
         state[STUDENT_OFFSET:EVAL_WIDTH],
         STUDENT_OUTPUT_WEIGHTS,
@@ -145,12 +149,12 @@ def _evaluate_state_classical""",
     source = replace_once(source, old_eval, new_eval, "student inference")
 
     eval_anchor = new_eval + "\n\n@njit(cache=False, inline=\"never\")\ndef _advance_residual_state_into("
-    v13_helper = new_eval + """
+    v13_helper = new_eval + '''
 
 
 @njit(cache=False, inline="always")
 def _evaluate_state_v13_only(side: int, state: np.ndarray) -> int:
-    """Exact qualified V13 evaluation, ignoring appended student cells."""
+    # Exact qualified V13 evaluation, ignoring appended student cells.
     score = _evaluate_state_classical(side, state)
     if side == WHITE:
         correction = int(state[EVAL_RESIDUAL_WHITE]) - int(state[EVAL_RESIDUAL_BLACK])
@@ -167,7 +171,7 @@ def _evaluate_state_v13_only(side: int, state: np.ndarray) -> int:
 
 
 @njit(cache=False, inline="never")
-def _advance_residual_state_into("""
+def _advance_residual_state_into('''
     source = replace_once(source, eval_anchor, v13_helper, "V13-only evaluator insertion")
 
     source = replace_once(
@@ -176,10 +180,14 @@ def _advance_residual_state_into("""
 
 @njit(cache=False, inline="always")
 def _repetition_piece_index""",
-        """    # Short state slices are used below qsearch entry.  Replacement mode also deliberately
-    # skips the old residual transport on all ordinary searched moves.
-    if parent.shape[0] >= EVAL_V13_WIDTH and STUDENT_GEN2_MODE_REPLACEMENT == 0:
-        _advance_residual_state_into(board, side, move, parent, child)
+        """    # Short state slices are used below qsearch entry. Replacement mode deliberately skips
+    # the legacy residual weight lookups on normal searched moves.
+    if parent.shape[0] >= EVAL_V13_WIDTH:
+        if STUDENT_GEN2_MODE_REPLACEMENT:
+            child[EVAL_RESIDUAL_WHITE] = 0
+            child[EVAL_RESIDUAL_BLACK] = 0
+        else:
+            _advance_residual_state_into(board, side, move, parent, child)
     if parent.shape[0] >= EVAL_WIDTH:
         advance_absolute768_accumulator_into(
             board,
