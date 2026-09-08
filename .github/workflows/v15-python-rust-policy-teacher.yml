@@ -1,0 +1,65 @@
+name: V15 Python Rust policy teacher corpus
+
+on:
+  push:
+    branches: [analysis/v15-python-rust-policy-teacher-20260908]
+    paths:
+      - scripts/generate_rust_v15_policy_teacher.py
+      - .github/workflows/v15-python-rust-policy-teacher.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  label:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Build production Rust V15 UCI
+        run: cargo build --release -p chess-uci
+      - name: Download certified Gestalt network
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' \
+            --output /tmp/gestalt-b840.nnue
+          test "$(stat -c%s /tmp/gestalt-b840.nnue)" = '21242944'
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  /tmp/gestalt-b840.nnue' | sha256sum --check --strict
+      - name: Build pinned 5k UHO corpus
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          mkdir -p /tmp/m6
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          echo '5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e  /tmp/m6/m6-uho-lichess-5000-v1.epd' | sha256sum --check --strict
+      - name: Label shard with Rust V15
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          START=$(( ${{ matrix.shard }} * 1250 ))
+          python -u scripts/generate_rust_v15_policy_teacher.py \
+            --engine target/release/chess-uci \
+            --network /tmp/gestalt-b840.nnue \
+            --epd /tmp/m6/m6-uho-lichess-5000-v1.epd \
+            --output results/teacher-shard-${{ matrix.shard }}.jsonl \
+            --nodes 15000 --start "$START" --count 1250 \
+            | tee results/teacher-shard-${{ matrix.shard }}.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-rust-policy-teacher-shard-${{ matrix.shard }}-${{ github.sha }}
+          path: results/
+          retention-days: 30
