@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Integrate a quantised H64 absolute768 residual student into exact V13 search.
+"""Integrate H64 absolute768 residual student with an incrementally cached output sum.
 
-The student is additive: scale 0 is exactly V13, and positive scales add a White-perspective neural
-correction on top of current V13.  One incremental accumulator is appended to the existing eval state.
+The student is exactly the qualified 1/12 model. One H64 accumulator plus one raw SCReLU/output
+sum is appended to V13 state. The raw sum is updated in the same neuron pass as the accumulator, so
+later neural evaluation is O(1) scaling rather than another H64 walk.
 """
 from __future__ import annotations
 
@@ -28,9 +29,10 @@ def patch(path: Path, numerator: int, denominator: int) -> None:
         """from numba import njit
 
 from experiments.v14_student_single_runtime import (
-    advance_absolute768_accumulator_into,
+    advance_absolute768_accumulator_and_raw_into,
     build_absolute768_accumulator_into,
-    infer_absolute768_student_cp,
+    raw_absolute768_student_cp,
+    raw_screlu_output_sum,
     trunc_div_scalar,
 )
 """,
@@ -72,7 +74,9 @@ EVAL_RESIDUAL_BLACK = 7
 EVAL_V13_WIDTH = 8
 STUDENT_OFFSET = EVAL_V13_WIDTH
 STUDENT_HIDDEN = 64
-EVAL_WIDTH = EVAL_V13_WIDTH + STUDENT_HIDDEN
+STUDENT_ACC_END = STUDENT_OFFSET + STUDENT_HIDDEN
+STUDENT_RAW = STUDENT_ACC_END
+EVAL_WIDTH = STUDENT_RAW + 1
 """,
         "eval width",
     )
@@ -91,7 +95,11 @@ def _evaluate_state_classical""",
         board,
         STUDENT_FEATURE_WEIGHTS,
         STUDENT_FEATURE_BIAS,
-        state[STUDENT_OFFSET:EVAL_WIDTH],
+        state[STUDENT_OFFSET:STUDENT_ACC_END],
+    )
+    state[STUDENT_RAW] = raw_screlu_output_sum(
+        state[STUDENT_OFFSET:STUDENT_ACC_END],
+        STUDENT_OUTPUT_WEIGHTS,
     )
 
 
@@ -106,9 +114,8 @@ def _evaluate_state_classical""",
     return score + correction
 """,
         """    correction = correction // 6
-    student_cp = infer_absolute768_student_cp(
-        state[STUDENT_OFFSET:EVAL_WIDTH],
-        STUDENT_OUTPUT_WEIGHTS,
+    student_cp = raw_absolute768_student_cp(
+        int(state[STUDENT_RAW]),
         STUDENT_OUTPUT_BIAS,
     )
     if side != WHITE:
@@ -126,25 +133,28 @@ def _evaluate_state_classical""",
 @njit(cache=False, inline="always")
 def _repetition_piece_index""",
         """    _advance_residual_state_into(board, side, move, parent, child)
-    advance_absolute768_accumulator_into(
-        board,
-        side,
-        move,
-        parent[STUDENT_OFFSET:EVAL_WIDTH],
-        child[STUDENT_OFFSET:EVAL_WIDTH],
-        STUDENT_FEATURE_WEIGHTS,
-    )
+    if parent.shape[0] >= EVAL_WIDTH:
+        child[STUDENT_RAW] = advance_absolute768_accumulator_and_raw_into(
+            board,
+            side,
+            move,
+            parent[STUDENT_OFFSET:STUDENT_ACC_END],
+            child[STUDENT_OFFSET:STUDENT_ACC_END],
+            STUDENT_FEATURE_WEIGHTS,
+            STUDENT_OUTPUT_WEIGHTS,
+            int(parent[STUDENT_RAW]),
+        )
 
 @njit(cache=False, inline="always")
 def _repetition_piece_index""",
-        "incremental accumulator update",
+        "incremental accumulator/raw update",
     )
 
     for marker in (
-        "STUDENT_FEATURE_WEIGHTS",
-        "STUDENT_SCALE_NUM",
-        "infer_absolute768_student_cp",
-        "advance_absolute768_accumulator_into",
+        "STUDENT_RAW",
+        "raw_absolute768_student_cp",
+        "advance_absolute768_accumulator_and_raw_into",
+        "raw_screlu_output_sum",
     ):
         if marker not in source:
             raise SystemExit(f"missing marker after patch: {marker}")
