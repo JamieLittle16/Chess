@@ -547,7 +547,6 @@ impl Searcher {
             let protected_killer = killers.contains(&Some(mv));
             let prepared = self.prepare_leaf_move(position, mv);
             let undo = position.make_move(mv);
-            self.apply_leaf_move(position, prepared);
             let gives_check = position.is_in_check(position.side_to_move());
             if let Some(static_eval) = pruning_static_eval
                 && should_prune_late_quiet_futility(
@@ -563,11 +562,14 @@ impl Searcher {
                     beta,
                 )
             {
+                // The learned accumulator is derived state and has not been advanced yet. A move
+                // rejected by late-quiet futility never enters child search, so avoid touching both
+                // 1,536-lane perspective accumulators only to restore them immediately afterwards.
                 position.unmake_move(mv, undo);
-                self.restore_leaf_move(position, prepared);
                 move_index = move_index.saturating_add(1);
                 continue;
             }
+            self.apply_leaf_move(position, prepared);
             let child = if first_move {
                 self.negamax(
                     position,
