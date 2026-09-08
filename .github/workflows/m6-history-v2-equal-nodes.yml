@@ -180,6 +180,7 @@ jobs:
         run: |
           set -euo pipefail
           DIR=.qualification/history-v2/${{ matrix.variant }}
+          mkdir -p "$DIR"
           git rev-parse HEAD > "$DIR/checkout-head.txt"
           cat > "$DIR/evidence.txt" <<EOF
           purpose=Search-v2 main+continuation history with once-scored quiet ordering
