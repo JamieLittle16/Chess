@@ -1,4 +1,4 @@
-name: Round 62 V13 BEST Stockfish postmortem
+name: Round 62 V13 BEST critical lines
 
 on:
   push:
@@ -23,57 +23,38 @@ jobs:
           python -m pip install chess==1.11.2
           sudo apt-get update -qq
           sudo apt-get install -y stockfish
-      - name: Analyse exact Round 62 PGN
-        shell: bash
+      - name: Analyse critical positions
         run: |
-          set -euo pipefail
-          mkdir -p analysis-results/round62
-          cat > /tmp/game.pgn <<'PGN'
-          [Event "AI Chessathon Rated"]
-          [Site "aichessathon.com"]
-          [Date "2026.09.08"]
-          [Round "62"]
-          [White "TriggerFish"]
-          [Black "Little Gambit"]
-          [Result "1-0"]
-          [FEN "r1bq1rk1/pp1pppbp/2n2np1/2p5/2PP4/2N2NP1/PP2PPBP/R1BQ1RK1 b - - 0 7"]
-          [SetUp "1"]
-          [Termination "checkmate"]
-
-          7... cxd4 8. Nxd4 Nxd4 9. Qxd4 d6 10. Qh4 Rb8 11. Bh6 Bxh6 12. Qxh6 e5 13. e4 a5 14. Rad1 Qe7 15. b3 Rd8 16. h3 Be6 17. f4 exf4 18. Rxf4 Nh5 19. Rf3 b6 20. g4 Ng7 21. Rf2 Qd7 22. Rc1 f5 23. exf5 gxf5 24. Ne4 fxe4 25. Bxe4 Nh5 26. Qxh5 Qg7 27. Rf6 Qxf6 28. Qxh7+ Kf8 29. Rf1 Qxf1+ 30. Kxf1 Bg8 31. Qh6+ Ke8 32. Bc6+ Ke7 33. Qg7+ Bf7 34. g5 Rdc8 35. Qf6+ Kf8 36. g6 Rc7 37. Bd5 Rbb7 38. g7+ Ke8 39. Bxf7+ Rxf7 40. g8=Q+ Rf8 41. Qgxf8+ Kd7 42. Q6xd6# 1-0
-          PGN
-          python - <<'PY' | tee analysis-results/round62/postmortem.txt
-          import chess, chess.pgn, chess.engine, json
-          from pathlib import Path
-          game=chess.pgn.read_game(open('/tmp/game.pgn'))
-          engine=chess.engine.SimpleEngine.popen_uci('/usr/games/stockfish')
-          board=game.board()
-          rows=[]
-          for ply, move in enumerate(game.mainline_moves(), start=1):
-              if board.turn == chess.BLACK:
-                  san=board.san(move)
-                  fen=board.fen()
-                  best=engine.analyse(board, chess.engine.Limit(nodes=250000))
-                  best_move=best['pv'][0]
-                  best_san=board.san(best_move)
-                  best_score=best['score'].pov(chess.BLACK).score(mate_score=100000)
-                  played=engine.analyse(board, chess.engine.Limit(nodes=250000), root_moves=[move])
-                  played_score=played['score'].pov(chess.BLACK).score(mate_score=100000)
-                  loss=(best_score-played_score) if best_score is not None and played_score is not None else None
-                  rows.append({'fullmove':board.fullmove_number,'played':san,'best':best_san,'best_cp':best_score,'played_cp':played_score,'loss_cp':loss,'fen':fen})
-              board.push(move)
-          engine.quit()
-          print('fullmove\tplayed\tbest\tbest_cp\tplayed_cp\tloss_cp')
-          for r in rows:
-              print(f"{r['fullmove']}\t{r['played']}\t{r['best']}\t{r['best_cp']}\t{r['played_cp']}\t{r['loss_cp']}")
-          print('\nTOP LOSSES')
-          for r in sorted(rows,key=lambda r:r['loss_cp'] if r['loss_cp'] is not None else -1,reverse=True)[:12]:
-              print(json.dumps(r))
-          Path('analysis-results/round62/postmortem.json').write_text(json.dumps(rows,indent=2))
+          mkdir -p analysis-results/round62-critical
+          python - <<'PY' | tee analysis-results/round62-critical/lines.txt
+          import chess, chess.engine
+          e=chess.engine.SimpleEngine.popen_uci('/usr/games/stockfish')
+          tests=[
+            ('before 21...Qd7','1r1r2k1/4qpnp/1p1pb1pQ/p7/2P1P1P1/1PN4P/P4RB1/3R2K1 b - - 2 21','d8d7'),
+            ('before 22...f5','1r1r2k1/3q1pnp/1p1pb1pQ/p7/2P1P1P1/1PN4P/P4RB1/2R3K1 b - - 4 22','f7f5'),
+          ]
+          for name,fen,played_uci in tests:
+              b=chess.Board(fen)
+              print('\n===',name,'===')
+              infos=e.analyse(b,chess.engine.Limit(nodes=1000000),multipv=3)
+              for i,info in enumerate(infos,1):
+                  pv=info['pv'][:10]
+                  sans=[]; bb=b.copy()
+                  for m in pv:
+                      sans.append(bb.san(m)); bb.push(m)
+                  sc=info['score'].pov(chess.BLACK).score(mate_score=100000)
+                  print('TOP',i,'score_black',sc,'PV',' '.join(sans))
+              pm=chess.Move.from_uci(played_uci)
+              info=e.analyse(b,chess.engine.Limit(nodes=1000000),root_moves=[pm])
+              pv=info['pv'][:10]; sans=[]; bb=b.copy()
+              for m in pv:
+                  sans.append(bb.san(m)); bb.push(m)
+              sc=info['score'].pov(chess.BLACK).score(mate_score=100000)
+              print('PLAYED',b.san(pm),'score_black',sc,'PV',' '.join(sans))
+          e.quit()
           PY
-      - name: Upload postmortem
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: round62-v13best-stockfish-postmortem
-          path: analysis-results/round62
+          name: round62-v13best-critical-lines
+          path: analysis-results/round62-critical
           retention-days: 7
