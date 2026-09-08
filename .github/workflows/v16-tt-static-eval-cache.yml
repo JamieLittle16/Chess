@@ -1,0 +1,187 @@
+name: V16 TT static-eval cache
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    if: github.head_ref == 'v16/tt-static-eval-cache'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      RUSTFLAGS: -C target-cpu=native
+      GESTALT_URL: https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue
+      GESTALT_SHA256: 956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Strict V15 control gate and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/tt-static-eval/bin
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          cargo build --release -p chess-uci -p chess-bench
+          cp target/release/chess-uci .qualification/tt-static-eval/bin/reference-uci
+          cp target/release/chess-bench .qualification/tt-static-eval/bin/reference-bench
+          chmod +x .qualification/tt-static-eval/bin/reference-*
+
+      - name: Download exact production Gestalt network
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 "$GESTALT_URL" \
+            --output .qualification/tt-static-eval/gestalt-b840.nnue
+          test "$(stat -c%s .qualification/tt-static-eval/gestalt-b840.nnue)" = '21242944'
+          echo "$GESTALT_SHA256  .qualification/tt-static-eval/gestalt-b840.nnue" \
+            | sha256sum --check --strict
+
+      - name: Capture unpatched deterministic Gestalt search signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          CHESS_GESTALT_NETWORK="$PWD/.qualification/tt-static-eval/gestalt-b840.nnue" \
+            .qualification/tt-static-eval/bin/reference-bench \
+            | tee .qualification/tt-static-eval/reference-bench.txt
+
+      - name: Apply auditable TT static-eval cache patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/apply_tt_static_eval_cache_probe.py
+          cargo fmt --all
+          git diff --check
+          git diff -- crates/chess-search/src/lib.rs \
+            > .qualification/tt-static-eval/candidate.patch
+          test -s .qualification/tt-static-eval/candidate.patch
+          sha256sum scripts/apply_tt_static_eval_cache_probe.py \
+            > .qualification/tt-static-eval/patcher.sha256
+          sha256sum .qualification/tt-static-eval/candidate.patch \
+            > .qualification/tt-static-eval/candidate-patch.sha256
+
+      - name: Strict candidate gate and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          cargo build --release -p chess-uci -p chess-bench
+          cp target/release/chess-uci .qualification/tt-static-eval/bin/candidate-uci
+          cp target/release/chess-bench .qualification/tt-static-eval/bin/candidate-bench
+          chmod +x .qualification/tt-static-eval/bin/candidate-*
+
+      - name: Require exact search identity under production Gestalt
+        shell: bash
+        run: |
+          set -euo pipefail
+          CHESS_GESTALT_NETWORK="$PWD/.qualification/tt-static-eval/gestalt-b840.nnue" \
+            .qualification/tt-static-eval/bin/candidate-bench \
+            | tee .qualification/tt-static-eval/candidate-bench.txt
+          diff -u \
+            .qualification/tt-static-eval/reference-bench.txt \
+            .qualification/tt-static-eval/candidate-bench.txt \
+            | tee .qualification/tt-static-eval/search-identity.diff
+          test ! -s .qualification/tt-static-eval/search-identity.diff
+
+      - name: Fixed-node timing reference candidate reference candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          export CHESS_GESTALT_NETWORK="$PWD/.qualification/tt-static-eval/gestalt-b840.nnue"
+          python scripts/benchmark_uci_fixed_nodes.py \
+            .qualification/tt-static-eval/bin/reference-uci --nodes 250000 --repeats 3 \
+            | tee .qualification/tt-static-eval/reference-timing-a.txt
+          python scripts/benchmark_uci_fixed_nodes.py \
+            .qualification/tt-static-eval/bin/candidate-uci --nodes 250000 --repeats 3 \
+            | tee .qualification/tt-static-eval/candidate-timing-a.txt
+          python scripts/benchmark_uci_fixed_nodes.py \
+            .qualification/tt-static-eval/bin/reference-uci --nodes 250000 --repeats 3 \
+            | tee .qualification/tt-static-eval/reference-timing-b.txt
+          python scripts/benchmark_uci_fixed_nodes.py \
+            .qualification/tt-static-eval/bin/candidate-uci --nodes 250000 --repeats 3 \
+            | tee .qualification/tt-static-eval/candidate-timing-b.txt
+
+      - name: Summarize paired timing signal
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' | tee .qualification/tt-static-eval/timing-summary.txt
+          from pathlib import Path
+          import re
+
+          root = Path('.qualification/tt-static-eval')
+          files = {
+              'reference_a': root/'reference-timing-a.txt',
+              'candidate_a': root/'candidate-timing-a.txt',
+              'reference_b': root/'reference-timing-b.txt',
+              'candidate_b': root/'candidate-timing-b.txt',
+          }
+          values = {}
+          for name, path in files.items():
+              text = path.read_text()
+              match = re.search(r'summary .* total_ms=([0-9.]+).* effective_nps=([0-9.]+)', text)
+              if not match:
+                  raise SystemExit(f'missing summary in {path}')
+              values[name] = (float(match.group(1)), float(match.group(2)))
+          ref_ms = (values['reference_a'][0] + values['reference_b'][0]) / 2.0
+          cand_ms = (values['candidate_a'][0] + values['candidate_b'][0]) / 2.0
+          speedup = ref_ms / cand_ms - 1.0
+          print(f'reference_mean_ms={ref_ms:.3f}')
+          print(f'candidate_mean_ms={cand_ms:.3f}')
+          print(f'wall_clock_speedup_pct={speedup*100.0:.3f}')
+          print('search_identity=exact')
+          PY
+
+      - name: Record experiment identity
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/tt-static-eval
+          cat > .qualification/tt-static-eval/evidence.txt <<EOF
+          purpose=semantics-preserving TT static-evaluation reuse performance probe
+          checkout_head=$(git rev-parse HEAD)
+          production_base=8e53d63a766122f70992942eccaac22be9e5fca3
+          evaluator=production Gestalt v85
+          evaluator_sha256=$GESTALT_SHA256
+          fixed_nodes_per_search=250000
+          positions=5
+          repeats_per_pass=3
+          timing_order=reference,candidate,reference,candidate
+          required_search_identity=exact chess-bench output
+          required_tt_entry_bytes=32
+          EOF
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v16-tt-static-eval-${{ github.sha }}
+          path: |
+            .qualification/tt-static-eval/reference-bench.txt
+            .qualification/tt-static-eval/candidate-bench.txt
+            .qualification/tt-static-eval/search-identity.diff
+            .qualification/tt-static-eval/candidate.patch
+            .qualification/tt-static-eval/candidate-patch.sha256
+            .qualification/tt-static-eval/patcher.sha256
+            .qualification/tt-static-eval/reference-timing-a.txt
+            .qualification/tt-static-eval/candidate-timing-a.txt
+            .qualification/tt-static-eval/reference-timing-b.txt
+            .qualification/tt-static-eval/candidate-timing-b.txt
+            .qualification/tt-static-eval/timing-summary.txt
+            .qualification/tt-static-eval/evidence.txt
+          retention-days: 30
