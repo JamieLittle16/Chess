@@ -1,0 +1,52 @@
+name: V15 Python factorized Rust V15 root policy
+
+on:
+  push:
+    branches: [analysis/v15-python-factorized-rust-policy-20260908]
+    paths:
+      - scripts/train_v15_rust_policy_factorized.py
+      - scripts/export_v15_factorized_policy_npz.py
+      - .github/workflows/v15-python-factorized-rust-policy.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  train:
+    strategy:
+      fail-fast: false
+      matrix:
+        hidden: [32, 48, 64]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: |
+          python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2
+          python -m pip install --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Download Rust-V15 teacher label shards
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rust-v15-policy-labels-*-bae844a67f0ffa899ab893cf5b41f5f7e4896d32
+          path: labels
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34265888488
+      - name: Train and export
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          cat labels/labels-*.jsonl > results/teacher.jsonl
+          python -u scripts/train_v15_rust_policy_factorized.py --teacher results/teacher.jsonl --output results/factorized-h${{ matrix.hidden }}.pt --hidden ${{ matrix.hidden }} --epochs 10 | tee results/train.log
+          python scripts/export_v15_factorized_policy_npz.py results/factorized-h${{ matrix.hidden }}.pt results/factorized-h${{ matrix.hidden }}.npz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v15-factorized-rust-policy-h${{ matrix.hidden }}-${{ github.sha }}
+          path: results/
+          retention-days: 30
