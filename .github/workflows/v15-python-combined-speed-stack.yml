@@ -1,0 +1,135 @@
+name: V15 Python combined exact-speed stack
+
+on:
+  push:
+    branches:
+      - analysis/v15-python-combined-speed-stack-20260909
+    paths:
+      - scripts/patch_v15_python_inline_fused_h64.py
+      - scripts/patch_v15_python_scoremeta_hotloop.py
+      - .github/workflows/v15-python-combined-speed-stack.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Materialize presort control and full exact-speed candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
+          rm -rf /tmp/base /tmp/cand results; mkdir -p /tmp/base /tmp/cand results
+          unzip -q "$ZIP" -d /tmp/base; cp -a /tmp/base/. /tmp/cand/
+
+          # Current trusted baseline.
+          python scripts/patch_v15_python_presort_once.py /tmp/base/experiments/numba_search.py
+
+          # Candidate: every independently exact throughput winner.
+          python scripts/patch_v15_python_presort_once.py /tmp/cand/experiments/numba_search.py
+          python scripts/patch_v15_python_fused_h64_direct.py /tmp/cand/experiments/v14_student_single_runtime.py
+          python scripts/patch_v15_python_inline_fused_h64.py /tmp/cand/experiments/v14_student_single_runtime.py
+          python scripts/patch_v15_python_fused_h64_zero_guard.py /tmp/cand/experiments/v14_student_single_runtime.py
+          # Lazy first: scoremeta's normal-loop anchor remains intact after the lazy transport rewrite.
+          python scripts/patch_v15_python_lazy_h64_chain.py /tmp/cand/experiments/numba_search.py
+          python scripts/patch_v15_python_scoremeta_hotloop.py /tmp/cand/experiments/numba_search.py
+
+          python -m py_compile tools/v14_agent_runner.py /tmp/base/agent.py /tmp/cand/agent.py /tmp/base/experiments/*.py /tmp/cand/experiments/*.py
+          diff -u /tmp/base/experiments/numba_search.py /tmp/cand/experiments/numba_search.py > results/search.patch || true
+          diff -u /tmp/base/experiments/v14_student_single_runtime.py /tmp/cand/experiments/v14_student_single_runtime.py > results/h64.patch || true
+          test -s results/search.patch; test -s results/h64.patch
+          PYTHONPATH=/tmp/cand python - <<'PY'
+          import chess,numpy as np
+          from experiments.numba_core import encode_position,move_to_uci
+          from experiments.numba_search import iterative_search_stateful
+          for fen in [chess.STARTING_FEN,'r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1']:
+              b=chess.Board(fen);e=encode_position(b);h=np.empty(0,dtype=np.uint64)
+              o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,10000)
+              m=chess.Move.from_uci(move_to_uci(int(o[0])));assert m in b.legal_moves,(fen,o,m)
+              print(fen,tuple(int(x) for x in o),m)
+          PY
+      - name: Build fresh qualification suites
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6; mkdir /tmp/m6
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          parity=fresh[3000:3032]; timed=fresh[3040:3072]
+          assert len(parity)==32 and len(timed)==32 and not set(parity)&set(timed)
+          Path('/tmp/combined-parity.epd').write_text('\n'.join(parity)+'\n')
+          Path('/tmp/combined-timed.epd').write_text('\n'.join(timed)+'\n')
+          PY
+      - name: Exact fixed-node parity
+        run: python -u tools/v14_fixed_node_arena.py /tmp/cand /tmp/base --nodes 26000 --pairs 32 --opening-file /tmp/combined-parity.epd --opening-offset 0 --max-plies 220 --json-out results/equal-node.json | tee results/equal-node.log
+      - name: Five-repetition throughput
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/w.py <<'PY'
+          import json,sys,chess,numpy as np
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful
+          for line in sys.stdin:
+              q=json.loads(line);b=chess.Board(q['fen']);e=encode_position(b);h=np.empty(0,dtype=np.uint64)
+              o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,int(q['nodes']))
+              print(json.dumps({'move':int(o[0]),'score':int(o[1]),'depth':int(o[2]),'nodes':int(o[3])}),flush=True)
+          PY
+          python - <<'PY'
+          import json,os,statistics,subprocess,sys,time
+          from pathlib import Path
+          roots=Path('/tmp/combined-parity.epd').read_text().splitlines()[:20]
+          def start(d):
+              e=os.environ.copy();e['PYTHONPATH']=d
+              return subprocess.Popen([sys.executable,'/tmp/w.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=e)
+          def one(p,f,n):
+              p.stdin.write(json.dumps({'fen':f,'nodes':n})+'\n');p.stdin.flush();return json.loads(p.stdout.readline())
+          b=start('/tmp/base');c=start('/tmp/cand');rat=[];rows=[]
+          try:
+              one(b,roots[0],500);one(c,roots[0],500)
+              for r in range(5):
+                  order=roots if r%2==0 else list(reversed(roots))
+                  def timed(p):
+                      nodes=0;t=time.perf_counter()
+                      for f in order:nodes+=one(p,f,35000)['nodes']
+                      return nodes/(time.perf_counter()-t)
+                  if r%2==0:bn=timed(b);cn=timed(c)
+                  else:cn=timed(c);bn=timed(b)
+                  rat.append(cn/bn);rows.append({'rep':r,'base_nps':bn,'candidate_nps':cn,'ratio':cn/bn})
+          finally:
+              b.terminate();c.terminate();b.wait();c.wait()
+          out={'median_nps_ratio':statistics.median(rat),'rows':rows}
+          Path('results/throughput.json').write_text(json.dumps(out,indent=2)+'\n');print('FINAL',out)
+          PY
+      - name: 64-game competition-clock confirmation
+        run: python -u scripts/v15_competition_gate.py --candidate /tmp/cand --control /tmp/base --openings /tmp/combined-timed.epd --output results/timed-64.json --label combined-exact-speed-v15 --base-ms 2500 --inc-ms 50 --max-plies 180 | tee results/timed-64.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-combined-speed-${{ github.sha }}
+          path: results/
+          retention-days: 30
