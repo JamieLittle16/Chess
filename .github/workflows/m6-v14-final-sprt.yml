@@ -1,0 +1,180 @@
+name: M6 v14 final Search-v2 SPRT
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  v14-sprt:
+    if: github.head_ref == 'm6/v14-history-lmr-learned-pruning'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      RUSTFLAGS: -C target-cpu=native
+      PRODUCTION_BASE: f6ac75d644b844fabf35195d6054703e68bcc60f
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Strict dormant-source gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+
+      - name: Build exact production reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/bin .qualification/v14-final-sprt
+          git worktree add --detach /tmp/chess-reference "$PRODUCTION_BASE"
+          CARGO_TARGET_DIR=/tmp/chess-reference-target \
+            cargo build --release -p chess-uci --manifest-path /tmp/chess-reference/Cargo.toml
+          cp /tmp/chess-reference-target/release/chess-uci .qualification/bin/production
+          chmod +x .qualification/bin/production
+          sha256sum .qualification/bin/production > .qualification/v14-final-sprt/reference.sha256
+
+      - name: Materialize exact screened v14 candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/apply_history_v2_probe.py --variant history-lmr
+          python scripts/apply_v14_learned_pruning_probe.py
+          cargo fmt --all
+          git diff --check
+          git diff -- crates/chess-search/src/lib.rs crates/chess-search/src/root_analysis.rs \
+            > .qualification/v14-final-sprt/candidate.patch
+          test -s .qualification/v14-final-sprt/candidate.patch
+          sha256sum scripts/apply_history_v2_probe.py scripts/apply_v14_learned_pruning_probe.py \
+            > .qualification/v14-final-sprt/patchers.sha256
+          sha256sum .qualification/v14-final-sprt/candidate.patch \
+            > .qualification/v14-final-sprt/candidate-patch.sha256
+
+      - name: Strict candidate gate and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release --exclude chess-bench
+          cargo test -p chess-bench --release tests::suite_is_deterministic_within_the_same_build
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/bin/v14
+          chmod +x .qualification/bin/v14
+          sha256sum .qualification/bin/v14 > .qualification/v14-final-sprt/candidate.sha256
+
+      - name: Download exact certified Gestalt network
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' \
+            --output .qualification/v14-final-sprt/gestalt-b840.nnue
+          test "$(stat -c%s .qualification/v14-final-sprt/gestalt-b840.nnue)" = '21242944'
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  .qualification/v14-final-sprt/gestalt-b840.nnue' \
+            | sha256sum --check --strict
+
+      - name: Reproduce frozen 5000-root M6 suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip' \
+            --output /tmp/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/UHO_Lichess_4852_v1.epd.zip' \
+            | sha256sum --check --strict
+          mkdir -p .qualification/m6-openings
+          python scripts/build_m6_opening_suite.py \
+            --archive /tmp/UHO_Lichess_4852_v1.epd.zip \
+            --output-dir .qualification/m6-openings
+          echo '5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e  .qualification/m6-openings/m6-uho-lichess-5000-v1.epd' \
+            | sha256sum --check --strict
+
+      - name: Build pinned Fastchess
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = 'f618e34540f94f4719ad3817950618dabe441318'
+          make -C .qualification/fastchess-src -j2
+
+      - name: Create identical-network launchers
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$PWD"
+          mkdir -p .qualification/launchers
+          cat > .qualification/launchers/v14.sh <<EOF
+          #!/usr/bin/env bash
+          export CHESS_GESTALT_NETWORK='$ROOT/.qualification/v14-final-sprt/gestalt-b840.nnue'
+          exec '$ROOT/.qualification/bin/v14'
+          EOF
+          cat > .qualification/launchers/production.sh <<EOF
+          #!/usr/bin/env bash
+          export CHESS_GESTALT_NETWORK='$ROOT/.qualification/v14-final-sprt/gestalt-b840.nnue'
+          exec '$ROOT/.qualification/bin/production'
+          EOF
+          chmod +x .qualification/launchers/*.sh
+
+      - name: Run frozen M6 equal-time SPRT
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/sprt_match_harness.py \
+            --candidate .qualification/launchers/v14.sh \
+            --reference .qualification/launchers/production.sh \
+            --candidate-name v14-search-v2 \
+            --reference-name production-f6ac75d \
+            --candidate-option Hash=32 \
+            --reference-option Hash=32 \
+            --fastchess .qualification/fastchess-src/fastchess \
+            --openings .qualification/m6-openings/m6-uho-lichess-5000-v1.epd \
+            --protocol match/protocols/m6-sprt-arch-v1.json \
+            --output-dir .qualification/v14-final-sprt/match
+
+      - name: Record immutable v14 identity
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > .qualification/v14-final-sprt/checkout-head.txt
+          cat > .qualification/v14-final-sprt/evidence.txt <<EOF
+          purpose=v14 final history-lmr + learned shallow-pruning acceptance
+          production_base=$PRODUCTION_BASE
+          prior_fixed_nodes=75W-23D-2L,+322.67+-74.95 Elo
+          prior_equal_time=70W-26D-4L,+275.45+-58.99 Elo
+          candidate=once-scored main+continuation history + history-conditioned LMR + Gestalt RFP/LQF static eval
+          network_sha256=956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6
+          opening_sha256=5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e
+          sprt_protocol=m6-sprt-arch-v1
+          EOF
+
+      - name: Upload complete v14 evidence without network bytes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m6-v14-final-sprt-${{ github.sha }}
+          path: |
+            .qualification/v14-final-sprt/reference.sha256
+            .qualification/v14-final-sprt/candidate.sha256
+            .qualification/v14-final-sprt/patchers.sha256
+            .qualification/v14-final-sprt/candidate.patch
+            .qualification/v14-final-sprt/candidate-patch.sha256
+            .qualification/v14-final-sprt/checkout-head.txt
+            .qualification/v14-final-sprt/evidence.txt
+            .qualification/v14-final-sprt/match/
+          retention-days: 30
