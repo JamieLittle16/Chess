@@ -11,6 +11,9 @@ enum Stage {
     Done,
 }
 
+// Research-only cached quiet metadata. It is intentionally dormant until the qualification patcher
+// activates History-v2 in `lib.rs`.
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 struct ScoredQuiet {
     mv: ChessMove,
@@ -18,6 +21,7 @@ struct ScoredQuiet {
     order: u16,
 }
 
+#[allow(dead_code)]
 impl ScoredQuiet {
     const EMPTY: Self = Self {
         mv: ChessMove::NULL,
@@ -43,6 +47,7 @@ pub(super) struct MovePicker<'a> {
     killer_index: usize,
     stage: Stage,
     cursor: usize,
+    #[allow(dead_code)]
     quiet_ranked: bool,
 }
 
@@ -111,6 +116,7 @@ impl<'a> MovePicker<'a> {
     /// TT, tactical and killer stages are identical to `next`. The supplied scorer is called once
     /// for each quiet left after those stages, regardless of how many quiets are ultimately searched.
     /// Equal scores preserve generator order, giving deterministic feature-off-like tie behaviour.
+    #[allow(dead_code)]
     pub(super) fn next_scored<F>(
         &mut self,
         position: &Position,
@@ -206,6 +212,7 @@ impl<'a> MovePicker<'a> {
         None
     }
 
+    #[allow(dead_code)]
     fn rank_quiets_once<F>(&mut self, quiet_score: &mut F)
     where
         F: FnMut(ChessMove) -> i32,
