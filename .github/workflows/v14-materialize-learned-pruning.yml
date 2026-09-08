@@ -29,20 +29,8 @@ jobs:
 
           path = Path('crates/chess-search/src/lib.rs')
           text = path.read_text()
-          old = '''            Some(evaluate(position))
-          } else {
-              None
-          };
-          '''
-          new = '''            // Pruning must use the same positional model as searched leaves. The mature
-              // Gestalt accumulator is already current at this node, so this pays only the output
-              // head rather than a refresh and avoids discarding moves using the obsolete classical
-              // evaluator.
-              Some(self.leaf_evaluate(position))
-          } else {
-              None
-          };
-          '''
+          old = '            Some(evaluate(position))'
+          new = '            Some(self.leaf_evaluate(position))'
 
           if new in text:
               print('v14 learned-pruning source is already materialized')
