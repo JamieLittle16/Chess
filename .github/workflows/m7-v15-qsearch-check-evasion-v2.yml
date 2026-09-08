@@ -1,0 +1,182 @@
+name: M7 V15 qsearch check-evasion v2 screen
+
+on:
+  push:
+    branches: [m7/v15-qsearch-check-evasion-v2]
+
+permissions:
+  contents: read
+
+jobs:
+  qsearch-check-evasion:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      RUSTFLAGS: -C target-cpu=native
+      PRODUCTION_BASE: f76d9a06e18b914cbc0a7a98bb465cdc66e4fcf9
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Strict dormant-patcher gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+
+      - name: Build exact V14 production reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/bin .qualification/v15-qcheck
+          git worktree add --detach /tmp/chess-reference "$PRODUCTION_BASE"
+          CARGO_TARGET_DIR=/tmp/chess-reference-target cargo build --release -p chess-uci --manifest-path /tmp/chess-reference/Cargo.toml
+          cp /tmp/chess-reference-target/release/chess-uci .qualification/bin/reference
+          chmod +x .qualification/bin/reference
+          sha256sum .qualification/bin/reference > .qualification/v15-qcheck/reference.sha256
+
+      - name: Materialize exact qsearch candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/apply_qsearch_check_evasion_v2.py
+          cargo fmt --all
+          git diff --check
+          git diff -- crates/chess-search/src/quiescence.rs > .qualification/v15-qcheck/integration.patch
+          test -s .qualification/v15-qcheck/integration.patch
+          sha256sum tools/apply_qsearch_check_evasion_v2.py .qualification/v15-qcheck/integration.patch > .qualification/v15-qcheck/candidate-inputs.sha256
+
+      - name: Strict candidate gate and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release --exclude chess-bench
+          cargo test -p chess-bench --release tests::suite_is_deterministic_within_the_same_build
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/bin/candidate
+          chmod +x .qualification/bin/candidate
+          sha256sum .qualification/bin/candidate > .qualification/v15-qcheck/candidate.sha256
+
+      - name: Download exact certified Gestalt network
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' \
+            --output .qualification/v15-qcheck/gestalt-b840.nnue
+          test "$(stat -c%s .qualification/v15-qcheck/gestalt-b840.nnue)" = '21242944'
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  .qualification/v15-qcheck/gestalt-b840.nnue' | sha256sum --check --strict
+
+      - name: Reproduce frozen 5000-root M6 suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip' \
+            --output /tmp/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/UHO_Lichess_4852_v1.epd.zip' | sha256sum --check --strict
+          mkdir -p .qualification/m6-openings
+          python scripts/build_m6_opening_suite.py --archive /tmp/UHO_Lichess_4852_v1.epd.zip --output-dir .qualification/m6-openings
+          echo '5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e  .qualification/m6-openings/m6-uho-lichess-5000-v1.epd' | sha256sum --check --strict
+
+      - name: Build pinned Fastchess
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = 'f618e34540f94f4719ad3817950618dabe441318'
+          make -C .qualification/fastchess-src -j2
+
+      - name: Create identical-network launchers
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$PWD"
+          mkdir -p .qualification/launchers
+          cat > .qualification/launchers/reference.sh <<EOF
+          #!/usr/bin/env bash
+          export CHESS_GESTALT_NETWORK='$ROOT/.qualification/v15-qcheck/gestalt-b840.nnue'
+          exec '$ROOT/.qualification/bin/reference'
+          EOF
+          cat > .qualification/launchers/candidate.sh <<EOF
+          #!/usr/bin/env bash
+          export CHESS_GESTALT_NETWORK='$ROOT/.qualification/v15-qcheck/gestalt-b840.nnue'
+          exec '$ROOT/.qualification/bin/candidate'
+          EOF
+          chmod +x .qualification/launchers/*.sh
+
+      - name: Run paired 100-game 25k-node screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/v15-qcheck/fixed-nodes
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/.qualification/launchers/candidate.sh" name=v15-qcheck nodes=25000 option.Hash=32 \
+            -engine cmd="$PWD/.qualification/launchers/reference.sh" name=v14-production nodes=25000 option.Hash=32 \
+            -openings file="$PWD/.qualification/m6-openings/m6-uho-lichess-5000-v1.epd" format=epd order=random \
+            -srand 20260922 -rounds 50 -repeat -concurrency 1 -maxmoves 300 -ratinginterval 20 \
+            -pgnout file=.qualification/v15-qcheck/fixed-nodes/games.pgn notation=uci append=false nodes=true nps=true \
+            | tee .qualification/v15-qcheck/fixed-nodes/stdout.log
+          python scripts/analyze_fastchess_node_times.py .qualification/v15-qcheck/fixed-nodes/games.pgn --output .qualification/v15-qcheck/fixed-nodes/times.json
+
+      - name: Run paired 100-game equal-time screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/v15-qcheck/equal-time
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/.qualification/launchers/candidate.sh" name=v15-qcheck option.Hash=32 \
+            -engine cmd="$PWD/.qualification/launchers/reference.sh" name=v14-production option.Hash=32 \
+            -each proto=uci tc=1+0.01 \
+            -openings file="$PWD/.qualification/m6-openings/m6-uho-lichess-5000-v1.epd" format=epd order=random \
+            -srand 20260923 -rounds 50 -repeat -concurrency 1 -maxmoves 300 -ratinginterval 20 \
+            -pgnout file=.qualification/v15-qcheck/equal-time/games.pgn notation=uci append=false nodes=true nps=true \
+            | tee .qualification/v15-qcheck/equal-time/stdout.log
+
+      - name: Record immutable experiment identity
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > .qualification/v15-qcheck/evidence.txt <<EOF
+          purpose=V15 qsearch local-ceiling check-evasion fix
+          production_base=$PRODUCTION_BASE
+          candidate=retain four-qply ordinary tactical budget but never terminate the local budget while in check
+          network_sha256=956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6
+          opening_sha256=5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e
+          fixed_nodes=25000
+          fixed_node_games=100
+          equal_time=1+0.01
+          equal_time_games=100
+          hash_mib=32
+          concurrency=1
+          fastchess_commit=f618e34540f94f4719ad3817950618dabe441318
+          EOF
+
+      - name: Upload complete evidence without network bytes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m7-v15-qcheck-${{ github.sha }}
+          path: |
+            .qualification/v15-qcheck/reference.sha256
+            .qualification/v15-qcheck/candidate.sha256
+            .qualification/v15-qcheck/candidate-inputs.sha256
+            .qualification/v15-qcheck/integration.patch
+            .qualification/v15-qcheck/evidence.txt
+            .qualification/v15-qcheck/fixed-nodes/
+            .qualification/v15-qcheck/equal-time/
+          retention-days: 30
