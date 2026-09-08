@@ -1,0 +1,226 @@
+name: V14 bounded SEE ordering A
+
+on:
+  push:
+    branches: [analysis/v14-see-order-a-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Reconstruct exact V13 control and SEE candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum --check --strict
+          rm -rf /tmp/base /tmp/cand
+          mkdir -p /tmp/base /tmp/cand
+          unzip -q /tmp/v13.zip -d /tmp/base
+          unzip -q /tmp/v13.zip -d /tmp/cand
+          patch /tmp/base/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          patch /tmp/cand/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          for DIR in /tmp/base /tmp/cand; do
+            DIR="$DIR" python - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path(os.environ['DIR'])/'experiments/numba_search.py'; s=p.read_text()
+          old='    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          new='    correction = correction // 6\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          assert s.count(old)==1,s.count(old)
+          p.write_text(s.replace(old,new,1))
+          PY
+            python scripts/patch_v13_legality_context.py "$DIR/experiments/numba_core.py"
+            python scripts/patch_v13_qsearch_tactical.py "$DIR/experiments/numba_core.py" "$DIR/experiments/numba_search.py"
+          done
+          echo 'df346b21be42832a0ae97e7faa15953ab460f0387fb0358961651466557ebde8  /tmp/base/agent.py' | sha256sum --check --strict
+          echo '0306e8145a453d91b9b5ac92e9980931510d9e18f8ba598a7548d08b85165c35  /tmp/base/experiments/numba_core.py' | sha256sum --check --strict
+          echo '401f6580028a72361286bd99bee1f0022c74e6c8a65da8acd47448835a1ff360  /tmp/base/experiments/numba_search.py' | sha256sum --check --strict
+          python scripts/patch_v14_see_order_a.py /tmp/cand/experiments/numba_search.py
+          python -m py_compile \
+            /tmp/base/agent.py /tmp/base/experiments/*.py \
+            /tmp/cand/agent.py /tmp/cand/experiments/*.py \
+            tools/v14_fixed_node_arena.py tools/v14_regression_probe.py \
+            tools/v14_teacher_grade.py tools/v14_build_probe_corpus.py
+          cmp /tmp/base/agent.py /tmp/cand/agent.py
+          cmp /tmp/base/experiments/numba_core.py /tmp/cand/experiments/numba_core.py
+          cmp /tmp/base/experiments/v13_residual.i16 /tmp/cand/experiments/v13_residual.i16
+          grep -Fq 'score -= 2_200_000' /tmp/cand/experiments/numba_search.py
+
+      - name: Competition API and score-purity smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=/tmp/cand python - <<'PY'
+          import random
+          import chess
+          import numpy as np
+          import agent
+          from experiments.numba_core import encode_position, generate_legal_moves
+          from experiments.numba_search import _move_order_score
+
+          for fen in (
+              chess.STARTING_FEN,
+              'r1bq1rk1/pp2bppp/2n1pn2/2pp4/3P4/2PBPN2/PP3PPP/R1BQ1RK1 w - - 2 9',
+              'r2qk2r/pp1nbppp/5n2/1Qp1N3/3p4/8/PPPN1PPP/R1B1R1K1 b kq - 4 12',
+          ):
+              board=chess.Board(fen)
+              move=chess.Move.from_uci(agent.get_move(fen,120000))
+              assert move in board.legal_moves,(fen,move)
+              print('legal',move)
+
+          rng=random.Random(0x5EEA2026)
+          checked_moves=0
+          positions=0
+          board=chess.Board()
+          for _ in range(2500):
+              if board.is_game_over(claim_draw=False) or board.ply()>150 or rng.random()<0.04:
+                  board=chess.Board()
+                  for _ in range(rng.randrange(0,32)):
+                      legal=list(board.legal_moves)
+                      if not legal: break
+                      board.push(rng.choice(legal))
+              encoded=encode_position(board)
+              moves,count=generate_legal_moves(encoded.board,encoded.side,encoded.castling,encoded.ep_square)
+              before=encoded.board.copy()
+              for i in range(int(count)):
+                  _move_order_score(encoded.board,int(moves[i]),-1)
+                  assert np.array_equal(encoded.board,before),(board.fen(),int(moves[i]))
+                  checked_moves+=1
+              positions+=1
+              legal=list(board.legal_moves)
+              if legal: board.push(rng.choice(legal))
+          assert checked_moves>40000,(positions,checked_moves)
+          print('score_purity_ok',positions,checked_moves)
+          PY
+
+      - name: Fixed-node throughput guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p see-results
+          cat >/tmp/see_worker.py <<'PY'
+          import json,sys,chess,numpy as np
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful
+          for line in sys.stdin:
+              q=json.loads(line); b=chess.Board(q['fen']); e=encode_position(b); h=np.empty(0,dtype=np.uint64)
+              o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,int(q['nodes']))
+              print(json.dumps({'move':int(o[0]),'score':int(o[1]),'depth':int(o[2]),'nodes':int(o[3])}),flush=True)
+          PY
+          python - <<'PY'
+          import json,os,statistics,subprocess,sys,time
+          from pathlib import Path
+          roots=[x.strip() for x in open('match/openings/m3-uho-lichess-100-v1.epd') if x.strip() and not x.startswith('#')][:40]
+          def start(path):
+              env=os.environ.copy();env['PYTHONPATH']=path
+              return subprocess.Popen([sys.executable,'/tmp/see_worker.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=env)
+          def run(p,order):
+              total=0;t=time.perf_counter();rows=[]
+              for fen in order:
+                  p.stdin.write(json.dumps({'fen':fen,'nodes':30000})+'\n');p.stdin.flush()
+                  row=json.loads(p.stdout.readline());rows.append(row);total+=row['nodes']
+              elapsed=time.perf_counter()-t
+              return elapsed,total,rows
+          base=start('/tmp/base');cand=start('/tmp/cand');ratios=[];records=[]
+          try:
+              for p in (base,cand):
+                  p.stdin.write(json.dumps({'fen':roots[0],'nodes':300})+'\n');p.stdin.flush();json.loads(p.stdout.readline())
+              for rep in range(3):
+                  order=roots if rep%2==0 else list(reversed(roots))
+                  if rep%2==0:
+                      bt,bn,_=run(base,order);ct,cn,_=run(cand,order)
+                  else:
+                      ct,cn,_=run(cand,order);bt,bn,_=run(base,order)
+                  ratio=(cn/ct)/(bn/bt);ratios.append(ratio)
+                  records.append({'rep':rep,'base_nps':bn/bt,'candidate_nps':cn/ct,'nps_ratio':ratio})
+                  print(records[-1])
+          finally:
+              for p in (base,cand):p.terminate();p.wait()
+          summary={'median_nps_ratio':statistics.median(ratios),'records':records}
+          Path('see-results/throughput.json').write_text(json.dumps(summary,indent=2)+'\n')
+          print(summary)
+          PY
+
+      - name: Build broad probe and compare candidate to V13
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/v14_build_probe_corpus.py \
+            --openings match/openings/m3-uho-lichess-100-v1.epd \
+            --positions 48 --seed 2026090802 \
+            --json-out see-results/broad-manifest.json >/dev/null
+          python tools/v14_regression_probe.py \
+            --engine /tmp/cand --control /tmp/base \
+            --manifest see-results/broad-manifest.json --budgets 12000 \
+            --json-out see-results/broad-probe.json \
+            | tee see-results/broad-probe.log
+          python tools/v14_regression_probe.py \
+            --engine /tmp/cand --control /tmp/base \
+            --manifest match/regressions/v14-v13-seed.json --budgets 30000 \
+            --json-out see-results/seed-probe.json \
+            | tee see-results/seed-probe.log
+
+      - name: Paired fixed-node discovery arena on fresh openings
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u tools/v14_fixed_node_arena.py /tmp/cand /tmp/base \
+            --nodes 16000 --pairs 32 --opening-offset 32 --max-plies 220 \
+            --opening-file match/openings/m3-uho-lichess-100-v1.epd \
+            --json-out see-results/arena.json \
+            | tee see-results/arena.log
+          grep '^FINAL ' see-results/arena.log
+
+      - name: Fetch pinned Stockfish 19
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/stockfish
+          curl --fail --location --retry 3 \
+            --output .qualification/stockfish.tar.gz \
+            https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  .qualification/stockfish.tar.gz' | sha256sum --check --strict
+          tar -xzf .qualification/stockfish.tar.gz -C .qualification/stockfish
+          STOCKFISH_BIN=$(find "$PWD/.qualification/stockfish" -type f -name 'stockfish*' -perm -111 -print -quit)
+          test -n "$STOCKFISH_BIN"
+          echo "STOCKFISH_BIN=$STOCKFISH_BIN" >> "$GITHUB_ENV"
+          "$STOCKFISH_BIN" bench 1 1 4 default depth >/dev/null
+
+      - name: Grade candidate/control teacher deltas
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/v14_teacher_grade.py \
+            --probe see-results/seed-probe.json \
+            --manifest match/regressions/v14-v13-seed.json \
+            --stockfish "$STOCKFISH_BIN" --search-budget 30000 \
+            --teacher-nodes 300000 --hash-mb 64 \
+            --json-out see-results/seed-teacher-grade.json \
+            | tee see-results/seed-teacher-grade.log
+          python tools/v14_teacher_grade.py \
+            --probe see-results/broad-probe.json \
+            --manifest see-results/broad-manifest.json \
+            --stockfish "$STOCKFISH_BIN" --search-budget 12000 \
+            --teacher-nodes 100000 --hash-mb 64 \
+            --json-out see-results/broad-teacher-grade.json \
+            | tee see-results/broad-teacher-grade.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v14-see-order-a-${{ github.sha }}
+          path: see-results/
+          retention-days: 30
