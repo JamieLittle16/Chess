@@ -1,0 +1,142 @@
+name: M7 V15 perseverance oracle
+
+on:
+  push:
+    branches: [m7/v15-perseverance-eval-v1]
+
+permissions:
+  contents: read
+
+jobs:
+  oracle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Materialize corrected floor output bucket formula
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path=Path('crates/chess-eval/examples/viri16_oracle.rs')
+          text=path.read_text()
+          old='men.saturating_sub(2).div_ceil(4).saturating_sub(1).min(OUTPUT_BUCKETS - 1)'
+          new='(men.saturating_sub(2) / 4).min(OUTPUT_BUCKETS - 1)'
+          assert text.count(old)==1, text.count(old)
+          path.write_text(text.replace(old,new,1))
+          PY
+          cargo fmt --all
+          git diff --check
+
+      - name: Download exact perseverance release asset and decompress
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/v15-perseverance
+          python -m pip install --disable-pip-version-check 'zstandard==0.24.0'
+          curl --fail --location --retry 5 \
+            'https://github.com/cosmobobak/viridithas-networks/releases/download/v96/perseverance-b200.nnue.zst' \
+            --output .qualification/v15-perseverance/perseverance-b200.nnue.zst
+          test "$(stat -c%s .qualification/v15-perseverance/perseverance-b200.nnue.zst)" = '23117047'
+          sha256sum .qualification/v15-perseverance/perseverance-b200.nnue.zst \
+            | tee .qualification/v15-perseverance/compressed.sha256
+          python3 - <<'PY'
+          import zstandard as zstd
+          from pathlib import Path
+          src=Path('.qualification/v15-perseverance/perseverance-b200.nnue.zst')
+          dst=Path('.qualification/v15-perseverance/perseverance-b200.bin')
+          with src.open('rb') as i, dst.open('wb') as o:
+              zstd.ZstdDecompressor().copy_stream(i,o)
+          assert dst.stat().st_size == 46_422_560, dst.stat().st_size
+          PY
+          sha256sum .qualification/v15-perseverance/perseverance-b200.bin \
+            | tee .qualification/v15-perseverance/decompressed.sha256
+
+      - name: Build exact MIT Viridithas v16 reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet --branch v16.0.0 --depth 1 \
+            https://github.com/cosmobobak/viridithas.git /tmp/viridithas-v16
+          test "$(git -C /tmp/viridithas-v16 rev-parse HEAD)" = '121a6786f755055e857e34f57b37299e340cb63c'
+          cp .qualification/v15-perseverance/perseverance-b200.nnue.zst \
+            /tmp/viridithas-v16/viridithas.nnue.zst
+          cargo build --quiet --release --manifest-path /tmp/viridithas-v16/Cargo.toml
+
+      - name: Build and test scalar compatibility oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --release -p chess-eval --example viri16_oracle
+          cargo build --release -p chess-eval --example viri16_oracle
+
+      - name: Require exact raw-eval parity on diverse FENs
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > .qualification/v15-perseverance/oracle-parity.txt
+          : > .qualification/v15-perseverance/reference-raw.txt
+          FENS=(
+            'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+            '2k5/5p2/8/3N4/6b1/1P6/8/4K3 w - - 0 1'
+            'r3k2r/pppq1ppp/2npbn2/3Np3/4P3/2N1B3/PPP2PPP/R2Q1RK1 b kq - 4 10'
+            '8/2p5/3p4/1P1P4/2K5/8/6k1/8 w - - 0 45'
+            '3r2k1/5pp1/2p4p/1pPp4/1P1P1Q2/6P1/5PKP/8 b - - 2 31'
+            '7k/8/8/8/8/8/8/K7 w - - 0 1'
+            '7k/8/8/8/8/8/4P3/K7 w - - 0 1'
+            '4k3/8/8/3q4/8/3Q4/8/4K3 b - - 0 1'
+          )
+          for fen in "${FENS[@]}"; do
+            expected="$(python3 scripts/viri13_raweval_reference.py \
+              --engine /tmp/viridithas-v16/target/release/viridithas \
+              --fen "$fen" \
+              --transcript .qualification/v15-perseverance/reference-raw.txt)"
+            actual="$(target/release/examples/viri16_oracle \
+              .qualification/v15-perseverance/perseverance-b200.bin "$fen")"
+            printf '%s | v16=%s rust=%s\n' "$fen" "$expected" "$actual" \
+              | tee -a .qualification/v15-perseverance/oracle-parity.txt
+            test "$actual" = "$expected"
+          done
+
+      - name: Record provenance
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > .qualification/v15-perseverance/provenance.txt <<'EOF'
+          purpose=V15 evaluator-v2 mathematical compatibility gate
+          production_base=f76d9a06e18b914cbc0a7a98bb465cdc66e4fcf9
+          engine_reference=Viridithas v16.0.0
+          engine_reference_commit=121a6786f755055e857e34f57b37299e340cb63c
+          engine_reference_license=MIT
+          network_repository=cosmobobak/viridithas-networks
+          network_release=v96
+          network_name=perseverance
+          network_asset=perseverance-b200.nnue.zst
+          network_asset_size=23117047
+          architecture=704 merged-king-plane inputs, 16 mirrored king buckets, 2048 hidden, 8 output buckets, 16->32->1 deep head
+          EOF
+
+      - name: Upload evidence without network bytes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m7-v15-perseverance-oracle-${{ github.sha }}
+          path: |
+            .qualification/v15-perseverance/compressed.sha256
+            .qualification/v15-perseverance/decompressed.sha256
+            .qualification/v15-perseverance/oracle-parity.txt
+            .qualification/v15-perseverance/reference-raw.txt
+            .qualification/v15-perseverance/provenance.txt
+          retention-days: 30
