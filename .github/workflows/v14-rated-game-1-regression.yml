@@ -1,0 +1,114 @@
+name: V14 rated-game 1 prophylaxis regression
+
+on:
+  push:
+    branches: [analysis/v14-regression-lab-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rated-game-1:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Reconstruct immutable V13 BEST
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum --check --strict
+          rm -rf /tmp/v13 && mkdir /tmp/v13
+          unzip -q /tmp/v13.zip -d /tmp/v13
+          patch /tmp/v13/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/v13/experiments/numba_search.py'); s=p.read_text()
+          old='    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          new='    correction = correction // 6\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          assert s.count(old)==1,s.count(old)
+          p.write_text(s.replace(old,new,1))
+          PY
+          python scripts/patch_v13_legality_context.py /tmp/v13/experiments/numba_core.py
+          python scripts/patch_v13_qsearch_tactical.py /tmp/v13/experiments/numba_core.py /tmp/v13/experiments/numba_search.py
+          echo '401f6580028a72361286bd99bee1f0022c74e6c8a65da8acd47448835a1ff360  /tmp/v13/experiments/numba_search.py' | sha256sum --check --strict
+          python -m py_compile tools/v14_regression_probe.py tools/v14_teacher_grade.py /tmp/v13/experiments/*.py
+
+      - name: Record V13 node-budget curve on rated-game sentinel
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p rated-game-results
+          python tools/v14_regression_probe.py \
+            --engine /tmp/v13 \
+            --manifest match/regressions/v14-rated-game-1.json \
+            --budgets 1000,3000,10000,30000,100000,300000,1000000 \
+            --json-out rated-game-results/v13-curve.json \
+            | tee rated-game-results/v13-curve.log
+
+      - name: Fetch pinned Stockfish 19
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/stockfish
+          curl --fail --location --retry 3 \
+            --output .qualification/stockfish.tar.gz \
+            https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  .qualification/stockfish.tar.gz' | sha256sum --check --strict
+          tar -xzf .qualification/stockfish.tar.gz -C .qualification/stockfish
+          STOCKFISH_BIN=$(find "$PWD/.qualification/stockfish" -type f -name 'stockfish*' -perm -111 -print -quit)
+          test -n "$STOCKFISH_BIN"
+          echo "STOCKFISH_BIN=$STOCKFISH_BIN" >> "$GITHUB_ENV"
+          "$STOCKFISH_BIN" bench 1 1 4 default depth >/dev/null
+
+      - name: Independently verify reported Rb1 label with Stockfish 19
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os, chess, chess.engine
+          from pathlib import Path
+          fixture=json.load(open('match/regressions/v14-rated-game-1.json'))['fixtures'][0]
+          board=chess.Board(fixture['fen'])
+          engine=chess.engine.SimpleEngine.popen_uci(os.environ['STOCKFISH_BIN'])
+          try:
+              engine.configure({'Threads':1,'Hash':64})
+              info=engine.analyse(board,chess.engine.Limit(nodes=300000),info=chess.engine.INFO_ALL)
+              best=info['pv'][0].uci()
+              score=info['score'].pov(board.turn).score(mate_score=100000)
+          finally:
+              engine.quit()
+          row={'stockfish19_bestmove':best,'score_cp':score,'reported_expected':fixture['expected_uci'],'matches':best in set(fixture['expected_uci'])}
+          print(row)
+          Path('rated-game-results/stockfish19-label.json').write_text(json.dumps(row,indent=2)+'\n')
+          assert row['matches'], row
+          PY
+
+      - name: Measure V13 teacher loss on rated-game sentinel
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/v14_teacher_grade.py \
+            --probe rated-game-results/v13-curve.json \
+            --manifest match/regressions/v14-rated-game-1.json \
+            --stockfish "$STOCKFISH_BIN" \
+            --search-budget 300000 \
+            --teacher-nodes 300000 \
+            --hash-mb 64 \
+            --json-out rated-game-results/v13-teacher-grade.json \
+            | tee rated-game-results/v13-teacher-grade.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v14-rated-game-1-${{ github.sha }}
+          path: rated-game-results/
+          retention-days: 30
