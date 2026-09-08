@@ -17,26 +17,34 @@
   },
   "fixtures": [
     {
-      "id": "v13-tactical-qxb5",
+      "id": "v13-tactical-normalized-qb6",
       "category": "tactical_capture_exactness",
       "fen": "r2qk2r/pp1nbppp/5n2/1Qp1N3/3p4/8/PPPN1PPP/R1B1R1K1 b kq - 4 12",
       "source_fen_as_reported": "r2qk2r/pp1nbppp/5n2/1Qp1N3/3p4/8/PPPN1PPP/R1B1R1K b kq - 4 12",
-      "source_normalization": "The diagnostic transcription omitted the trailing empty h1 square. Appending 1 makes the first rank legal while preserving the reported Ra1/Bc1/Re1/Kg1 placement. The fixture is not promoted to a hard label unless pinned Stockfish 19 independently reproduces Qxb5.",
-      "expected_uci": ["d8b5"],
-      "v13_observed_san": "b6",
-      "teacher_preferred_san": "Qxb5",
-      "teacher_loss_cp_approx": 582,
-      "purpose": "Exact tactical move among several attractive candidates; search precision/order regression."
+      "source_reported_teacher_uci": ["d8b5"],
+      "source_reported_teacher_san": "Qxb5",
+      "source_reported_loss_cp_approx": 582,
+      "source_normalization": "The diagnostic transcription omitted the trailing empty h1 square. Appending 1 makes the first rank legal while preserving the reported Ra1/Bc1/Re1/Kg1 placement. Pinned Stockfish 19 at 300k nodes does not reproduce the transcribed Qxb5 label on this normalized position; it prefers Qb6.",
+      "expected_uci": ["d8b6"],
+      "expected_label_status": "verified_on_normalized_fen_by_stockfish19_300k",
+      "v13_30k_uci": "b7b6",
+      "v13_30k_teacher_loss_cp": 775,
+      "v13_30k_teacher_expectation_loss": 0.5,
+      "purpose": "A verified sharp search-precision failure on the normalized source position. V13 briefly finds Qb6 at 3k nodes, then switches to the much worse b6 from 10k through 300k nodes."
     },
     {
       "id": "v13-endgame-kg6",
       "category": "endgame_exact_tempo",
       "fen": "4k3/8/8/5K2/8/6P1/8/8 w - - 0 54",
+      "source_reported_teacher_uci": ["f5g6"],
+      "source_reported_teacher_san": "Kg6",
+      "source_reported_loss_cp_approx": 3500,
       "expected_uci": ["f5g6"],
-      "v13_observed_san": "g4",
-      "teacher_preferred_san": "Kg6",
-      "teacher_loss_cp_approx": 3500,
-      "purpose": "King-and-pawn exact tempo/opposition regression; one tempo changes the result."
+      "expected_label_status": "verified_bestmove_by_stockfish19_300k_but_not_catastrophic",
+      "v13_30k_uci": "f5e6",
+      "v13_30k_teacher_loss_cp": 40,
+      "v13_30k_teacher_expectation_loss": 0.0,
+      "purpose": "Exact low-material move-choice sentinel. Stockfish 19 still prefers Kg6, but at the pinned 300k teacher budget V13's Ke6 remains winning and is only about 40cp worse, so this is a soft precision fixture rather than a modern catastrophic-loss label."
     }
   ]
 }
