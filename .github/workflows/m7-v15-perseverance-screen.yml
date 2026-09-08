@@ -1,0 +1,258 @@
+name: M7 V15 perseverance evaluator screen
+
+on:
+  push:
+    branches: [m7/v15-perseverance-eval-v1]
+
+permissions:
+  contents: read
+
+jobs:
+  perseverance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      RUSTFLAGS: -C target-cpu=native
+      PRODUCTION_BASE: f76d9a06e18b914cbc0a7a98bb465cdc66e4fcf9
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Build exact V14 production reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/bin .qualification/v15-perseverance
+          git worktree add --detach /tmp/chess-reference "$PRODUCTION_BASE"
+          CARGO_TARGET_DIR=/tmp/chess-reference-target cargo build --release -p chess-uci --manifest-path /tmp/chess-reference/Cargo.toml
+          cp /tmp/chess-reference-target/release/chess-uci .qualification/bin/reference
+          chmod +x .qualification/bin/reference
+          sha256sum .qualification/bin/reference > .qualification/v15-perseverance/reference.sha256
+
+      - name: Materialize exact perseverance integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/apply_v15_perseverance.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('crates/chess-eval/examples/viri16_oracle.rs')
+          s=p.read_text()
+          old='men.saturating_sub(2).div_ceil(4).saturating_sub(1).min(OUTPUT_BUCKETS - 1)'
+          new='(men.saturating_sub(2) / 4).min(OUTPUT_BUCKETS - 1)'
+          assert s.count(old)==1,s.count(old)
+          s=s.replace(old,new,1)
+          s='#![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]\n'+s
+          p.write_text(s)
+          p=Path('crates/chess-eval/src/perseverance.rs')
+          s=p.read_text()
+          s='#![allow(clippy::cast_precision_loss)]\n'+s
+          p.write_text(s)
+          PY
+          cargo fmt --all
+          git diff --check
+          git diff "$PRODUCTION_BASE" -- \
+            crates/chess-eval/src/lib.rs \
+            crates/chess-eval/src/perseverance.rs \
+            crates/chess-search/src/lib.rs \
+            > .qualification/v15-perseverance/integration.patch
+          test -s .qualification/v15-perseverance/integration.patch
+          sha256sum \
+            crates/chess-eval/src/perseverance.rs \
+            scripts/apply_v15_perseverance.py \
+            .qualification/v15-perseverance/integration.patch \
+            > .qualification/v15-perseverance/candidate-inputs.sha256
+
+      - name: Strict candidate gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release --exclude chess-bench
+          cargo test -p chess-bench --release tests::suite_is_deterministic_within_the_same_build
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/bin/candidate
+          chmod +x .qualification/bin/candidate
+          sha256sum .qualification/bin/candidate > .qualification/v15-perseverance/candidate.sha256
+
+      - name: Download evaluator networks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check 'zstandard==0.24.0'
+          curl --fail --location --retry 5 \
+            'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' \
+            --output .qualification/v15-perseverance/gestalt-b840.nnue
+          test "$(stat -c%s .qualification/v15-perseverance/gestalt-b840.nnue)" = '21242944'
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  .qualification/v15-perseverance/gestalt-b840.nnue' | sha256sum --check --strict
+          curl --fail --location --retry 5 \
+            'https://github.com/cosmobobak/viridithas-networks/releases/download/v96/perseverance-b200.nnue.zst' \
+            --output .qualification/v15-perseverance/perseverance-b200.nnue.zst
+          test "$(stat -c%s .qualification/v15-perseverance/perseverance-b200.nnue.zst)" = '23117047'
+          sha256sum .qualification/v15-perseverance/perseverance-b200.nnue.zst \
+            | tee .qualification/v15-perseverance/perseverance-compressed.sha256
+          python3 - <<'PY'
+          import zstandard as zstd
+          from pathlib import Path
+          src=Path('.qualification/v15-perseverance/perseverance-b200.nnue.zst')
+          dst=Path('.qualification/v15-perseverance/perseverance-b200.bin')
+          with src.open('rb') as i, dst.open('wb') as o:
+              zstd.ZstdDecompressor().copy_stream(i,o)
+          assert dst.stat().st_size == 46_422_560, dst.stat().st_size
+          PY
+          sha256sum .qualification/v15-perseverance/perseverance-b200.bin \
+            | tee .qualification/v15-perseverance/perseverance-decompressed.sha256
+
+      - name: Certify production-shaped runtime against Viridithas v16
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet --branch v16.0.0 --depth 1 \
+            https://github.com/cosmobobak/viridithas.git /tmp/viridithas-v16
+          test "$(git -C /tmp/viridithas-v16 rev-parse HEAD)" = '121a6786f755055e857e34f57b37299e340cb63c'
+          cp .qualification/v15-perseverance/perseverance-b200.nnue.zst \
+            /tmp/viridithas-v16/viridithas.nnue.zst
+          cargo build --quiet --release --manifest-path /tmp/viridithas-v16/Cargo.toml
+          cargo build --release -p chess-eval --example perseverance_runtime_oracle
+          : > .qualification/v15-perseverance/runtime-parity.txt
+          : > .qualification/v15-perseverance/reference-raw.txt
+          FENS=(
+            'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+            '2k5/5p2/8/3N4/6b1/1P6/8/4K3 w - - 0 1'
+            'r3k2r/pppq1ppp/2npbn2/3Np3/4P3/2N1B3/PPP2PPP/R2Q1RK1 b kq - 4 10'
+            '8/2p5/3p4/1P1P4/2K5/8/6k1/8 w - - 0 45'
+            '3r2k1/5pp1/2p4p/1pPp4/1P1P1Q2/6P1/5PKP/8 b - - 2 31'
+          )
+          for fen in "${FENS[@]}"; do
+            expected="$(python3 scripts/viri13_raweval_reference.py \
+              --engine /tmp/viridithas-v16/target/release/viridithas \
+              --fen "$fen" \
+              --transcript .qualification/v15-perseverance/reference-raw.txt)"
+            actual="$(target/release/examples/perseverance_runtime_oracle \
+              .qualification/v15-perseverance/perseverance-b200.bin "$fen")"
+            printf '%s | v16=%s runtime=%s\n' "$fen" "$expected" "$actual" \
+              | tee -a .qualification/v15-perseverance/runtime-parity.txt
+            test "$actual" = "$expected"
+          done
+
+      - name: Reproduce frozen 5000-root M6 suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip' \
+            --output /tmp/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/UHO_Lichess_4852_v1.epd.zip' | sha256sum --check --strict
+          mkdir -p .qualification/m6-openings
+          python scripts/build_m6_opening_suite.py --archive /tmp/UHO_Lichess_4852_v1.epd.zip --output-dir .qualification/m6-openings
+          echo '5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e  .qualification/m6-openings/m6-uho-lichess-5000-v1.epd' | sha256sum --check --strict
+
+      - name: Build pinned Fastchess
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = 'f618e34540f94f4719ad3817950618dabe441318'
+          make -C .qualification/fastchess-src -j2
+
+      - name: Create evaluator-isolated launchers
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$PWD"
+          mkdir -p .qualification/launchers
+          cat > .qualification/launchers/reference.sh <<EOF
+          #!/usr/bin/env bash
+          unset CHESS_PERSEVERANCE_NETWORK
+          export CHESS_GESTALT_NETWORK='$ROOT/.qualification/v15-perseverance/gestalt-b840.nnue'
+          exec '$ROOT/.qualification/bin/reference'
+          EOF
+          cat > .qualification/launchers/candidate.sh <<EOF
+          #!/usr/bin/env bash
+          unset CHESS_GESTALT_NETWORK
+          export CHESS_PERSEVERANCE_NETWORK='$ROOT/.qualification/v15-perseverance/perseverance-b200.bin'
+          exec '$ROOT/.qualification/bin/candidate'
+          EOF
+          chmod +x .qualification/launchers/*.sh
+
+      - name: Run paired 100-game 25k-node screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/v15-perseverance/fixed-nodes
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/.qualification/launchers/candidate.sh" name=v15-perseverance nodes=25000 option.Hash=32 \
+            -engine cmd="$PWD/.qualification/launchers/reference.sh" name=v14-production nodes=25000 option.Hash=32 \
+            -openings file="$PWD/.qualification/m6-openings/m6-uho-lichess-5000-v1.epd" format=epd order=random \
+            -srand 20260924 -rounds 50 -repeat -concurrency 1 -maxmoves 300 -ratinginterval 20 \
+            -pgnout file=.qualification/v15-perseverance/fixed-nodes/games.pgn notation=uci append=false nodes=true nps=true \
+            | tee .qualification/v15-perseverance/fixed-nodes/stdout.log
+          python scripts/analyze_fastchess_node_times.py \
+            .qualification/v15-perseverance/fixed-nodes/games.pgn \
+            --output .qualification/v15-perseverance/fixed-nodes/times.json
+
+      - name: Run paired 100-game equal-time screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/v15-perseverance/equal-time
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/.qualification/launchers/candidate.sh" name=v15-perseverance option.Hash=32 \
+            -engine cmd="$PWD/.qualification/launchers/reference.sh" name=v14-production option.Hash=32 \
+            -each proto=uci tc=1+0.01 \
+            -openings file="$PWD/.qualification/m6-openings/m6-uho-lichess-5000-v1.epd" format=epd order=random \
+            -srand 20260925 -rounds 50 -repeat -concurrency 1 -maxmoves 300 -ratinginterval 20 \
+            -pgnout file=.qualification/v15-perseverance/equal-time/games.pgn notation=uci append=false nodes=true nps=true \
+            | tee .qualification/v15-perseverance/equal-time/stdout.log
+
+      - name: Record immutable experiment identity
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > .qualification/v15-perseverance/evidence.txt <<EOF
+          purpose=V15 evaluator-v2 screen
+          production_base=$PRODUCTION_BASE
+          candidate=Viridithas v16 perseverance piece-only evaluator with reversible safe-Rust accumulator
+          v16_reference_commit=121a6786f755055e857e34f57b37299e340cb63c
+          gestalt_sha256=956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6
+          opening_sha256=5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e
+          fixed_nodes=25000
+          fixed_node_games=100
+          equal_time=1+0.01
+          equal_time_games=100
+          hash_mib=32
+          concurrency=1
+          fastchess_commit=f618e34540f94f4719ad3817950618dabe441318
+          EOF
+
+      - name: Upload complete evidence without network bytes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m7-v15-perseverance-${{ github.sha }}
+          path: |
+            .qualification/v15-perseverance/reference.sha256
+            .qualification/v15-perseverance/candidate.sha256
+            .qualification/v15-perseverance/candidate-inputs.sha256
+            .qualification/v15-perseverance/integration.patch
+            .qualification/v15-perseverance/perseverance-compressed.sha256
+            .qualification/v15-perseverance/perseverance-decompressed.sha256
+            .qualification/v15-perseverance/runtime-parity.txt
+            .qualification/v15-perseverance/reference-raw.txt
+            .qualification/v15-perseverance/evidence.txt
+            .qualification/v15-perseverance/fixed-nodes/
+            .qualification/v15-perseverance/equal-time/
+          retention-days: 30
