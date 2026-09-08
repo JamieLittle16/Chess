@@ -1,8 +1,8 @@
-name: V14 NNUE shadow search cost
+name: V14 NNUE shadow slice-copy cost
 
 on:
   push:
-    branches: [analysis/v14-nnue-shadow-cost-20260908]
+    branches: [analysis/v14-nnue-shadow-slice-copy-20260908]
   workflow_dispatch:
 
 permissions:
@@ -24,7 +24,7 @@ jobs:
       - name: Install exact competition runtime
         run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
 
-      - name: Reconstruct immutable V13 and shadow candidate
+      - name: Reconstruct immutable V13 and slice-copy shadow candidate
         shell: bash
         run: |
           set -euo pipefail
@@ -57,7 +57,7 @@ jobs:
           cmp /tmp/base/agent.py /tmp/cand/agent.py
           cmp /tmp/base/experiments/numba_core.py /tmp/cand/experiments/numba_core.py
           cmp /tmp/base/experiments/v13_residual.i16 /tmp/cand/experiments/v13_residual.i16
-          grep -Fq 'SHADOW_HIDDEN = ${{ matrix.hidden }}' /tmp/cand/experiments/numba_search.py
+          grep -Fq 'child_white[:] = parent_white' /tmp/cand/experiments/v14_nnue_runtime.py
 
       - name: Incremental shadow accumulator oracle
         shell: bash
@@ -67,48 +67,28 @@ jobs:
           import random
           import chess
           import numpy as np
-          from experiments.numba_core import (
-              encode_position, generate_legal_moves, make_move_inplace, move_to_uci,
-          )
-          from experiments.numba_search import (
-              EVAL_WIDTH, EVAL_V13_WIDTH, SHADOW_HIDDEN,
-              _advance_eval_state_into, _build_eval_state_into,
-          )
-
-          rng = random.Random(0x5A0D0 + SHADOW_HIDDEN)
-          board = chess.Board()
-          checked = 0
+          from experiments.numba_core import encode_position, generate_legal_moves, make_move_inplace, move_to_uci
+          from experiments.numba_search import EVAL_WIDTH, EVAL_V13_WIDTH, SHADOW_HIDDEN, _advance_eval_state_into, _build_eval_state_into
+          rng=random.Random(0x5A0D0+SHADOW_HIDDEN); board=chess.Board(); checked=0
           for step in range(5000):
-              if board.is_game_over(claim_draw=False) or board.ply() > 180 or rng.random() < 0.025:
-                  board = chess.Board()
-                  for _ in range(rng.randrange(0, 28)):
-                      legal = list(board.legal_moves)
-                      if not legal:
-                          break
+              if board.is_game_over(claim_draw=False) or board.ply()>180 or rng.random()<0.025:
+                  board=chess.Board()
+                  for _ in range(rng.randrange(0,28)):
+                      legal=list(board.legal_moves)
+                      if not legal: break
                       board.push(rng.choice(legal))
-              encoded = encode_position(board)
-              moves, count = generate_legal_moves(
-                  encoded.board, encoded.side, encoded.castling, encoded.ep_square
-              )
-              if count == 0:
-                  board = chess.Board()
-                  continue
-              move = int(moves[rng.randrange(int(count))])
-              parent = np.empty(EVAL_WIDTH, dtype=np.int32)
-              child = np.empty(EVAL_WIDTH, dtype=np.int32)
-              rebuilt = np.empty(EVAL_WIDTH, dtype=np.int32)
-              _build_eval_state_into(encoded.board, parent)
-              _advance_eval_state_into(encoded.board, encoded.side, move, parent, child)
-              child_castling, child_ep, _, _ = make_move_inplace(
-                  encoded.board, encoded.side, encoded.castling, encoded.ep_square, move
-              )
-              _build_eval_state_into(encoded.board, rebuilt)
-              assert np.array_equal(child[:EVAL_V13_WIDTH], rebuilt[:EVAL_V13_WIDTH]), (step, 'v13')
-              assert np.array_equal(child[EVAL_V13_WIDTH:], rebuilt[EVAL_V13_WIDTH:]), (step, 'shadow')
-              checked += 1
-              board.push(chess.Move.from_uci(move_to_uci(move)))
-          assert checked >= 4900, checked
-          print('shadow_oracle_ok', 'H', SHADOW_HIDDEN, 'transitions', checked, 'eval_width', EVAL_WIDTH)
+              e=encode_position(board); moves,count=generate_legal_moves(e.board,e.side,e.castling,e.ep_square)
+              if count==0:
+                  board=chess.Board(); continue
+              move=int(moves[rng.randrange(int(count))])
+              parent=np.empty(EVAL_WIDTH,dtype=np.int32); child=np.empty(EVAL_WIDTH,dtype=np.int32); rebuilt=np.empty(EVAL_WIDTH,dtype=np.int32)
+              _build_eval_state_into(e.board,parent); _advance_eval_state_into(e.board,e.side,move,parent,child)
+              make_move_inplace(e.board,e.side,e.castling,e.ep_square,move); _build_eval_state_into(e.board,rebuilt)
+              assert np.array_equal(child[:EVAL_V13_WIDTH],rebuilt[:EVAL_V13_WIDTH]),(step,'v13')
+              assert np.array_equal(child[EVAL_V13_WIDTH:],rebuilt[EVAL_V13_WIDTH:]),(step,'shadow')
+              checked+=1; board.push(chess.Move.from_uci(move_to_uci(move)))
+          assert checked>=4900,checked
+          print('slice_copy_shadow_oracle_ok','H',SHADOW_HIDDEN,'transitions',checked)
           PY
 
       - name: Exact fixed-node search parity and real integration cost
@@ -117,58 +97,46 @@ jobs:
           set -euo pipefail
           mkdir -p shadow-results
           cat >/tmp/shadow_worker.py <<'PY'
-          import json, sys, chess, numpy as np
+          import json,sys,chess,numpy as np
           from experiments.numba_core import encode_position
           from experiments.numba_search import iterative_search_stateful
           for line in sys.stdin:
-              q=json.loads(line); b=chess.Board(q['fen']); e=encode_position(b)
-              h=np.empty(0,dtype=np.uint64)
-              o=iterative_search_stateful(
-                  e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,int(q['nodes'])
-              )
+              q=json.loads(line); b=chess.Board(q['fen']); e=encode_position(b); h=np.empty(0,dtype=np.uint64)
+              o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,int(q['nodes']))
               print(json.dumps({'move':int(o[0]),'score':int(o[1]),'depth':int(o[2]),'nodes':int(o[3])}),flush=True)
           PY
           python - <<'PY'
-          import json, os, statistics, subprocess, sys, time
+          import json,os,statistics,subprocess,sys,time
           from pathlib import Path
-
-          HIDDEN = int('${{ matrix.hidden }}')
+          HIDDEN=int('${{ matrix.hidden }}')
           roots=[x.strip() for x in open('match/openings/m3-uho-lichess-100-v1.epd') if x.strip() and not x.startswith('#')][:40]
           def start(path):
-              env=os.environ.copy(); env['PYTHONPATH']=path
+              env=os.environ.copy();env['PYTHONPATH']=path
               return subprocess.Popen([sys.executable,'/tmp/shadow_worker.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=env)
           def ask(p,fen,n):
-              p.stdin.write(json.dumps({'fen':fen,'nodes':n})+'\n'); p.stdin.flush(); return json.loads(p.stdout.readline())
-          base=start('/tmp/base'); cand=start('/tmp/cand')
-          retained=[]; rows=[]
+              p.stdin.write(json.dumps({'fen':fen,'nodes':n})+'\n');p.stdin.flush();return json.loads(p.stdout.readline())
+          base=start('/tmp/base');cand=start('/tmp/cand');ratios=[];rows=[]
           try:
-              ask(base,roots[0],300); ask(cand,roots[0],300)
+              ask(base,roots[0],300);ask(cand,roots[0],300)
               for rep in range(3):
                   order=roots if rep%2==0 else list(reversed(roots))
-                  t=time.perf_counter(); a=[ask(base,f,30000) for f in order]; at=time.perf_counter()-t
-                  t=time.perf_counter(); b=[ask(cand,f,30000) for f in order]; bt=time.perf_counter()-t
+                  if rep%2==0:
+                      t=time.perf_counter();a=[ask(base,f,30000) for f in order];at=time.perf_counter()-t
+                      t=time.perf_counter();b=[ask(cand,f,30000) for f in order];bt=time.perf_counter()-t
+                  else:
+                      t=time.perf_counter();b=[ask(cand,f,30000) for f in order];bt=time.perf_counter()-t
+                      t=time.perf_counter();a=[ask(base,f,30000) for f in order];at=time.perf_counter()-t
                   assert a==b,(rep,next((i for i,(x,y) in enumerate(zip(a,b)) if x!=y),None))
-                  ratio=at/bt
-                  retained.append(ratio)
-                  rows.append({'rep':rep,'base_seconds':at,'shadow_seconds':bt,'candidate_throughput_fraction':ratio})
-                  print('H',HIDDEN,'rep',rep,'throughput_fraction',ratio)
+                  ratio=at/bt;ratios.append(ratio);rows.append({'rep':rep,'base_seconds':at,'shadow_seconds':bt,'candidate_throughput_fraction':ratio});print(rows[-1])
           finally:
-              for p in (base,cand):
-                  p.terminate(); p.wait()
-          summary={
-              'hidden':HIDDEN,
-              'identical_searches':120,
-              'median_candidate_throughput_fraction':statistics.median(retained),
-              'median_runtime_overhead_percent':(1.0/statistics.median(retained)-1.0)*100.0,
-              'records':rows,
-              'note':'Shadow accumulator is maintained but never evaluated; chess semantics must be identical.',
-          }
-          Path(f'shadow-results/h{HIDDEN}.json').write_text(json.dumps(summary,indent=2))
-          print(json.dumps(summary,indent=2))
+              for p in (base,cand):p.terminate();p.wait()
+          median=statistics.median(ratios)
+          summary={'hidden':HIDDEN,'copy_mode':'slice','identical_searches':120,'median_candidate_throughput_fraction':median,'median_runtime_overhead_percent':(1.0/median-1.0)*100.0,'records':rows}
+          Path(f'shadow-results/h{HIDDEN}.json').write_text(json.dumps(summary,indent=2));print(json.dumps(summary,indent=2))
           PY
 
       - uses: actions/upload-artifact@v4
         with:
-          name: v14-nnue-shadow-h${{ matrix.hidden }}-${{ github.sha }}
+          name: v14-nnue-shadow-slice-h${{ matrix.hidden }}-${{ github.sha }}
           path: shadow-results/
           retention-days: 14
