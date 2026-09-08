@@ -1,0 +1,200 @@
+name: V14 H64 student 1/12 timed production confirmation
+
+on:
+  push:
+    branches: [analysis/v14-student-s12-timed-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  timed:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Download exact fixed H64 model
+        uses: actions/download-artifact@v4
+        with:
+          name: v14-single-student-h64-bb7d2a4ed05ff78d344cc4374d54e35189584993
+          path: model-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34202820525
+
+      - name: Materialize exact V13 and fixed 1/12 candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODEL=$(find model-artifact -type f -name 'student-h64.npz' -print -quit)
+          test -n "$MODEL"
+          echo '3422cecc3b1226767412e08746ffd6eef9f7e38602ac15b9256b475e6762b598  '"$MODEL" | sha256sum --check --strict
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum --check --strict
+          rm -rf /tmp/base /tmp/cand && mkdir -p /tmp/base /tmp/cand
+          unzip -q /tmp/v13.zip -d /tmp/base
+          unzip -q /tmp/v13.zip -d /tmp/cand
+          patch /tmp/base/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          patch /tmp/cand/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          for DIR in /tmp/base /tmp/cand; do
+            DIR="$DIR" python - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path(os.environ['DIR'])/'experiments/numba_search.py'; s=p.read_text()
+          old='    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          new='    correction = correction // 6\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          assert s.count(old)==1,s.count(old)
+          p.write_text(s.replace(old,new,1))
+          PY
+            python scripts/patch_v13_legality_context.py "$DIR/experiments/numba_core.py"
+            python scripts/patch_v13_qsearch_tactical.py "$DIR/experiments/numba_core.py" "$DIR/experiments/numba_search.py"
+          done
+          echo 'df346b21be42832a0ae97e7faa15953ab460f0387fb0358961651466557ebde8  /tmp/base/agent.py' | sha256sum --check --strict
+          echo '0306e8145a453d91b9b5ac92e9980931510d9e18f8ba598a7548d08b85165c35  /tmp/base/experiments/numba_core.py' | sha256sum --check --strict
+          echo '401f6580028a72361286bd99bee1f0022c74e6c8a65da8acd47448835a1ff360  /tmp/base/experiments/numba_search.py' | sha256sum --check --strict
+          cp experiments/v14_student_single_runtime.py /tmp/cand/experiments/v14_student_single_runtime.py
+          cp "$MODEL" /tmp/cand/experiments/v14_student_h64.npz
+          python scripts/patch_v14_single_student_search.py /tmp/cand/experiments/numba_search.py --numerator 1 --denominator 12
+          python -m py_compile tools/v14_agent_runner.py /tmp/base/agent.py /tmp/base/experiments/*.py /tmp/cand/agent.py /tmp/cand/experiments/*.py
+          mkdir -p results
+
+      - name: Build fresh timed book from official Stockfish UHO
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip \
+            https://raw.githubusercontent.com/official-stockfish/books/master/UHO_Lichess_4852_v1.epd.zip
+          rm -rf /tmp/uho && mkdir /tmp/uho
+          unzip -q /tmp/uho.zip -d /tmp/uho
+          UHO=$(find /tmp/uho -type f -name '*.epd' -print -quit)
+          test -n "$UHO"
+          UHO="$UHO" python - <<'PY'
+          import os
+          from pathlib import Path
+          import chess
+          rows=Path(os.environ['UHO']).read_text(errors='ignore').splitlines()
+          out=[]
+          for raw in rows[1800:2000]:
+              fields=raw.strip().split()
+              if len(fields)<4: continue
+              fen=' '.join(fields[:4])+' 0 1'
+              try: b=chess.Board(fen)
+              except ValueError: continue
+              if b.is_game_over(claim_draw=False): continue
+              out.append(fen)
+              if len(out)==16: break
+          assert len(out)==16,len(out)
+          Path('/tmp/timed-uho.epd').write_text('\n'.join(out)+'\n')
+          print('timed_uho_roots',len(out))
+          PY
+
+      - name: Timed production get_move A/B
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, math, queue, subprocess, sys, threading, time
+          from collections import Counter, deque
+          from pathlib import Path
+          import chess
+
+          BASE_MS=2500
+          INCREMENT_MS=50
+          MAX_PLIES=180
+          WATCHDOG_GRACE_MS=1200
+          openings=[x.strip() for x in open('/tmp/timed-uho.epd') if x.strip()]
+          assert len(openings)==16
+
+          class AgentProcess:
+              def __init__(self,directory):
+                  self.proc=subprocess.Popen(
+                      [sys.executable,'tools/v14_agent_runner.py',directory],
+                      stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+                      text=True,bufsize=1)
+                  self.lines=queue.Queue(); self.stderr=deque(maxlen=80)
+                  threading.Thread(target=self._read_out,daemon=True).start()
+                  threading.Thread(target=self._read_err,daemon=True).start()
+                  payload=json.loads(self._line(95.0)); assert payload.get('ready') is True,payload
+              def _read_out(self):
+                  for line in self.proc.stdout:self.lines.put(line.rstrip('\n'))
+                  self.lines.put(None)
+              def _read_err(self):
+                  for line in self.proc.stderr:self.stderr.append(line.rstrip('\n'))
+              def _line(self,timeout):
+                  try: line=self.lines.get(timeout=timeout)
+                  except queue.Empty as exc: raise RuntimeError('protocol timeout') from exc
+                  if line is None: raise RuntimeError('protocol closed: '+'\n'.join(self.stderr))
+                  return line
+              def reset(self):
+                  self.proc.stdin.write(json.dumps({'reset':True})+'\n'); self.proc.stdin.flush()
+                  payload=json.loads(self._line(5.0)); assert payload.get('reset') is True,payload
+              def move(self,board,clock_ms):
+                  self.proc.stdin.write(json.dumps({'fen':board.fen(),'time_left_ms':max(0,int(clock_ms))})+'\n'); self.proc.stdin.flush()
+                  payload=json.loads(self._line((max(0,clock_ms)+WATCHDOG_GRACE_MS)/1000.0))
+                  move=chess.Move.from_uci(payload['move']); assert move in board.legal_moves,(board.fen(),payload)
+                  return move
+              def stop(self):
+                  if self.proc.poll() is None:self.proc.kill()
+                  self.proc.wait(timeout=5)
+
+          base=AgentProcess('/tmp/base'); cand=AgentProcess('/tmp/cand')
+          def play(fen,cand_white):
+              board=chess.Board(fen); clocks={chess.WHITE:float(BASE_MS),chess.BLACK:float(BASE_MS)}
+              base.reset();cand.reset(); timings=[]
+              for _ in range(MAX_PLIES):
+                  outcome=board.outcome(claim_draw=True)
+                  if outcome is not None:
+                      if outcome.winner is None:return 0.5,board.result(claim_draw=True),board.ply(),clocks,timings
+                      return (1.0 if outcome.winner==cand_white else 0.0),board.result(claim_draw=True),board.ply(),clocks,timings
+                  mover=board.turn; use_cand=mover==cand_white; engine=cand if use_cand else base; before=clocks[mover]
+                  started=time.monotonic()
+                  try: move=engine.move(board,before)
+                  except Exception as exc:
+                      elapsed=(time.monotonic()-started)*1000.0;clocks[mover]-=elapsed
+                      return (0.0 if use_cand else 1.0),f'engine-failure:{type(exc).__name__}',board.ply(),clocks,timings
+                  elapsed=(time.monotonic()-started)*1000.0;clocks[mover]-=elapsed
+                  if clocks[mover]<0:return (0.0 if use_cand else 1.0),'flag',board.ply(),clocks,timings
+                  timings.append({'candidate':use_cand,'elapsed_ms':elapsed})
+                  board.push(move);clocks[mover]+=INCREMENT_MS
+              return 0.5,'max-ply-draw',board.ply(),clocks,timings
+
+          rows=[];pair_scores=[]
+          try:
+              for idx,fen in enumerate(openings):
+                  pair=0.0
+                  for cw in (True,False):
+                      score,result,plies,clocks,timings=play(fen,cw);pair+=score
+                      row={'opening':idx,'candidate_white':cw,'candidate_score':score,'result':result,'plies':plies,
+                           'candidate_move_ms':[round(t['elapsed_ms'],3) for t in timings if t['candidate']],
+                           'control_move_ms':[round(t['elapsed_ms'],3) for t in timings if not t['candidate']]}
+                      rows.append(row);print({k:v for k,v in row.items() if not k.endswith('_move_ms')},flush=True)
+                  pair_scores.append(pair)
+          finally:
+              base.stop();cand.stop()
+          total=sum(r['candidate_score'] for r in rows);games=len(rows);fraction=total/games
+          elo=400.0*math.log10(fraction/(1.0-fraction)) if 0.0<fraction<1.0 else None
+          ct=[x for r in rows for x in r['candidate_move_ms']];bt=[x for r in rows for x in r['control_move_ms']]
+          summary={'candidate':'H64-residual-1/12','control':'V13-BEST','time_control_ms':[BASE_MS,INCREMENT_MS],
+                   'games':games,'score':total,'score_fraction':fraction,'naive_elo_from_score':elo,
+                   'pair_score_histogram':dict(Counter(str(x) for x in pair_scores)),
+                   'terminations':dict(Counter(r['result'] for r in rows)),
+                   'candidate_mean_move_ms':sum(ct)/max(1,len(ct)),'control_mean_move_ms':sum(bt)/max(1,len(bt)),
+                   'games_detail':rows}
+          Path('results/timed-summary.json').write_text(json.dumps(summary,indent=2)+'\n')
+          print(json.dumps({k:v for k,v in summary.items() if k!='games_detail'},indent=2))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v14-student-s12-timed-${{ github.sha }}
+          path: results/
+          retention-days: 30
