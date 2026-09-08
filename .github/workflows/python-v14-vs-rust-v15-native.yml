@@ -1,0 +1,145 @@
+name: Python V14 vs Rust V15 native-clock calibration
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  RUST_BASE: 8e53d63a766122f70992942eccaac22be9e5fca3
+  V14_ARTIFACT_RUN: '34214504775'
+  V14_ARTIFACT_NAME: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+  V14_INNER_ZIP_SHA256: 398e90ac2c161c5cdbaf729b2e82747c718019bee88ff8f0ad16aa5cfa973a6c
+  UPLOADED_ZIP_SHA256: cbcc24c006068d8386e3c7db255fa4577744d5bb0d913dbb423e62aea628049e
+  GESTALT_SHA256: 956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6
+  M6_OPENING_SHA256: 5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e
+
+jobs:
+  gate:
+    if: github.head_ref == 'calibration/python-v14-vs-rust-v15-20260908'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 2}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - name: Verify calibration-only Rust source and production gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin "$RUST_BASE"
+          git diff --exit-code "$RUST_BASE" -- crates Cargo.toml Cargo.lock rust-toolchain.toml
+          cargo fmt --all -- --check
+          cargo test --workspace --release
+          cargo test -p chess-bench --release tests::suite_matches_the_reviewed_reference_signature -- --exact
+
+  native:
+    if: github.head_ref == 'calibration/python-v14-vs-rust-v15-20260908'
+    needs: gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {shard: 0, indices: '3000,3001'}
+          - {shard: 1, indices: '3002,3003'}
+          - {shard: 2, indices: '3004,3005'}
+          - {shard: 3, indices: '3006,3007'}
+          - {shard: 4, indices: '3008,3009'}
+          - {shard: 5, indices: '3010,3011'}
+          - {shard: 6, indices: '3012,3013'}
+          - {shard: 7, indices: '3014,3015'}
+          - {shard: 8, indices: '3016,3017'}
+          - {shard: 9, indices: '3018,3019'}
+    name: native 120+0.5 shard ${{ matrix.shard }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - uses: dtolnay/rust-toolchain@master
+        with: {toolchain: 1.98.1}
+      - name: Install exact Python V14 runtime dependencies
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Materialize accepted V14 base
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.V14_ARTIFACT_NAME }}
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: ${{ env.V14_ARTIFACT_RUN }}
+      - name: Reconstruct exact uploaded V14 source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name 'Little-Gambit-V14.zip' -print -quit)
+          test -n "$ZIP"
+          echo "$V14_INNER_ZIP_SHA256  $ZIP" | sha256sum --check --strict
+          rm -rf /tmp/python-v14
+          mkdir -p /tmp/python-v14
+          unzip -q "$ZIP" -d /tmp/python-v14
+          cp calibration/python-v14/v14_student_single_runtime.py /tmp/python-v14/experiments/v14_student_single_runtime.py
+          cd /tmp/python-v14
+          echo '136c4e8064e32568e16b722695a6531064ca315cbd223f3553afffecdfe826c0  agent.py' | sha256sum --check --strict
+          echo 'c2cc0534a984124c5a75e250bab65f2756ade47341bbca84d6b6871fdb2977f2  v14_kpk.u8' | sha256sum --check --strict
+          echo '6422eb8eb8713e02e6d62d33ef230f37cf707188e864b575226802aead128b2f  experiments/__init__.py' | sha256sum --check --strict
+          echo '0306e8145a453d91b9b5ac92e9980931510d9e18f8ba598a7548d08b85165c35  experiments/numba_core.py' | sha256sum --check --strict
+          echo '334e026abdcfccb334d835fadd8a9396a9dd3532ff089e029a78768f02444007  experiments/numba_search.py' | sha256sum --check --strict
+          echo '7d0fc5f7a186e79317cf12a2ff285d7716c651fbd045c53d65a3cc6eb1b15319  experiments/v13_residual.i16' | sha256sum --check --strict
+          echo '3422cecc3b1226767412e08746ffd6eef9f7e38602ac15b9256b475e6762b598  experiments/v14_student_h64.npz' | sha256sum --check --strict
+          echo 'a295826488040e2c2f33974dce461186b7de233b14e518f0b88e26a090d585c0  experiments/v14_student_single_runtime.py' | sha256sum --check --strict
+      - name: Build exact Rust V15
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin "$RUST_BASE"
+          git diff --exit-code "$RUST_BASE" -- crates Cargo.toml Cargo.lock rust-toolchain.toml
+          cargo build --release -p chess-uci
+          mkdir -p .qualification/external
+          cp target/release/chess-uci .qualification/rust-v15
+          chmod +x .qualification/rust-v15
+      - name: Fetch exact Gestalt network and fresh M6 opening suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' \
+            --output .qualification/external/gestalt-b840.nnue
+          echo "$GESTALT_SHA256  .qualification/external/gestalt-b840.nnue" | sha256sum --check --strict
+          curl --fail --location --retry 3 -o /tmp/uho.zip \
+            https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6
+          mkdir -p /tmp/m6
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          echo "$M6_OPENING_SHA256  /tmp/m6/m6-uho-lichess-5000-v1.epd" | sha256sum --check --strict
+      - name: Play four native-clock paired games
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          python -u calibration/python-v14/native_arena.py \
+            --python-dir /tmp/python-v14 \
+            --rust "$PWD/.qualification/rust-v15" \
+            --gestalt "$PWD/.qualification/external/gestalt-b840.nnue" \
+            --openings /tmp/m6/m6-uho-lichess-5000-v1.epd \
+            --indices '${{ matrix.indices }}' \
+            --output-dir results \
+            --initial-ms 120000 \
+            --increment-ms 500 \
+            --max-plies 600 | tee results/arena.log
+      - name: Upload retained evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-v14-vs-rust-v15-native-shard-${{ matrix.shard }}-${{ github.sha }}
+          path: results/
+          if-no-files-found: warn
+          retention-days: 30
