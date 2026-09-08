@@ -1,9 +1,15 @@
-name: V15 Python lean Rust-parity stack
+name: V15 Python coherent Rust-parity stack
 
 on:
   push:
     branches: [analysis/v15-python-rust-parity-stack2-20260908]
-    paths: [.github/workflows/v15-python-rust-parity-stack2.yml]
+    paths:
+      - scripts/patch_v15_python_searchv2_history.py
+      - scripts/patch_v15_python_history_semantics_fix.py
+      - scripts/patch_v15_python_presort_after_history.py
+      - scripts/patch_v15_python_presort_once.py
+      - scripts/patch_v15_python_qsearch_cap.py
+      - .github/workflows/v15-python-rust-parity-stack2.yml
   workflow_dispatch:
 
 permissions:
@@ -11,18 +17,15 @@ permissions:
   actions: read
 
 jobs:
-  screen:
-    strategy:
-      fail-fast: false
-      matrix:
-        qcap: [10, 6]
+  qualify:
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: '3.12'}
-      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
       - name: Download exact packaged V14
         uses: actions/download-artifact@v4
         with:
@@ -31,29 +34,50 @@ jobs:
           github-token: ${{ github.token }}
           repository: JamieLittle16/Chess
           run-id: 34214504775
-      - name: Materialize lean parity candidate
+      - name: Materialize baseline, optimized control, and coherent candidate
         shell: bash
         run: |
           set -euo pipefail
           ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
-          rm -rf /tmp/base /tmp/cand results; mkdir -p /tmp/base /tmp/cand results
-          unzip -q "$ZIP" -d /tmp/base; cp -a /tmp/base/. /tmp/cand/
-          # Stack-1's assembler is reused, but TT parity is deliberately disabled here.
-          printf '# qualification no-op: retain V14 history-safe TT\n' > scripts/patch_v15_python_rust_tt_parity.py
-          python scripts/patch_v15_python_rust_parity_stack1.py /tmp/cand/experiments/numba_search.py
-          if [ '${{ matrix.qcap }}' = '6' ]; then sed -i 's/^MAX_QPLY = 10$/MAX_QPLY = 6/' /tmp/cand/experiments/numba_search.py; fi
-          python -m py_compile /tmp/cand/agent.py /tmp/cand/experiments/*.py
-          grep -n '^MAX_QPLY' /tmp/cand/experiments/numba_search.py
-          PYTHONPATH=/tmp/cand python - <<'PY'
-          import chess,numpy as np
-          from experiments.numba_core import encode_position,move_to_uci
+          rm -rf /tmp/base /tmp/control /tmp/cand results
+          mkdir -p /tmp/base /tmp/control /tmp/cand results
+          unzip -q "$ZIP" -d /tmp/base
+          cp -a /tmp/base/. /tmp/control/
+          cp -a /tmp/base/. /tmp/cand/
+
+          python scripts/patch_v15_python_presort_once.py /tmp/control/experiments/numba_search.py
+          python scripts/patch_v15_python_qsearch_cap.py /tmp/control/experiments/numba_search.py 6
+
+          python scripts/patch_v15_python_searchv2_history.py /tmp/cand/experiments/numba_search.py
+          python scripts/patch_v15_python_history_semantics_fix.py /tmp/cand/experiments/numba_search.py
+          python scripts/patch_v15_python_presort_after_history.py /tmp/cand/experiments/numba_search.py
+          python scripts/patch_v15_python_qsearch_cap.py /tmp/cand/experiments/numba_search.py 6
+
+          python -m py_compile /tmp/base/agent.py /tmp/base/experiments/*.py \
+            /tmp/control/agent.py /tmp/control/experiments/*.py \
+            /tmp/cand/agent.py /tmp/cand/experiments/*.py
+          grep -n '^MAX_QPLY' /tmp/control/experiments/numba_search.py /tmp/cand/experiments/numba_search.py
+      - name: JIT smoke all three engines
+        shell: bash
+        run: |
+          set -euo pipefail
+          for D in /tmp/base /tmp/control /tmp/cand; do
+            PYTHONPATH="$D" python - <<'PY'
+          import chess, numpy as np
+          from experiments.numba_core import encode_position, move_to_uci
           from experiments.numba_search import iterative_search_stateful
-          b=chess.Board();e=encode_position(b);h=np.empty(0,dtype=np.uint64)
-          o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,8000)
-          assert chess.Move.from_uci(move_to_uci(int(o[0]))) in b.legal_moves
-          print(tuple(int(x) for x in o[:4]))
+          tests=[chess.STARTING_FEN,
+            'r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1',
+            '8/8/8/8/8/6k1/5n2/6K1 w - - 99 1']
+          for fen in tests:
+              b=chess.Board(fen); e=encode_position(b); h=np.empty(0,dtype=np.uint64)
+              o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,6000)
+              if b.legal_moves.count():
+                  m=chess.Move.from_uci(move_to_uci(int(o[0]))); assert m in b.legal_moves,(fen,o,m)
+              print(fen, tuple(map(int,o[:4])))
           PY
-      - name: Build fresh roots
+          done
+      - name: Build fresh disjoint roots
         shell: bash
         run: |
           set -euo pipefail
@@ -66,9 +90,9 @@ jobs:
           large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
           fresh=[x for x in large if x not in old]; chosen=fresh[1328:1376]
           assert len(chosen)==48 and len(set(chosen))==48
-          Path('/tmp/stack2-48.epd').write_text('\n'.join(chosen)+'\n')
+          Path('/tmp/parity-stack-48.epd').write_text('\n'.join(chosen)+'\n')
           PY
-      - name: Fixed-node throughput
+      - name: Three-way fixed-node throughput
         shell: bash
         run: |
           set -euo pipefail
@@ -77,38 +101,46 @@ jobs:
           from experiments.numba_core import encode_position
           from experiments.numba_search import iterative_search_stateful
           for line in sys.stdin:
-              q=json.loads(line);b=chess.Board(q['fen']);e=encode_position(b);h=np.empty(0,dtype=np.uint64)
+              q=json.loads(line); b=chess.Board(q['fen']); e=encode_position(b); h=np.empty(0,dtype=np.uint64)
               o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,int(q['nodes']))
               print(json.dumps({'nodes':int(o[3]),'depth':int(o[2])}),flush=True)
           PY
           python - <<'PY'
           import json,os,statistics,subprocess,sys,time
           from pathlib import Path
-          roots=[x.strip() for x in Path('/tmp/stack2-48.epd').read_text().splitlines() if x.strip()][:16]
+          roots=[x.strip() for x in Path('/tmp/parity-stack-48.epd').read_text().splitlines() if x.strip()][:16]
           def start(d):
-              e=os.environ.copy();e['PYTHONPATH']=d;return subprocess.Popen([sys.executable,'/tmp/worker.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=e)
-          def one(p,fen,n):p.stdin.write(json.dumps({'fen':fen,'nodes':n})+'\n');p.stdin.flush();return json.loads(p.stdout.readline())
+              e=os.environ.copy(); e['PYTHONPATH']=d
+              return subprocess.Popen([sys.executable,'/tmp/worker.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=e)
+          def one(p,fen,n):
+              p.stdin.write(json.dumps({'fen':fen,'nodes':n})+'\n'); p.stdin.flush(); return json.loads(p.stdout.readline())
           def timed(p,order):
-              nodes=0;ds=[];t=time.perf_counter()
+              nodes=0; ds=[]; t=time.perf_counter()
               for fen in order:
-                  z=one(p,fen,30000);nodes+=z['nodes'];ds.append(z['depth'])
+                  z=one(p,fen,30000); nodes+=z['nodes']; ds.append(z['depth'])
               return nodes/(time.perf_counter()-t),sum(ds)/len(ds)
-          b=start('/tmp/base');c=start('/tmp/cand');rat=[];rows=[]
+          ps={k:start(v) for k,v in {'base':'/tmp/base','control':'/tmp/control','candidate':'/tmp/cand'}.items()}
+          rows=[]
           try:
-              one(b,roots[0],500);one(c,roots[0],500)
-              for r in range(3):
-                  order=roots if r%2==0 else list(reversed(roots))
-                  if r%2==0:bn,bd=timed(b,order);cn,cd=timed(c,order)
-                  else:cn,cd=timed(c,order);bn,bd=timed(b,order)
-                  rat.append(cn/bn);rows.append([bn,cn,cn/bn,bd,cd])
-          finally:b.terminate();c.terminate();b.wait();c.wait()
-          out={'qcap':${{ matrix.qcap }},'median_nps_ratio':statistics.median(rat),'rows':rows};Path('results/throughput.json').write_text(json.dumps(out,indent=2)+'\n');print('FINAL',out)
+              for p in ps.values(): one(p,roots[0],500)
+              for rep in range(3):
+                  order=roots if rep%2==0 else list(reversed(roots))
+                  vals={}
+                  names=('base','control','candidate') if rep%2==0 else ('candidate','control','base')
+                  for name in names: vals[name]=timed(ps[name],order)
+                  rows.append({'rep':rep,**{f'{k}_nps':v[0] for k,v in vals.items()},**{f'{k}_depth':v[1] for k,v in vals.items()},'control_over_base':vals['control'][0]/vals['base'][0],'candidate_over_control':vals['candidate'][0]/vals['control'][0],'candidate_over_base':vals['candidate'][0]/vals['base'][0]})
+          finally:
+              for p in ps.values(): p.terminate(); p.wait()
+          out={'median_control_over_base':statistics.median(r['control_over_base'] for r in rows),'median_candidate_over_control':statistics.median(r['candidate_over_control'] for r in rows),'median_candidate_over_base':statistics.median(r['candidate_over_base'] for r in rows),'rows':rows}
+          Path('results/throughput.json').write_text(json.dumps(out,indent=2)+'\n'); print('FINAL',json.dumps(out))
           PY
-      - name: 96-game equal-node screen
-        run: python -u tools/v14_fixed_node_arena.py /tmp/cand /tmp/base --nodes 18000 --pairs 48 --opening-file /tmp/stack2-48.epd --opening-offset 0 --max-plies 220 --json-out results/arena.json | tee results/arena.log
+      - name: 96-game history contribution screen — candidate vs optimized control
+        run: python -u tools/v14_fixed_node_arena.py /tmp/cand /tmp/control --nodes 18000 --pairs 48 --opening-file /tmp/parity-stack-48.epd --opening-offset 0 --max-plies 220 --json-out results/candidate-v-control.json | tee results/candidate-v-control.log
+      - name: 96-game full-stack screen — candidate vs exact V14
+        run: python -u tools/v14_fixed_node_arena.py /tmp/cand /tmp/base --nodes 18000 --pairs 48 --opening-file /tmp/parity-stack-48.epd --opening-offset 0 --max-plies 220 --json-out results/candidate-v-v14.json | tee results/candidate-v-v14.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: v15-python-rust-parity-stack2-q${{ matrix.qcap }}-${{ github.sha }}
+          name: v15-python-rust-parity-stack2-${{ github.sha }}
           path: results/
           retention-days: 30
