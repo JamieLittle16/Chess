@@ -1,0 +1,188 @@
+name: M6 deferred gestalt accumulator performance probe
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  deferred-accumulator:
+    if: github.head_ref == 'm6/gestalt-deferred-accumulator-v1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    env:
+      RUSTFLAGS: -C target-cpu=native
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Verify research branch does not change production source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git diff --exit-code origin/main -- crates Cargo.toml Cargo.lock rust-toolchain.toml
+
+      - name: Strict production control gate and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/bin .qualification/deferred-accumulator
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/bin/gestalt-control
+          chmod +x .qualification/bin/gestalt-control
+          sha256sum .qualification/bin/gestalt-control > .qualification/deferred-accumulator/control.sha256
+
+      - name: Materialize deferred-accumulator candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/apply_gestalt_deferred_accumulator_probe.py
+          cargo fmt --all
+          git diff --check
+          git diff -- crates/chess-search/src/lib.rs > .qualification/deferred-accumulator/candidate.patch
+          test -s .qualification/deferred-accumulator/candidate.patch
+          sha256sum scripts/apply_gestalt_deferred_accumulator_probe.py > .qualification/deferred-accumulator/patcher.sha256
+
+      - name: Strict candidate gate and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/bin/gestalt-deferred
+          chmod +x .qualification/bin/gestalt-deferred
+          sha256sum .qualification/bin/gestalt-deferred > .qualification/deferred-accumulator/candidate.sha256
+
+      - name: Download exact certified CC0 network
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' \
+            --output .qualification/deferred-accumulator/gestalt-b840.nnue
+          test "$(stat -c%s .qualification/deferred-accumulator/gestalt-b840.nnue)" = '21242944'
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  .qualification/deferred-accumulator/gestalt-b840.nnue' | sha256sum --check --strict
+
+      - name: Reproduce frozen 5000-root M6 suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip' \
+            --output /tmp/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/UHO_Lichess_4852_v1.epd.zip' | sha256sum --check --strict
+          mkdir -p .qualification/m6-openings
+          python scripts/build_m6_opening_suite.py --archive /tmp/UHO_Lichess_4852_v1.epd.zip --output-dir .qualification/m6-openings
+          echo '5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e  .qualification/m6-openings/m6-uho-lichess-5000-v1.epd' | sha256sum --check --strict
+
+      - name: Build pinned Fastchess
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = 'f618e34540f94f4719ad3817950618dabe441318'
+          make -C .qualification/fastchess-src -j2
+
+      - name: Create identical-network launchers
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$PWD"
+          mkdir -p .qualification/launchers
+          cat > .qualification/launchers/control.sh <<EOF
+          #!/usr/bin/env bash
+          export CHESS_GESTALT_NETWORK='$ROOT/.qualification/deferred-accumulator/gestalt-b840.nnue'
+          exec '$ROOT/.qualification/bin/gestalt-control'
+          EOF
+          cat > .qualification/launchers/deferred.sh <<EOF
+          #!/usr/bin/env bash
+          export CHESS_GESTALT_NETWORK='$ROOT/.qualification/deferred-accumulator/gestalt-b840.nnue'
+          exec '$ROOT/.qualification/bin/gestalt-deferred'
+          EOF
+          chmod +x .qualification/launchers/*.sh
+
+      - name: Fixed-node semantic and timing probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/deferred-accumulator/match
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/.qualification/launchers/deferred.sh" name=gestalt-deferred nodes=25000 option.Hash=32 \
+            -engine cmd="$PWD/.qualification/launchers/control.sh" name=gestalt-control nodes=25000 option.Hash=32 \
+            -openings file="$PWD/.qualification/m6-openings/m6-uho-lichess-5000-v1.epd" format=epd order=random \
+            -srand 20261205 -rounds 10 -repeat -concurrency 1 -maxmoves 300 -ratinginterval 20 \
+            -pgnout file=.qualification/deferred-accumulator/match/games.pgn notation=uci append=false nodes=true nps=true \
+            | tee .qualification/deferred-accumulator/match/stdout.log
+          python scripts/analyze_fastchess_node_times.py \
+            .qualification/deferred-accumulator/match/games.pgn \
+            --output .qualification/deferred-accumulator/match/times.json
+
+      - name: Require a material speed win
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' | tee .qualification/deferred-accumulator/performance-summary.txt
+          import json
+          from pathlib import Path
+
+          engines = json.loads(Path('.qualification/deferred-accumulator/match/times.json').read_text())['engines']
+          control = engines['gestalt-control']['mean_seconds']
+          candidate = engines['gestalt-deferred']['mean_seconds']
+          speedup = control / candidate
+          print(f'control_mean_seconds={control:.9f}')
+          print(f'deferred_mean_seconds={candidate:.9f}')
+          print(f'deferred_speedup={speedup:.4f}x')
+          if speedup < 1.01:
+              raise SystemExit(f'reject: speedup {speedup:.4f}x is below predeclared 1.01x gate')
+          PY
+
+      - name: Record experiment identity
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > .qualification/deferred-accumulator/checkout-head.txt
+          cat > .qualification/deferred-accumulator/evidence.txt <<'EOF'
+          purpose=defer mature-evaluator accumulator writes until after late-quiet futility rejection
+          production_base=c473970d9419de1cb7a44428c6ae4e0b7832fbc6
+          chess_semantics=unchanged; same prepared delta is applied before every searched child
+          expected_node_count=unchanged
+          network_sha256=956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6
+          opening_sha256=5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e
+          nodes_per_move=25000
+          performance_games=20
+          acceptance_gate=control_mean_seconds/candidate_mean_seconds >= 1.01
+          EOF
+
+      - name: Upload complete evidence without network bytes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m6-gestalt-deferred-accumulator-${{ github.sha }}
+          path: |
+            .qualification/deferred-accumulator/control.sha256
+            .qualification/deferred-accumulator/candidate.sha256
+            .qualification/deferred-accumulator/patcher.sha256
+            .qualification/deferred-accumulator/candidate.patch
+            .qualification/deferred-accumulator/performance-summary.txt
+            .qualification/deferred-accumulator/evidence.txt
+            .qualification/deferred-accumulator/checkout-head.txt
+            .qualification/deferred-accumulator/match/
+          retention-days: 30
