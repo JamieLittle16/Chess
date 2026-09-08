@@ -2,8 +2,10 @@
 //!
 //! This module intentionally starts with a transparent scalar inference oracle. The feature
 //! transformer is still updated incrementally during search; only the small dense tail is scalar.
-//! Once parity is certified against the reference implementation, the tail can be SIMD-specialised
-//! without changing the network format or accumulator semantics.
+//! The on-disk v92 network is the Viridithas SIMD-quantised representation, so the loader converts
+//! its interleaved L1 and input-major L2 matrices once at startup into simple scalar row-major form.
+//! Once parity is certified against the reference implementation, the hot path can be
+//! SIMD-specialised without changing the network format or accumulator semantics.
 
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
@@ -24,6 +26,9 @@ pub const SERIALIZED_BYTES: usize = 50_616_896;
 const QA: i32 = 255;
 const QB: i32 = 64;
 const SCALE: f32 = 400.0;
+const FT_SHIFT: u32 = 10;
+const L1_INPUT_CHUNK: usize = std::mem::size_of::<i32>() / std::mem::size_of::<i8>();
+const L1_MUL: f32 = (1_u32 << FT_SHIFT) as f32 / (QA * QA * QB) as f32;
 const FEATURE_WEIGHTS: usize = INPUTS * HIDDEN * FEATURE_BUCKETS;
 const FEATURE_BIAS: usize = HIDDEN;
 const L1_WEIGHTS: usize = OUTPUT_BUCKETS * HIDDEN * L2;
@@ -51,8 +56,10 @@ const HALF_BUCKET_MAP: [u8; 32] = [
 pub struct Network {
     feature_weights: Box<[i16]>,
     feature_bias: Box<[i16]>,
+    /// Canonical output-major rows, converted from Viridithas's four-byte SIMD interleave at load.
     l1_weights: Box<[i8]>,
     l1_bias: Box<[f32]>,
+    /// Canonical output-major rows, converted from Viridithas's SIMD input-major storage at load.
     l2_weights: Box<[f32]>,
     l2_bias: Box<[f32]>,
     l3_weights: Box<[f32]>,
@@ -60,7 +67,7 @@ pub struct Network {
 }
 
 impl Network {
-    /// Parse the decompressed Viridithas v14 quantised struct representation.
+    /// Parse the decompressed Viridithas v14 SIMD-quantised struct representation.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
         if bytes.len() != SERIALIZED_BYTES {
             return Err(format!(
@@ -71,9 +78,11 @@ impl Network {
         let mut cursor = 0_usize;
         let feature_weights = read_i16s(bytes, &mut cursor, FEATURE_WEIGHTS)?;
         let feature_bias = read_i16s(bytes, &mut cursor, FEATURE_BIAS)?;
-        let l1_weights = read_i8s(bytes, &mut cursor, L1_WEIGHTS)?;
+        let serialized_l1 = read_i8s(bytes, &mut cursor, L1_WEIGHTS)?;
+        let l1_weights = canonicalize_simd_l1(&serialized_l1);
         let l1_bias = read_f32s(bytes, &mut cursor, L1_BIAS)?;
-        let l2_weights = read_f32s(bytes, &mut cursor, L2_WEIGHTS)?;
+        let serialized_l2 = read_f32s(bytes, &mut cursor, L2_WEIGHTS)?;
+        let l2_weights = canonicalize_simd_l2(&serialized_l2);
         let l2_bias = read_f32s(bytes, &mut cursor, L2_BIAS)?;
         let l3_weights = read_f32s(bytes, &mut cursor, L3_WEIGHTS)?;
         let l3_bias = read_f32s(bytes, &mut cursor, L3_BIAS)?;
@@ -182,8 +191,8 @@ impl Network {
         };
         let bucket = output_bucket(position);
         let mut ft = [0_u8; HIDDEN];
-        activate_pairwise(us, &mut ft[..HIDDEN / 2]);
-        activate_pairwise(them, &mut ft[HIDDEN / 2..]);
+        activate_pairwise_simd_quantized(us, &mut ft[..HIDDEN / 2]);
+        activate_pairwise_simd_quantized(them, &mut ft[HIDDEN / 2..]);
 
         let l1_weight_base = bucket * HIDDEN * L2;
         let l1_bias_base = bucket * L2;
@@ -195,7 +204,7 @@ impl Network {
             for (&input, &weight) in ft.iter().zip(row) {
                 sum += i32::from(input) * i32::from(weight);
             }
-            let value = sum as f32 / (QA * QB) as f32 + self.l1_bias[l1_bias_base + output];
+            let value = (sum as f32).mul_add(L1_MUL, self.l1_bias[l1_bias_base + output]);
             let clipped = value.clamp(0.0, 1.0);
             *output_value = clipped * clipped;
         }
@@ -226,12 +235,17 @@ impl Network {
     }
 }
 
-fn activate_pairwise(accumulator: &[i16; HIDDEN], output: &mut [u8]) {
+/// Viridithas v14 quantises the network with its SIMD layout enabled. Its pairwise activation uses
+/// a signed high multiply after shifting the first lane by six bits (`16 - FT_SHIFT`). For the
+/// non-negative surviving range that is exactly `floor(left * right / 1024)`, followed by unsigned
+/// saturation. Reproducing that here is necessary for bit-level reference parity.
+fn activate_pairwise_simd_quantized(accumulator: &[i16; HIDDEN], output: &mut [u8]) {
     debug_assert_eq!(output.len(), HIDDEN / 2);
     for index in 0..HIDDEN / 2 {
         let left = i32::from(accumulator[index]).clamp(0, QA);
         let right = i32::from(accumulator[HIDDEN / 2 + index]).clamp(0, QA);
-        output[index] = ((left * right) / QA) as u8;
+        let product = (left * right) >> FT_SHIFT;
+        output[index] = product.clamp(0, i32::from(u8::MAX)) as u8;
     }
 }
 
@@ -529,6 +543,49 @@ fn square(file: u8, rank: u8) -> Square {
     Square::from_file_rank(file, rank).expect("constant square stays on board")
 }
 
+/// Convert Viridithas's SIMD L1 serialization into output-major rows. The serialized index order is
+/// `[four-input chunk][output neuron][byte within chunk]`; scalar inference is clearer as
+/// `[output neuron][input]`. This is a one-time setup cost and never occurs in search.
+fn canonicalize_simd_l1(serialized: &[i8]) -> Box<[i8]> {
+    debug_assert_eq!(serialized.len(), L1_WEIGHTS);
+    let per_bucket = HIDDEN * L2;
+    let chunks = HIDDEN / L1_INPUT_CHUNK;
+    let mut canonical = vec![0_i8; serialized.len()];
+    for bucket in 0..OUTPUT_BUCKETS {
+        let base = bucket * per_bucket;
+        for chunk in 0..chunks {
+            for output in 0..L2 {
+                for lane in 0..L1_INPUT_CHUNK {
+                    let input = chunk * L1_INPUT_CHUNK + lane;
+                    let source = base
+                        + chunk * L1_INPUT_CHUNK * L2
+                        + output * L1_INPUT_CHUNK
+                        + lane;
+                    let target = base + output * HIDDEN + input;
+                    canonical[target] = serialized[source];
+                }
+            }
+        }
+    }
+    canonical.into_boxed_slice()
+}
+
+/// Convert Viridithas's SIMD L2 serialization from input-major to scalar output-major rows.
+fn canonicalize_simd_l2(serialized: &[f32]) -> Box<[f32]> {
+    debug_assert_eq!(serialized.len(), L2_WEIGHTS);
+    let per_bucket = L2 * L3;
+    let mut canonical = vec![0_f32; serialized.len()];
+    for bucket in 0..OUTPUT_BUCKETS {
+        let base = bucket * per_bucket;
+        for input in 0..L2 {
+            for output in 0..L3 {
+                canonical[base + output * L2 + input] = serialized[base + input * L3 + output];
+            }
+        }
+    }
+    canonical.into_boxed_slice()
+}
+
 fn read_i16s(bytes: &[u8], cursor: &mut usize, count: usize) -> Result<Box<[i16]>, String> {
     let byte_count = count
         .checked_mul(2)
@@ -614,6 +671,40 @@ mod tests {
         assert!(frame_for_king(Color::White, h1).mirror_files);
         assert_eq!(frame_for_king(Color::White, e1).bucket, 3);
         assert!(frame_for_king(Color::White, e1).mirror_files);
+    }
+
+    #[test]
+    fn simd_layout_canonicalizers_preserve_known_coordinates() {
+        let mut l1 = vec![0_i8; L1_WEIGHTS];
+        let input = 13;
+        let output = 7;
+        let chunk = input / L1_INPUT_CHUNK;
+        let lane = input % L1_INPUT_CHUNK;
+        let serialized_index =
+            chunk * L1_INPUT_CHUNK * L2 + output * L1_INPUT_CHUNK + lane;
+        l1[serialized_index] = 42;
+        let l1 = canonicalize_simd_l1(&l1);
+        assert_eq!(l1[output * HIDDEN + input], 42);
+
+        let mut l2 = vec![0_f32; L2_WEIGHTS];
+        let input = 5;
+        let output = 19;
+        l2[input * L3 + output] = 3.5;
+        let l2 = canonicalize_simd_l2(&l2);
+        assert_eq!(l2[output * L2 + input], 3.5);
+    }
+
+    #[test]
+    fn simd_pairwise_activation_matches_reference_scaling() {
+        let mut accumulator = [0_i16; HIDDEN];
+        accumulator[0] = 255;
+        accumulator[HIDDEN / 2] = 255;
+        accumulator[1] = 128;
+        accumulator[HIDDEN / 2 + 1] = 128;
+        let mut output = [0_u8; HIDDEN / 2];
+        activate_pairwise_simd_quantized(&accumulator, &mut output);
+        assert_eq!(output[0], 63);
+        assert_eq!(output[1], 16);
     }
 
     #[test]
