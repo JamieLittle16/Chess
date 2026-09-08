@@ -1,0 +1,127 @@
+name: V16 Hyperstition zero-chunk probe
+
+on:
+  push:
+    branches: [v16/hyperstition-nnz-l1]
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      RUSTFLAGS: -C target-cpu=x86-64-v3
+      NETWORK_URL: https://github.com/cosmobobak/viridithas-networks/releases/download/v92/hyperstition-b400.nnue.zst
+      RAW_SHA256: 36bcc6b3354ecbdb88fb95a341e494558b052223143f38ff6e6387aed99ab193
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: Fetch exact v92 network
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/zero-chunk
+          curl --fail --location --retry 5 "$NETWORK_URL" -o .qualification/zero-chunk/network.nnue.zst
+          if ! command -v zstd >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y zstd
+          fi
+          zstd -d -f .qualification/zero-chunk/network.nnue.zst -o .qualification/zero-chunk/network.nnue
+          echo "$RAW_SHA256  .qualification/zero-chunk/network.nnue" | sha256sum --check --strict
+
+      - name: Build materialized AVX2 baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --all-features --release
+          cargo build --release -p chess-eval --example hyperstition_tail_bench --example hyperstition_eval
+          cp target/release/examples/hyperstition_tail_bench .qualification/zero-chunk/baseline-bench
+          cp target/release/examples/hyperstition_eval .qualification/zero-chunk/baseline-eval
+
+      - name: Apply zero-chunk candidate and strict gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/apply_hyperstition_zero_chunk_probe.py
+          cargo fmt --all
+          git diff --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --all-features --release
+          cargo build --release -p chess-eval --example hyperstition_tail_bench --example hyperstition_eval
+          cp target/release/examples/hyperstition_tail_bench .qualification/zero-chunk/candidate-bench
+          cp target/release/examples/hyperstition_eval .qualification/zero-chunk/candidate-eval
+
+      - name: Exact parity and paired timing
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import re, statistics, subprocess
+          from pathlib import Path
+          root=Path('.qualification/zero-chunk'); net=root/'network.nnue'
+          base=root/'baseline-bench'; cand=root/'candidate-bench'
+          def run(p):
+              cp=subprocess.run([str(p),str(net),'120000'],text=True,capture_output=True,check=True)
+              scores=re.search(r'^scores=(.*)$',cp.stdout,re.M).group(1)
+              ns=float(re.search(r'ns_per_eval=([0-9.]+)',cp.stdout).group(1))
+              print(p.name, scores, ns)
+              return scores,ns
+          run(base); run(cand)
+          bt=[]; ct=[]; bs=cs=None
+          for i in range(7):
+              if i%2==0:
+                  bs,b=run(base); cs,c=run(cand)
+              else:
+                  cs,c=run(cand); bs,b=run(base)
+              bt.append(b);ct.append(c)
+          if bs != cs: raise SystemExit(f'score mismatch {bs} != {cs}')
+          bm=statistics.median(bt); cm=statistics.median(ct)
+          pct=(1-cm/bm)*100
+          report=f'baseline_ns={bt}\ncandidate_ns={ct}\nbaseline_median_ns={bm:.3f}\ncandidate_median_ns={cm:.3f}\nimprovement_pct={pct:.3f}\nscores={bs}\n'
+          (root/'timing.txt').write_text(report); print(report)
+          if cm >= bm * 0.99:
+              raise SystemExit('zero-chunk skip did not clear 1% evaluator-tail improvement')
+          PY
+
+      - name: Edge score parity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import subprocess
+          from pathlib import Path
+          root=Path('.qualification/zero-chunk'); net=root/'network.nnue'
+          fens=[
+            'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+            'r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1',
+            '4k3/8/8/8/8/8/4Q3/4K3 w - - 0 1',
+            '8/5pk1/6p1/3R4/8/6P1/5PK1/8 w - - 0 1',
+            '7k/8/8/8/8/8/8/K7 w - - 0 1',
+          ]
+          out=[]
+          for fen in fens:
+              b=subprocess.run([str(root/'baseline-eval'),str(net),fen],text=True,capture_output=True,check=True).stdout.strip()
+              c=subprocess.run([str(root/'candidate-eval'),str(net),fen],text=True,capture_output=True,check=True).stdout.strip()
+              if b != c: raise SystemExit(f'{fen}: {b} != {c}')
+              out.append(f'{b}\t{c}\t{fen}')
+          (root/'scores.tsv').write_text('\n'.join(out)+'\n')
+          print('\n'.join(out))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v16-hyperstition-zero-chunk-${{ github.sha }}
+          path: |
+            .qualification/zero-chunk/timing.txt
+            .qualification/zero-chunk/scores.tsv
+          if-no-files-found: warn
+          retention-days: 14
