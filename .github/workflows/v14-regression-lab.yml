@@ -11,7 +11,7 @@ permissions:
 jobs:
   lab:
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -48,9 +48,10 @@ jobs:
             tools/v14_fixed_node_arena.py \
             tools/v14_regression_probe.py \
             tools/v14_teacher_grade.py \
+            tools/v14_build_probe_corpus.py \
             /tmp/v13/agent.py /tmp/v13/experiments/*.py
 
-      - name: Record exact V13 seed-regression depth curve twice
+      - name: Record exact V13 historical seed curve twice
         shell: bash
         run: |
           set -euo pipefail
@@ -66,8 +67,46 @@ jobs:
           import json
           payload=json.load(open('v14-lab-results/v13-regression-probe.json'))
           assert payload['candidate']==payload['control'], payload['comparisons']
-          assert all(not row['candidate_improves'] and not row['candidate_regresses'] for row in payload['comparisons'].values())
+          assert all(row['identical_searches'] for row in payload['comparisons'].values())
           print('regression_probe_identity_exact')
+          PY
+
+      - name: Build deterministic broad regression corpus
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/v14_build_probe_corpus.py \
+            --openings match/openings/m3-uho-lichess-100-v1.epd \
+            --positions 48 \
+            --seed 2026090802 \
+            --json-out v14-lab-results/broad-manifest.json \
+            | tee v14-lab-results/broad-manifest.log
+          python - <<'PY'
+          import json
+          row=json.load(open('v14-lab-results/broad-manifest.json'))
+          assert row['positions']==48,row
+          assert len(row['fixtures'])==48,row
+          assert len(row['category_counts'])>=3,row['category_counts']
+          print('broad_categories',row['category_counts'])
+          PY
+
+      - name: Broad fixed-node probe identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/v14_regression_probe.py \
+            --engine /tmp/v13 \
+            --control /tmp/v13 \
+            --manifest v14-lab-results/broad-manifest.json \
+            --budgets 12000 \
+            --json-out v14-lab-results/broad-identity-probe.json \
+            | tee v14-lab-results/broad-identity-probe.log
+          python - <<'PY'
+          import json
+          row=json.load(open('v14-lab-results/broad-identity-probe.json'))
+          assert row['candidate']==row['control'],row['comparisons']
+          assert all(item['identical_searches'] for item in row['comparisons'].values())
+          print('broad_probe_identity_exact',len(row['comparisons']))
           PY
 
       - name: Paired arena identity sanity check
@@ -103,7 +142,7 @@ jobs:
           echo "STOCKFISH_BIN=$STOCKFISH_BIN" >> "$GITHUB_ENV"
           "$STOCKFISH_BIN" bench 1 1 4 default depth >/dev/null
 
-      - name: Audit reported seed labels with pinned Stockfish 19
+      - name: Audit historical labels with pinned Stockfish 19
         shell: bash
         run: |
           set -euo pipefail
@@ -115,49 +154,35 @@ jobs:
           import chess
 
           manifest=json.load(open('match/regressions/v14-v13-seed.json'))
-          engine=subprocess.Popen(
-              [os.environ['STOCKFISH_BIN']],
-              stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,
-          )
+          engine=subprocess.Popen([os.environ['STOCKFISH_BIN']],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1)
           assert engine.stdin is not None and engine.stdout is not None
           def send(line): engine.stdin.write(line+'\n'); engine.stdin.flush()
           def wait_for(prefix):
               while True:
                   raw=engine.stdout.readline()
-                  if raw == '':
-                      raise RuntimeError(f'stockfish exited with {engine.poll()}')
+                  if raw == '': raise RuntimeError(f'stockfish exited with {engine.poll()}')
                   line=raw.strip()
-                  if not line:
-                      continue
-                  if line.startswith(prefix):
-                      return line
+                  if not line: continue
+                  if line.startswith(prefix): return line
           send('uci'); wait_for('uciok')
-          send('setoption name Threads value 1')
-          send('setoption name Hash value 64')
-          send('setoption name UCI_LimitStrength value false')
-          send('isready'); wait_for('readyok')
+          send('setoption name Threads value 1'); send('setoption name Hash value 64')
+          send('setoption name UCI_LimitStrength value false'); send('isready'); wait_for('readyok')
           rows=[]
           for fixture in manifest['fixtures']:
               board=chess.Board(fixture['fen'])
               send('ucinewgame'); send('isready'); wait_for('readyok')
-              send('position fen '+fixture['fen'])
-              send('go nodes 300000')
+              send('position fen '+fixture['fen']); send('go nodes 300000')
               best=wait_for('bestmove').split()[1]
               assert chess.Move.from_uci(best) in board.legal_moves,(fixture['id'],best)
-              expected=set(fixture['expected_uci'])
-              row={
-                  'id':fixture['id'],
-                  'stockfish_bestmove':best,
-                  'reported_expected':sorted(expected),
-                  'matches_reported':best in expected,
-              }
+              expected=set(fixture.get('expected_uci',[]))
+              row={'id':fixture['id'],'stockfish_bestmove':best,'current_expected':sorted(expected),'matches_current_expected':best in expected}
               rows.append(row); print(row)
           send('quit'); engine.wait(timeout=5)
           Path('v14-lab-results/stockfish-seed-label-audit.json').write_text(json.dumps(rows,indent=2)+'\n')
-          print('reported_labels_reproduced',sum(row['matches_reported'] for row in rows),'of',len(rows))
+          assert all(row['matches_current_expected'] for row in rows),rows
           PY
 
-      - name: Calibrate teacher-loss grader on V13 identity
+      - name: Calibrate seed teacher-loss grader on V13 identity
         shell: bash
         run: |
           set -euo pipefail
@@ -176,7 +201,30 @@ jobs:
           assert row['total_delta_cp_loss']==0,row
           assert row['total_delta_expectation_loss']==0.0,row
           assert all(item['candidate_move']==item['control_move'] for item in row['positions']),row
-          print('teacher_grade_identity_zero_delta')
+          print('seed_teacher_grade_identity_zero_delta')
+          PY
+
+      - name: Calibrate broad teacher-loss grader on V13 identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/v14_teacher_grade.py \
+            --probe v14-lab-results/broad-identity-probe.json \
+            --manifest v14-lab-results/broad-manifest.json \
+            --stockfish "$STOCKFISH_BIN" \
+            --search-budget 12000 \
+            --teacher-nodes 100000 \
+            --hash-mb 64 \
+            --json-out v14-lab-results/broad-identity-teacher-grade.json \
+            | tee v14-lab-results/broad-identity-teacher-grade.log
+          python - <<'PY'
+          import json
+          row=json.load(open('v14-lab-results/broad-identity-teacher-grade.json'))
+          assert row['total_delta_cp_loss']==0,row
+          assert row['total_delta_expectation_loss']==0.0,row
+          assert len(row['positions'])==48,row
+          assert all(item['candidate_move']==item['control_move'] for item in row['positions']),row
+          print('broad_teacher_grade_identity_zero_delta',row['categories'])
           PY
 
       - name: Upload laboratory evidence
