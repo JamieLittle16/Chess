@@ -1,0 +1,82 @@
+name: V15 Python root-policy runtime qualification
+
+on:
+  push:
+    branches: [analysis/v15-python-bucket-student-runtime-20260908]
+    paths:
+      - scripts/export_v15_root_policy_numpy.py
+      - scripts/patch_v15_python_root_policy_runtime.py
+      - .github/workflows/v15-python-root-policy-runtime.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  timed:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Install exact competition + export runtime
+        run: |
+          python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+          python -m pip install --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Download H64 root policy pilot
+        uses: actions/download-artifact@v4
+        with:
+          name: v15-python-root-policy-h64-d1b5edd3a53b13db95e2bed628ed292bad940622
+          path: policy-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34259471594
+      - name: Materialize exact A/B
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
+          MODEL=$(find policy-artifact -type f -name root-policy-h64.pt -print -quit); test -n "$MODEL"
+          rm -rf /tmp/base /tmp/cand /tmp/m6 results; mkdir -p /tmp/base /tmp/cand /tmp/m6 results
+          unzip -q "$ZIP" -d /tmp/base; cp -a /tmp/base/. /tmp/cand/
+          python scripts/export_v15_root_policy_numpy.py "$MODEL" /tmp/cand/v15_root_policy_h64.npz
+          python scripts/patch_v15_python_root_policy_runtime.py /tmp/cand/agent.py /tmp/cand/experiments/numba_search.py
+          python -m py_compile /tmp/cand/agent.py /tmp/cand/experiments/*.py
+          PYTHONPATH=/tmp/cand python - <<'PY'
+          import agent,chess,time
+          for fen in (chess.STARTING_FEN,'r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1'):
+              b=chess.Board(fen);t=time.perf_counter();m=chess.Move.from_uci(agent.get_move(fen,80000));assert m in b.legal_moves;(print(fen,m,(time.perf_counter()-t)*1000))
+          PY
+      - name: Build disjoint fresh roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old];chosen=fresh[864:912]
+          assert len(chosen)==48 and len(set(chosen))==48
+          Path('/tmp/policy-48.epd').write_text('\n'.join(chosen)+'\n')
+          PY
+      - name: 96 colour-swapped competition-clock games
+        run: python -u scripts/v15_competition_gate.py --control /tmp/base --candidate /tmp/cand --openings /tmp/policy-48.epd --output results/timed.json --label 'V15 root-policy H64 initial ordering'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-root-policy-runtime-${{ github.sha }}
+          path: results/
+          retention-days: 30
