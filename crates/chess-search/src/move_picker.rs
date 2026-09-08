@@ -123,6 +123,7 @@ impl<'a> MovePicker<'a> {
     ///
     /// TT, tactical and killer stages are identical to `next`. Equal quiet scores preserve current
     /// move-buffer order. Only candidate Search-v2 code calls this method.
+    #[allow(dead_code)]
     pub(super) fn next_scored<F>(
         &mut self,
         position: &Position,
