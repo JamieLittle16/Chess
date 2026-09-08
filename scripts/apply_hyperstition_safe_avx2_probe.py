@@ -1,16 +1,11 @@
 #!/usr/bin/env python3
 """Apply a safe_arch AVX2 L1 inference probe to Hyperstition.
 
-This experiment keeps the already-certified scalar oracle intact as a compile-time fallback and
-adds the v92 native four-input L1 layout alongside it. On AVX2 builds, each four-byte activated
-input chunk is splatted across eight i32 lanes and consumed with the same `maddubs` + `maddwd`
-sequence used by Viridithas v14. `safe_arch` exposes those operations without weakening the
+On AVX2 builds this keeps the v92 native four-input L1 layout and consumes it with the same
+`maddubs` + `maddwd` arithmetic used by Viridithas v14. Non-AVX2 builds retain the already-certified
+canonical scalar layout. The two representations are cfg-exclusive, so production memory does not
+pay for a duplicate matrix. `safe_arch` exposes the packed operations without weakening the
 workspace-wide `unsafe_code = "forbid"` contract.
-
-The duplicate 256 KiB L1 matrix is intentional for the experiment: it makes the arithmetic change
-fully reversible and lets the existing scalar path remain an independent oracle. If the path wins,
-production materialisation can remove the canonical copy on AVX2-only tournament builds or retain
-it as a portable fallback according to deployment requirements.
 """
 
 from __future__ import annotations
@@ -32,12 +27,12 @@ def replace_exact(text: str, old: str, new: str, *, count: int = 1, label: str) 
 def patch_manifest() -> None:
     path = Path("crates/chess-eval/Cargo.toml")
     text = path.read_text(encoding="utf-8")
-    if 'safe_arch = "1.0.0"' in text:
+    if 'safe_arch = "=1.2.0"' in text:
         return
     text = replace_exact(
         text,
         """[dependencies]\nchess-core = { path = \"../chess-core\" }\n""",
-        """[dependencies]\nchess-core = { path = \"../chess-core\" }\nsafe_arch = \"1.0.0\"\n""",
+        """[dependencies]\nchess-core = { path = \"../chess-core\" }\nsafe_arch = \"=1.2.0\"\n""",
         label="chess-eval dependencies",
     )
     path.write_text(text, encoding="utf-8")
@@ -50,21 +45,21 @@ def patch_runtime() -> None:
     text = replace_exact(
         text,
         """    /// Canonical output-major rows, converted from Viridithas's four-byte SIMD interleave at load.\n    l1_weights: Box<[i8]>,\n    l1_bias: Box<[f32]>,""",
-        """    /// Canonical output-major rows retained as the portable scalar oracle.\n    l1_weights: Box<[i8]>,\n    /// Native v92 `[four-input chunk][output][lane]` bytes consumed directly by AVX2.\n    l1_weights_simd: Box<[i8]>,\n    l1_bias: Box<[f32]>,""",
+        """    /// Canonical output-major rows used by the portable scalar backend.\n    #[cfg(not(all(target_arch = \"x86_64\", target_feature = \"avx2\")))]\n    l1_weights: Box<[i8]>,\n    /// Native v92 `[four-input chunk][output][lane]` bytes consumed directly by AVX2.\n    #[cfg(all(target_arch = \"x86_64\", target_feature = \"avx2\"))]\n    l1_weights_simd: Box<[i8]>,\n    l1_bias: Box<[f32]>,""",
         label="Network L1 fields",
     )
 
     text = replace_exact(
         text,
         """        let serialized_l1 = read_i8s(bytes, &mut cursor, L1_WEIGHTS)?;\n        let l1_weights = canonicalize_simd_l1(&serialized_l1);\n        let l1_bias = read_f32s(bytes, &mut cursor, L1_BIAS)?;""",
-        """        let serialized_l1 = read_i8s(bytes, &mut cursor, L1_WEIGHTS)?;\n        let l1_weights = canonicalize_simd_l1(&serialized_l1);\n        let l1_weights_simd = serialized_l1;\n        let l1_bias = read_f32s(bytes, &mut cursor, L1_BIAS)?;""",
-        label="retain native L1",
+        """        let serialized_l1 = read_i8s(bytes, &mut cursor, L1_WEIGHTS)?;\n        #[cfg(not(all(target_arch = \"x86_64\", target_feature = \"avx2\")))]\n        let l1_weights = canonicalize_simd_l1(&serialized_l1);\n        #[cfg(all(target_arch = \"x86_64\", target_feature = \"avx2\"))]\n        let l1_weights_simd = serialized_l1;\n        let l1_bias = read_f32s(bytes, &mut cursor, L1_BIAS)?;""",
+        label="select L1 representation",
     )
 
     text = replace_exact(
         text,
         """            l1_weights,\n            l1_bias,""",
-        """            l1_weights,\n            l1_weights_simd,\n            l1_bias,""",
+        """            #[cfg(not(all(target_arch = \"x86_64\", target_feature = \"avx2\")))]\n            l1_weights,\n            #[cfg(all(target_arch = \"x86_64\", target_feature = \"avx2\"))]\n            l1_weights_simd,\n            l1_bias,""",
         label="Network construction",
     )
 
@@ -87,7 +82,7 @@ def patch_runtime() -> None:
 def main() -> int:
     patch_manifest()
     patch_runtime()
-    print("applied safe_arch AVX2 Hyperstition L1 probe with scalar fallback")
+    print("applied cfg-exact safe_arch AVX2 Hyperstition L1 probe")
     return 0
 
 
