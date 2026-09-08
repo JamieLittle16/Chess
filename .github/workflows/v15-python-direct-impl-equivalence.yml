@@ -1,0 +1,99 @@
+name: V15 Python direct-check implementation equivalence
+
+on:
+  push:
+    branches: [analysis/v15-python-direct-impl-equivalence-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  equivalence:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Materialize both direct-check implementations
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name 'Little-Gambit-V14.zip' -print -quit);test -n "$ZIP"
+          rm -rf /tmp/lean /tmp/core;mkdir -p /tmp/lean /tmp/core results
+          unzip -q "$ZIP" -d /tmp/lean;cp -a /tmp/lean/. /tmp/core/
+          curl --fail --location --retry 3 -o /tmp/lean_patch.py https://raw.githubusercontent.com/JamieLittle16/Chess/5ed83a07862edc8edf95fd4a0896a4090dad129c/scripts/patch_v15_python_direct_slider_qcheck.py
+          python /tmp/lean_patch.py /tmp/lean/experiments/numba_search.py
+          python scripts/patch_v15_python_fast_direct_check.py /tmp/core/experiments/numba_core.py /tmp/core/experiments/numba_search.py
+          python -m py_compile /tmp/lean/agent.py /tmp/lean/experiments/*.py /tmp/core/agent.py /tmp/core/experiments/*.py
+      - name: Build fresh deterministic root set
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old];chosen=fresh[256:320]
+          assert len(chosen)==64 and len(set(chosen))==64
+          Path('/tmp/equiv-64.epd').write_text('\n'.join(chosen)+'\n')
+          PY
+      - name: Compare deterministic fixed-node outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/worker.py <<'PY'
+          import json,sys,chess,numpy as np
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful
+          for line in sys.stdin:
+              q=json.loads(line);b=chess.Board(q['fen']);e=encode_position(b);h=np.empty(0,dtype=np.uint64)
+              o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,int(q['nodes']))
+              print(json.dumps({'move':int(o[0]),'score':int(o[1]),'depth':int(o[2]),'nodes':int(o[3])}),flush=True)
+          PY
+          python - <<'PY'
+          import json,os,subprocess,sys
+          from pathlib import Path
+          roots=[x.strip() for x in Path('/tmp/equiv-64.epd').read_text().splitlines() if x.strip()]
+          def start(d):
+              e=os.environ.copy();e['PYTHONPATH']=d
+              return subprocess.Popen([sys.executable,'/tmp/worker.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=e)
+          a=start('/tmp/lean');b=start('/tmp/core');rows=[];mismatches=[]
+          try:
+              for p in (a,b):
+                  p.stdin.write(json.dumps({'fen':roots[0],'nodes':500})+'\n');p.stdin.flush();json.loads(p.stdout.readline())
+              for i,fen in enumerate(roots):
+                  outs=[]
+                  for p in (a,b):
+                      p.stdin.write(json.dumps({'fen':fen,'nodes':16000})+'\n');p.stdin.flush();outs.append(json.loads(p.stdout.readline()))
+                  row={'index':i,'lean':outs[0],'core':outs[1],'equal':outs[0]==outs[1]};rows.append(row)
+                  if not row['equal']:mismatches.append(row)
+          finally:
+              for p in (a,b):p.terminate();p.wait()
+          summary={'roots':len(roots),'mismatches':len(mismatches),'details':rows}
+          Path('results/equivalence.json').write_text(json.dumps(summary,indent=2)+'\n')
+          print('FINAL',json.dumps({'roots':len(roots),'mismatches':len(mismatches)}))
+          if mismatches:
+              print(json.dumps(mismatches[:5],indent=2));raise SystemExit(1)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-direct-impl-equivalence-${{ github.sha }}
+          path: results/
+          retention-days: 30
