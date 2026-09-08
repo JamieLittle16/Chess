@@ -1,0 +1,77 @@
+name: V15 Python falling-eval time veto
+
+on:
+  push:
+    branches: [analysis/v15-python-falling-eval-time-20260908]
+    paths:
+      - scripts/patch_v15_python_falling_eval_time.py
+      - .github/workflows/v15-python-falling-eval-time.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  timed:
+    strategy:
+      fail-fast: false
+      matrix:
+        margin: [0, 10, 20]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Materialize qcap6 control and candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
+          rm -rf /tmp/control /tmp/candidate /tmp/m6 results; mkdir -p /tmp/control /tmp/candidate /tmp/m6 results
+          unzip -q "$ZIP" -d /tmp/control; cp -a /tmp/control/. /tmp/candidate/
+          sed -i 's/^MAX_QPLY = 10$/MAX_QPLY = 6/' /tmp/control/experiments/numba_search.py
+          sed -i 's/^MAX_QPLY = 10$/MAX_QPLY = 6/' /tmp/candidate/experiments/numba_search.py
+          python scripts/patch_v15_python_falling_eval_time.py /tmp/candidate/experiments/numba_search.py ${{ matrix.margin }}
+          python -m py_compile /tmp/control/agent.py /tmp/control/experiments/*.py /tmp/candidate/agent.py /tmp/candidate/experiments/*.py
+          PYTHONPATH=/tmp/candidate python - <<'PY'
+          import chess,numpy as np
+          from experiments.numba_core import encode_position,move_to_uci
+          from experiments.numba_search import iterative_search_stateful
+          b=chess.Board();e=encode_position(b);h=np.empty(0,dtype=np.uint64)
+          o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,2000)
+          assert chess.Move.from_uci(move_to_uci(int(o[0]))) in b.legal_moves
+          print('smoke',tuple(int(x) for x in o[:4]))
+          PY
+      - name: Build fresh roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old];chosen=fresh[600:632]
+          assert len(chosen)==32 and len(set(chosen))==32
+          Path('/tmp/falling-32.epd').write_text('\n'.join(chosen)+'\n')
+          PY
+      - name: Competition-clock 64-game gate
+        run: python -u scripts/v15_competition_gate.py --control /tmp/control --candidate /tmp/candidate --openings /tmp/falling-32.epd --output results/timed.json --label 'qcap6+falling-veto-${{ matrix.margin }} vs qcap6' --base-ms 2500 --inc-ms 50 --max-plies 180 | tee results/timed.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-falling-eval-m${{ matrix.margin }}-${{ github.sha }}
+          path: results/
+          retention-days: 30
