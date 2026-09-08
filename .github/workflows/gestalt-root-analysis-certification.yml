@@ -40,4 +40,6 @@ jobs:
         run: |
           set -euo pipefail
           CHESS_GESTALT_NETWORK="$PWD/.qualification/root-analysis/gestalt-b840.nnue" \
-            cargo test -p chess-search --release top_root_candidate_matches_objective_depth_search -- --exact --nocapture
+            cargo test -p chess-search --release \
+              root_analysis::tests::top_root_candidate_matches_objective_depth_search \
+              -- --exact --nocapture
