@@ -1,0 +1,181 @@
+name: V16 Hyperstition activation SIMD
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    if: github.head_ref == 'v16/hyperstition-activation-simd'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      RUSTFLAGS: -C target-cpu=x86-64-v3
+      HYPER_URL: https://github.com/cosmobobak/viridithas-networks/releases/download/v92/hyperstition-b400.nnue.zst
+      HYPER_RAW_SHA256: 36bcc6b3354ecbdb88fb95a341e494558b052223143f38ff6e6387aed99ab193
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Strict certified-baseline gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/hyper-activation .qualification/bin
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --all-features --release
+
+      - name: Download exact Hyperstition v92 network
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 "$HYPER_URL" \
+            --output .qualification/hyper-activation/hyperstition-b400.nnue.zst
+          if ! command -v zstd >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y zstd
+          fi
+          zstd --decompress --force \
+            .qualification/hyper-activation/hyperstition-b400.nnue.zst \
+            -o .qualification/hyper-activation/hyperstition-b400.nnue
+          test "$(stat -c%s .qualification/hyper-activation/hyperstition-b400.nnue)" = '50616896'
+          echo "$HYPER_RAW_SHA256  .qualification/hyper-activation/hyperstition-b400.nnue" \
+            | sha256sum --check --strict
+
+      - name: Benchmark materialized safe-AVX2 L1 baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release -p chess-eval --example hyperstition_tail_bench
+          cp target/release/examples/hyperstition_tail_bench .qualification/bin/baseline-tail
+          chmod +x .qualification/bin/baseline-tail
+          for run in 1 2 3; do
+            .qualification/bin/baseline-tail \
+              .qualification/hyper-activation/hyperstition-b400.nnue 300000 \
+              | tee ".qualification/hyper-activation/baseline-${run}.txt"
+          done
+
+      - name: Apply safe AVX2 pairwise-activation candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/apply_hyperstition_activation_avx2_probe.py
+          cargo fmt --all
+          git diff --check
+          git diff -- crates/chess-eval/src/hyperstition.rs \
+            > .qualification/hyper-activation/candidate.patch
+          test -s .qualification/hyper-activation/candidate.patch
+          sha256sum scripts/apply_hyperstition_activation_avx2_probe.py \
+            > .qualification/hyper-activation/patcher.sha256
+          sha256sum .qualification/hyper-activation/candidate.patch \
+            > .qualification/hyper-activation/candidate-patch.sha256
+
+      - name: Strict candidate correctness gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --all-features --release
+          cargo build --release -p chess-eval --example hyperstition_tail_bench
+          cp target/release/examples/hyperstition_tail_bench .qualification/bin/candidate-tail
+          chmod +x .qualification/bin/candidate-tail
+
+      - name: Benchmark SIMD activation candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          for run in 1 2 3; do
+            .qualification/bin/candidate-tail \
+              .qualification/hyper-activation/hyperstition-b400.nnue 300000 \
+              | tee ".qualification/hyper-activation/candidate-${run}.txt"
+          done
+
+      - name: Require bit-exact scores and measurable speedup
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' | tee .qualification/hyper-activation/performance-summary.txt
+          import re
+          import statistics
+          from pathlib import Path
+
+          def read(prefix):
+              times = []
+              identities = []
+              for run in range(1, 4):
+                  text = Path(f'.qualification/hyper-activation/{prefix}-{run}.txt').read_text()
+                  scores = re.search(r'^scores=(.+)$', text, re.MULTILINE)
+                  summary = re.search(r'^summary .*ns_per_eval=([0-9.]+) checksum=(-?[0-9]+)$', text, re.MULTILINE)
+                  if not scores or not summary:
+                      raise SystemExit(f'could not parse {prefix} run {run}')
+                  identities.append((scores.group(1), summary.group(2)))
+                  times.append(float(summary.group(1)))
+              if len(set(identities)) != 1:
+                  raise SystemExit(f'{prefix} benchmark identity was not deterministic: {identities}')
+              return times, identities[0]
+
+          baseline, baseline_identity = read('baseline')
+          candidate, candidate_identity = read('candidate')
+          if candidate_identity != baseline_identity:
+              raise SystemExit(
+                  f'evaluator output changed: baseline={baseline_identity} candidate={candidate_identity}'
+              )
+          base_med = statistics.median(baseline)
+          cand_med = statistics.median(candidate)
+          ratio = cand_med / base_med
+          speedup = base_med / cand_med
+          print(f'baseline_runs_ns={baseline}')
+          print(f'candidate_runs_ns={candidate}')
+          print(f'baseline_median_ns={base_med:.3f}')
+          print(f'candidate_median_ns={cand_med:.3f}')
+          print(f'time_ratio={ratio:.4f}x')
+          print(f'speedup={speedup:.4f}x')
+          print(f'identity={baseline_identity}')
+          if ratio > 0.98:
+              raise SystemExit(f'candidate failed 2% speedup gate: ratio={ratio:.4f}')
+          PY
+
+      - name: Record experiment identity
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > .qualification/hyper-activation/evidence.txt <<EOF
+          purpose=vectorise Hyperstition v92 pairwise FT activation without unsafe code
+          baseline=materialized safe-AVX2 L1, scalar pairwise activation
+          candidate=safe_arch AVX2 pairwise activation plus materialized safe-AVX2 L1
+          search_semantics=not involved
+          network_sha256=$HYPER_RAW_SHA256
+          compile_target=x86-64-v3
+          benchmark_iterations_per_fen=300000
+          benchmark_fens=6
+          repetitions=3 each, compare medians
+          correctness=unit-level full activation-vector equality plus real-network score/checksum identity
+          minimum_speedup_gate=2 percent
+          EOF
+
+      - name: Upload evidence without network bytes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v16-hyperstition-activation-simd-${{ github.sha }}
+          path: |
+            .qualification/hyper-activation/baseline-*.txt
+            .qualification/hyper-activation/candidate-*.txt
+            .qualification/hyper-activation/candidate.patch
+            .qualification/hyper-activation/candidate-patch.sha256
+            .qualification/hyper-activation/patcher.sha256
+            .qualification/hyper-activation/performance-summary.txt
+            .qualification/hyper-activation/evidence.txt
+          retention-days: 30
