@@ -1,0 +1,168 @@
+name: V16 Hyperstition sparse L1
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  sparse-l1:
+    if: github.head_ref == 'v16/hyperstition-eval-lab'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      RUSTFLAGS: -C target-cpu=native
+      NETWORK_URL: https://github.com/cosmobobak/viridithas-networks/releases/download/v92/hyperstition-b400.nnue.zst
+      RAW_BYTES: '50616896'
+      RAW_SHA256: 36bcc6b3354ecbdb88fb95a341e494558b052223143f38ff6e6387aed99ab193
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: Strict scalar control gate and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/hyperstition-sparse/bin
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          cargo build --release -p chess-eval --example hyperstition_tail_bench
+          cp target/release/examples/hyperstition_tail_bench \
+            .qualification/hyperstition-sparse/bin/scalar
+          chmod +x .qualification/hyperstition-sparse/bin/scalar
+
+      - name: Apply auditable sparse native-layout L1 patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/apply_hyperstition_sparse_l1_probe.py
+          cargo fmt --all
+          git diff --check
+          git diff -- crates/chess-eval/src/hyperstition.rs \
+            > .qualification/hyperstition-sparse/sparse-l1.patch
+          test -s .qualification/hyperstition-sparse/sparse-l1.patch
+          sha256sum scripts/apply_hyperstition_sparse_l1_probe.py \
+            > .qualification/hyperstition-sparse/patcher.sha256
+          sha256sum .qualification/hyperstition-sparse/sparse-l1.patch \
+            > .qualification/hyperstition-sparse/patch.sha256
+
+      - name: Strict sparse candidate gate and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          cargo build --release -p chess-eval --example hyperstition_tail_bench
+          cp target/release/examples/hyperstition_tail_bench \
+            .qualification/hyperstition-sparse/bin/sparse
+          chmod +x .qualification/hyperstition-sparse/bin/sparse
+
+      - name: Fetch exact Hyperstition v92 network
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 "$NETWORK_URL" \
+            --output .qualification/hyperstition-sparse/network.nnue.zst
+          if ! command -v zstd >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y zstd
+          fi
+          zstd --decompress --force \
+            .qualification/hyperstition-sparse/network.nnue.zst \
+            -o .qualification/hyperstition-sparse/network.nnue
+          test "$(stat -c%s .qualification/hyperstition-sparse/network.nnue)" = "$RAW_BYTES"
+          echo "$RAW_SHA256  .qualification/hyperstition-sparse/network.nnue" \
+            | sha256sum --check --strict
+
+      - name: Alternate scalar and sparse inference timing
+        shell: bash
+        run: |
+          set -euo pipefail
+          NET="$PWD/.qualification/hyperstition-sparse/network.nnue"
+          .qualification/hyperstition-sparse/bin/scalar "$NET" 100000 \
+            | tee .qualification/hyperstition-sparse/scalar-a.txt
+          .qualification/hyperstition-sparse/bin/sparse "$NET" 100000 \
+            | tee .qualification/hyperstition-sparse/sparse-a.txt
+          .qualification/hyperstition-sparse/bin/scalar "$NET" 100000 \
+            | tee .qualification/hyperstition-sparse/scalar-b.txt
+          .qualification/hyperstition-sparse/bin/sparse "$NET" 100000 \
+            | tee .qualification/hyperstition-sparse/sparse-b.txt
+
+      - name: Require exact score identity and summarize speed
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' | tee .qualification/hyperstition-sparse/summary.txt
+          from pathlib import Path
+          import re
+
+          root = Path('.qualification/hyperstition-sparse')
+          names = ('scalar-a', 'sparse-a', 'scalar-b', 'sparse-b')
+          reports = {name: (root/f'{name}.txt').read_text() for name in names}
+          scores = {}
+          times = {}
+          checksums = {}
+          for name, text in reports.items():
+              sm = re.search(r'^scores=(.*)$', text, re.M)
+              tm = re.search(r'summary .* ns_per_eval=([0-9.]+) checksum=(-?[0-9]+)', text)
+              if not sm or not tm:
+                  raise SystemExit(f'missing benchmark fields in {name}')
+              scores[name] = sm.group(1)
+              times[name] = float(tm.group(1))
+              checksums[name] = tm.group(2)
+          if len(set(scores.values())) != 1:
+              raise SystemExit(f'score identity failed: {scores}')
+          if len(set(checksums.values())) != 1:
+              raise SystemExit(f'checksum identity failed: {checksums}')
+          scalar = (times['scalar-a'] + times['scalar-b']) / 2.0
+          sparse = (times['sparse-a'] + times['sparse-b']) / 2.0
+          speedup = scalar / sparse - 1.0
+          print(f'scores={scores["scalar-a"]}')
+          print(f'scalar_mean_ns_per_eval={scalar:.3f}')
+          print(f'sparse_mean_ns_per_eval={sparse:.3f}')
+          print(f'inference_speedup_pct={speedup*100.0:.3f}')
+          print('score_identity=exact')
+          PY
+
+      - name: Record experiment identity
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/hyperstition-sparse
+          cat > .qualification/hyperstition-sparse/evidence.txt <<EOF
+          purpose=scalar sparse 4-byte native-layout Hyperstition L1 inference probe
+          checkout_head=$(git rev-parse HEAD)
+          network_release=v92
+          network_sha256=$RAW_SHA256
+          arithmetic=i32 scalar identical input accumulation order
+          l1_layout=native [4-input chunk][output][lane]
+          timing_iterations=100000
+          timing_positions=6
+          timing_order=scalar,sparse,scalar,sparse
+          required_score_identity=exact
+          EOF
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v16-hyperstition-sparse-l1-${{ github.sha }}
+          path: |
+            .qualification/hyperstition-sparse/sparse-l1.patch
+            .qualification/hyperstition-sparse/patcher.sha256
+            .qualification/hyperstition-sparse/patch.sha256
+            .qualification/hyperstition-sparse/scalar-a.txt
+            .qualification/hyperstition-sparse/sparse-a.txt
+            .qualification/hyperstition-sparse/scalar-b.txt
+            .qualification/hyperstition-sparse/sparse-b.txt
+            .qualification/hyperstition-sparse/summary.txt
+            .qualification/hyperstition-sparse/evidence.txt
+          retention-days: 30
