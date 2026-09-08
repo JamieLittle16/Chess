@@ -1,0 +1,92 @@
+name: V14 package candidate
+
+on:
+  push:
+    branches: [analysis/v14-package-candidate-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact H64 model
+        uses: actions/download-artifact@v4
+        with:
+          name: v14-single-student-h64-bb7d2a4ed05ff78d344cc4374d54e35189584993
+          path: model-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34202820525
+      - name: Materialize exact V14 candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODEL=$(find model-artifact -type f -name 'student-h64.npz' -print -quit); test -n "$MODEL"
+          echo '3422cecc3b1226767412e08746ffd6eef9f7e38602ac15b9256b475e6762b598  '"$MODEL" | sha256sum --check --strict
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum --check --strict
+          rm -rf /tmp/cand && mkdir /tmp/cand && unzip -q /tmp/v13.zip -d /tmp/cand
+          patch /tmp/cand/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          DIR=/tmp/cand python - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path(os.environ['DIR'])/'experiments/numba_search.py';s=p.read_text()
+          old='    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          new='    correction = correction // 6\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          assert s.count(old)==1;p.write_text(s.replace(old,new,1))
+          PY
+          python scripts/patch_v13_legality_context.py /tmp/cand/experiments/numba_core.py
+          python scripts/patch_v13_qsearch_tactical.py /tmp/cand/experiments/numba_core.py /tmp/cand/experiments/numba_search.py
+          echo '0306e8145a453d91b9b5ac92e9980931510d9e18f8ba598a7548d08b85165c35  /tmp/cand/experiments/numba_core.py' | sha256sum --check --strict
+          echo '401f6580028a72361286bd99bee1f0022c74e6c8a65da8acd47448835a1ff360  /tmp/cand/experiments/numba_search.py' | sha256sum --check --strict
+          cp experiments/v14_student_single_runtime.py /tmp/cand/experiments/v14_student_single_runtime.py
+          cp "$MODEL" /tmp/cand/experiments/v14_student_h64.npz
+          python scripts/patch_v14_single_student_search.py /tmp/cand/experiments/numba_search.py --numerator 1 --denominator 12
+          python scripts/patch_v14_student_lean_qsearch.py /tmp/cand/experiments/numba_search.py
+          python scripts/patch_v14_lazy_stable_ordering.py /tmp/cand/experiments/numba_search.py
+          curl --fail --location --retry 3 -o /tmp/build_kpk.py https://raw.githubusercontent.com/JamieLittle16/Chess/22cfec2269f87ddf14a9f929f1eda2d6e4ec21d8/scripts/build_v14_kpk_bitbase.py
+          curl --fail --location --retry 3 -o /tmp/patch_kpk.py https://raw.githubusercontent.com/JamieLittle16/Chess/22cfec2269f87ddf14a9f929f1eda2d6e4ec21d8/scripts/patch_v14_kpk_exact.py
+          python /tmp/build_kpk.py /tmp/cand/v14_kpk.u8
+          echo 'c2cc0534a984124c5a75e250bab65f2756ade47341bbca84d6b6871fdb2977f2  /tmp/cand/v14_kpk.u8' | sha256sum --check --strict
+          python /tmp/patch_kpk.py /tmp/cand/agent.py
+          python -m py_compile /tmp/cand/agent.py /tmp/cand/experiments/*.py
+      - name: Build and smoke exact submission ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf package-results /tmp/package /tmp/smoke
+          mkdir -p package-results /tmp/package/experiments
+          cp /tmp/cand/agent.py /tmp/package/agent.py
+          cp /tmp/cand/v14_kpk.u8 /tmp/package/v14_kpk.u8
+          cp /tmp/cand/experiments/__init__.py /tmp/package/experiments/__init__.py
+          cp /tmp/cand/experiments/numba_core.py /tmp/package/experiments/numba_core.py
+          cp /tmp/cand/experiments/numba_search.py /tmp/package/experiments/numba_search.py
+          cp /tmp/cand/experiments/v13_residual.i16 /tmp/package/experiments/v13_residual.i16
+          cp /tmp/cand/experiments/v14_student_single_runtime.py /tmp/package/experiments/v14_student_single_runtime.py
+          cp /tmp/cand/experiments/v14_student_h64.npz /tmp/package/experiments/v14_student_h64.npz
+          (cd /tmp/package && zip -q -9 -r "$GITHUB_WORKSPACE/package-results/Little-Gambit-V14.zip" .)
+          sha256sum package-results/Little-Gambit-V14.zip | tee package-results/Little-Gambit-V14.sha256
+          unzip -l package-results/Little-Gambit-V14.zip | tee package-results/contents.txt
+          mkdir /tmp/smoke && unzip -q package-results/Little-Gambit-V14.zip -d /tmp/smoke
+          PYTHONPATH=/tmp/smoke python - <<'PY'
+          import agent,chess
+          for fen in (chess.STARTING_FEN,'2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23'):
+              b=chess.Board(fen);m=chess.Move.from_uci(agent.get_move(fen,80000));assert m in b.legal_moves;print(fen,m)
+          PY
+          cp /tmp/package/agent.py package-results/agent.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-${{ github.sha }}
+          path: package-results/
+          retention-days: 30
