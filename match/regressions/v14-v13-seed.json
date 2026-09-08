@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "baseline": "Little Gambit V13 BEST",
+  "baseline_rates_ge80cp_percent": {
+    "quiet_positional": 4.84,
+    "pawn_structure": 2.53,
+    "tactical_capture": 2.67,
+    "endgame_technique": 1.58,
+    "king_safety": 1.05,
+    "forcing_checks": 0.33,
+    "advanced_pawn": 0.03
+  },
+  "baseline_global": {
+    "errors_ge80cp_percent": 13.69,
+    "errors_ge200cp_percent": 4.24,
+    "missed_tactical_ge80cp_percent": 2.20
+  },
+  "fixtures": [
+    {
+      "id": "v13-tactical-qxb5",
+      "category": "tactical_capture_exactness",
+      "fen": "r2qk2r/pp1nbppp/5n2/1Qp1N3/3p4/8/PPPN1PPP/R1B1R1K b kq - 4 12",
+      "expected_uci": ["d8b5"],
+      "v13_observed_san": "b6",
+      "teacher_preferred_san": "Qxb5",
+      "teacher_loss_cp_approx": 582,
+      "purpose": "Exact tactical move among several attractive candidates; search precision/order regression."
+    },
+    {
+      "id": "v13-endgame-kg6",
+      "category": "endgame_exact_tempo",
+      "fen": "4k3/8/8/5K2/8/6P1/8/8 w - - 0 54",
+      "expected_uci": ["f5g6"],
+      "v13_observed_san": "g4",
+      "teacher_preferred_san": "Kg6",
+      "teacher_loss_cp_approx": 3500,
+      "purpose": "King-and-pawn exact tempo/opposition regression; one tempo changes the result."
+    }
+  ]
+}
