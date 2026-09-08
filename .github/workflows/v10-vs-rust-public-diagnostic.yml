@@ -1,4 +1,4 @@
-name: Round 61 V13 BEST depth probe
+name: Round 61 V12 comparison probe
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -20,76 +20,44 @@ jobs:
           python-version: '3.12'
       - name: Install exact runtime
         run: python -m pip install chess==1.11.2 numpy==2.5.2 numba==0.67.0
-      - name: Reconstruct source-exact V13 BEST
+      - name: Reconstruct exact V12
         shell: bash
         run: |
           set -euo pipefail
-          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13old.zip
-          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13old.zip' | sha256sum -c -
-          rm -rf /tmp/v13best && mkdir -p /tmp/v13best
-          unzip -q /tmp/v13old.zip -d /tmp/v13best
-          patch /tmp/v13best/experiments/numba_search.py < .analysis/v13best_search.patch
-          patch /tmp/v13best/experiments/numba_core.py < .analysis/v13best_core.patch
-          echo '0306e8145a453d91b9b5ac92e9980931510d9e18f8ba598a7548d08b85165c35  /tmp/v13best/experiments/numba_core.py' | sha256sum -c -
-          echo '401f6580028a72361286bd99bee1f0022c74e6c8a65da8acd47448835a1ff360  /tmp/v13best/experiments/numba_search.py' | sha256sum -c -
-      - name: Probe critical positions at actual and deeper budgets
+          cat .analysis/v12_final_chunks_*.b64 | base64 -d > /tmp/v12.zip
+          echo '250e67e452cd036f66aefa8aaf72dbdaad9c41104938ffc73d8d897ce67c02d1  /tmp/v12.zip' | sha256sum -c -
+          rm -rf /tmp/v12 && mkdir -p /tmp/v12
+          unzip -q /tmp/v12.zip -d /tmp/v12
+          echo '2551275ca1767610d2546683b75aaae1bee794d400d7c082efcdf7b7ea2be2fd  /tmp/v12/experiments/numba_search.py' | sha256sum -c -
+      - name: Probe critical positions
         shell: bash
         run: |
           cat > /tmp/probe.py <<'PY'
-          import json, sys, time
+          import json, sys
           import numpy as np
           import chess
-          sys.path.insert(0, '/tmp/v13best')
+          sys.path.insert(0, '/tmp/v12')
           import agent
-          from experiments.numba_core import encode_position, move_to_uci
-
           CASES = [
             ('before_20_h3', '2rr2k1/4qp2/4b3/pp4p1/4P1n1/2N3P1/PP3PBP/R1Q2RK1 w - - 0 20', 89800, 'Qe1'),
             ('before_23_f3', '2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23', 83800, 'Rb1'),
             ('before_26_Qb1', '3r2k1/5p2/8/p1q3p1/P1b1P1P1/2Pr1PP1/5RB1/R1Q3K1 w - - 1 26', 76000, 'Bf1'),
           ]
-
-          def reset():
-              agent._HASH_KEYS.fill(np.uint64(0))
-              agent._HASH_MOVES.fill(np.int32(-1))
-              agent._TT_TABLE.fill(np.uint64(0))
-              agent._CLOCK_OVERHEAD_EMA_MS = 40.0
-              agent._CLOCK_FEEDBACK_SAMPLES = 0
-
-          def fixed(board, hard_ms):
-              reset()
-              enc = encode_position(board)
-              hist = np.empty(0, dtype=np.uint64)
-              t0 = time.perf_counter()
-              move, score, depth, nodes = agent.iterative_search_stateful_timed_cached(
-                  enc.board, enc.side, enc.castling, enc.ep_square, board.halfmove_clock,
-                  hist, 0, hard_ms, hard_ms, agent._MAX_NODE_BUDGET,
-                  agent._HASH_KEYS, agent._HASH_MOVES, agent._TT_TABLE,
-              )
-              elapsed = (time.perf_counter()-t0)*1000.0
-              return {'move': move_to_uci(int(move)), 'score': int(score), 'depth': int(depth), 'nodes': int(nodes), 'elapsed_ms': elapsed}
-
           out=[]
-          for name, fen, clock, sfbest in CASES:
-              board=chess.Board(fen)
-              reset()
-              soft,hard=agent._search_time_budgets_ms(board, clock, list(board.legal_moves))
-              r=agent.search_position(board, clock, np.empty(0,dtype=np.uint64))
-              item={'case':name,'fen':fen,'stockfish_best':sfbest,'clock_ms':clock,
-                    'production_budget':{'soft_ms':soft,'hard_ms':hard},
-                    'production':{'move':r.move.uci(),'score':r.score,'depth':r.depth,'nodes':r.nodes,'elapsed_ms':r.elapsed_ms}}
-              item['fixed_6000ms']=fixed(board,6000)
-              item['fixed_12000ms']=fixed(board,12000)
-              out.append(item)
-              print(json.dumps(item,indent=2))
-          with open('/tmp/round61-depth-probe.json','w') as f: json.dump(out,f,indent=2)
+          for name,fen,clock,sfbest in CASES:
+              agent._HASH_KEYS.fill(np.uint64(0)); agent._HASH_MOVES.fill(np.int32(-1)); agent._TT_TABLE.fill(np.uint64(0))
+              b=chess.Board(fen)
+              soft,hard=agent._search_time_budgets_ms(b,clock,list(b.legal_moves))
+              r=agent.search_position(b,clock,np.empty(0,dtype=np.uint64))
+              item={'case':name,'stockfish_best':sfbest,'budget':{'soft_ms':soft,'hard_ms':hard},'v12':{'move':r.move.uci(),'score':r.score,'depth':r.depth,'nodes':r.nodes,'elapsed_ms':r.elapsed_ms}}
+              out.append(item); print(json.dumps(item,indent=2))
+          with open('/tmp/round61-v12-probe.json','w') as f: json.dump(out,f,indent=2)
           PY
-          python /tmp/probe.py | tee /tmp/round61-depth-probe.txt
-      - name: Upload depth probe
-        uses: actions/upload-artifact@v4
+          python /tmp/probe.py | tee /tmp/round61-v12-probe.txt
+      - uses: actions/upload-artifact@v4
         with:
-          name: round61-v13best-depth-probe
+          name: round61-v12-comparison-probe
           path: |
-            /tmp/round61-depth-probe.json
-            /tmp/round61-depth-probe.txt
+            /tmp/round61-v12-probe.json
+            /tmp/round61-v12-probe.txt
           retention-days: 7
