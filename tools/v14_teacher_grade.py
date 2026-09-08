@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Grade V14 fixed-node regression choices with a pinned full-strength Stockfish teacher.
+"""Grade V14 regression choices with a pinned full-strength Stockfish teacher.
 
-Input is a `v14_regression_probe.py` JSON result. For each fixture this tool clears the teacher hash,
-analyses the position unrestricted, then evaluates the candidate and control moves as root-restricted
-searches at the same fixed node budget. The resulting centipawn and WDL-expectation losses are much
-safer regression metrics than exact best-move equality alone.
+For each fixture the tool evaluates the unrestricted teacher best line and then evaluates the
+candidate and exact-control root moves under identical root-restricted node budgets.  Absolute loss
+from the teacher remains useful diagnostic context, while the *direct candidate-minus-control* cp
+and WDL expectation deltas are the primary regression metric because they are symmetric and do not
+depend on the unrestricted root search distributing its nodes identically.
 """
 from __future__ import annotations
 
@@ -41,11 +42,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def score_payload(
-    score: chess.engine.PovScore,
-    pov: chess.Color,
-    ply: int,
-) -> dict[str, Any]:
+def score_payload(score: chess.engine.PovScore, pov: chess.Color, ply: int) -> dict[str, Any]:
     relative = score.pov(pov)
     cp = relative.score(mate_score=MATE_CP)
     if cp is None:
@@ -68,9 +65,6 @@ def analyse(
     nodes: int,
     root_move: chess.Move | None = None,
 ) -> dict[str, Any]:
-    # Fixed-node analysis can otherwise inherit useful TT information from the previous grading
-    # call. Clear it explicitly so unrestricted/candidate/control measurements are reproducible and
-    # symmetric rather than order-dependent.
     engine.configure({"Clear Hash": None})
     info = engine.analyse(
         board,
@@ -104,15 +98,26 @@ def move_at_budget(engine_result: dict[str, Any], budget: int) -> str:
     raise KeyError(f"probe has no search at budget {budget}")
 
 
-def loss(best: dict[str, Any], restricted: dict[str, Any]) -> dict[str, float | int]:
+def absolute_loss(best: dict[str, Any], restricted: dict[str, Any]) -> dict[str, float | int]:
     best_cp = int(best["score"]["cp"])
     restricted_cp = int(restricted["score"]["cp"])
-    cp_loss = max(0, best_cp - restricted_cp)
-    expectation_loss = max(
-        0.0,
-        float(best["score"]["expectation"]) - float(restricted["score"]["expectation"]),
-    )
-    return {"cp": cp_loss, "expectation": expectation_loss}
+    return {
+        "cp": max(0, best_cp - restricted_cp),
+        "expectation": max(
+            0.0,
+            float(best["score"]["expectation"])
+            - float(restricted["score"]["expectation"]),
+        ),
+    }
+
+
+def direct_delta(candidate: dict[str, Any], control: dict[str, Any]) -> dict[str, float | int]:
+    """Positive values mean the candidate move is better than the control move."""
+    return {
+        "cp": int(candidate["score"]["cp"]) - int(control["score"]["cp"]),
+        "expectation": float(candidate["score"]["expectation"])
+        - float(control["score"]["expectation"]),
+    }
 
 
 def main() -> int:
@@ -142,26 +147,16 @@ def main() -> int:
                 raise RuntimeError(f"illegal probed move on {fixture_id}")
 
             best = analyse(engine, board, nodes=args.teacher_nodes)
-            candidate = analyse(
-                engine,
-                board,
-                nodes=args.teacher_nodes,
-                root_move=candidate_move,
+            candidate = analyse(engine, board, nodes=args.teacher_nodes, root_move=candidate_move)
+            control = candidate if control_move == candidate_move else analyse(
+                engine, board, nodes=args.teacher_nodes, root_move=control_move
             )
-            if control_move == candidate_move:
-                control = candidate
-            else:
-                control = analyse(
-                    engine,
-                    board,
-                    nodes=args.teacher_nodes,
-                    root_move=control_move,
-                )
-            candidate_loss = loss(best, candidate)
-            control_loss = loss(best, control)
+            candidate_loss = absolute_loss(best, candidate)
+            control_loss = absolute_loss(best, control)
+            versus_control = direct_delta(candidate, control)
             row = {
                 "id": fixture_id,
-                "category": fixture["category"],
+                "category": fixture.get("category", "unclassified"),
                 "candidate_move": candidate_uci,
                 "control_move": control_uci,
                 "teacher_best_move": best["best_move"],
@@ -176,18 +171,15 @@ def main() -> int:
                 "delta_cp_loss": int(candidate_loss["cp"]) - int(control_loss["cp"]),
                 "delta_expectation_loss": float(candidate_loss["expectation"])
                 - float(control_loss["expectation"]),
+                "candidate_minus_control": versus_control,
             }
             rows.append(row)
             print(
                 fixture_id,
-                "candidate",
-                candidate_uci,
-                "control",
-                control_uci,
-                "teacher",
-                best["best_move"],
-                "delta_cp",
-                row["delta_cp_loss"],
+                "candidate", candidate_uci,
+                "control", control_uci,
+                "teacher", best["best_move"],
+                "candidate_minus_control_cp", versus_control["cp"],
                 flush=True,
             )
     finally:
@@ -203,19 +195,23 @@ def main() -> int:
                 "candidate_cp_loss": 0,
                 "control_cp_loss": 0,
                 "delta_cp_loss": 0,
+                "candidate_minus_control_cp": 0,
+                "candidate_minus_control_expectation": 0.0,
             },
         )
         bucket["positions"] = int(bucket["positions"]) + 1
-        bucket["candidate_cp_loss"] = int(bucket["candidate_cp_loss"]) + int(
-            row["candidate_loss"]["cp"]
-        )
-        bucket["control_cp_loss"] = int(bucket["control_cp_loss"]) + int(
-            row["control_loss"]["cp"]
-        )
+        bucket["candidate_cp_loss"] = int(bucket["candidate_cp_loss"]) + int(row["candidate_loss"]["cp"])
+        bucket["control_cp_loss"] = int(bucket["control_cp_loss"]) + int(row["control_loss"]["cp"])
         bucket["delta_cp_loss"] = int(bucket["delta_cp_loss"]) + int(row["delta_cp_loss"])
+        bucket["candidate_minus_control_cp"] = int(bucket["candidate_minus_control_cp"]) + int(
+            row["candidate_minus_control"]["cp"]
+        )
+        bucket["candidate_minus_control_expectation"] = float(
+            bucket["candidate_minus_control_expectation"]
+        ) + float(row["candidate_minus_control"]["expectation"])
 
     output = {
-        "schema_version": 1,
+        "schema_version": 2,
         "search_budget": args.search_budget,
         "teacher_nodes": args.teacher_nodes,
         "teacher": {
@@ -229,8 +225,12 @@ def main() -> int:
         "positions": rows,
         "categories": categories,
         "total_delta_cp_loss": sum(int(row["delta_cp_loss"]) for row in rows),
-        "total_delta_expectation_loss": sum(
-            float(row["delta_expectation_loss"]) for row in rows
+        "total_delta_expectation_loss": sum(float(row["delta_expectation_loss"]) for row in rows),
+        "total_candidate_minus_control_cp": sum(
+            int(row["candidate_minus_control"]["cp"]) for row in rows
+        ),
+        "total_candidate_minus_control_expectation": sum(
+            float(row["candidate_minus_control"]["expectation"]) for row in rows
         ),
     }
     args.json_out.parent.mkdir(parents=True, exist_ok=True)
