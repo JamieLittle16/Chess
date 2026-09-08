@@ -1,0 +1,212 @@
+name: M6 History-v2 equal-nodes search screen
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  history-v2:
+    if: github.head_ref == 'm6/history-v2-once-scored'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [history, history-lmr]
+    env:
+      RUSTFLAGS: -C target-cpu=native
+      PRODUCTION_BASE: f6ac75d644b844fabf35195d6054703e68bcc60f
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Strict semantics-neutral substrate gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+
+      - name: Build exact production reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/bin .qualification/history-v2/${{ matrix.variant }}
+          git worktree add --detach /tmp/chess-reference "$PRODUCTION_BASE"
+          cargo build --release -p chess-uci --manifest-path /tmp/chess-reference/Cargo.toml
+          cp /tmp/chess-reference/target/release/chess-uci .qualification/bin/reference
+          chmod +x .qualification/bin/reference
+          sha256sum .qualification/bin/reference \
+            > .qualification/history-v2/${{ matrix.variant }}/reference.sha256
+
+      - name: Apply auditable Search-v2 candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/apply_history_v2_probe.py --variant '${{ matrix.variant }}'
+          cargo fmt --all
+          git diff --check
+          git diff -- crates/chess-search/src/lib.rs crates/chess-search/src/root_analysis.rs \
+            > .qualification/history-v2/${{ matrix.variant }}/search-integration.patch
+          test -s .qualification/history-v2/${{ matrix.variant }}/search-integration.patch
+          sha256sum scripts/apply_history_v2_probe.py \
+            > .qualification/history-v2/${{ matrix.variant }}/patcher.sha256
+          sha256sum .qualification/history-v2/${{ matrix.variant }}/search-integration.patch \
+            > .qualification/history-v2/${{ matrix.variant }}/search-integration.sha256
+
+      - name: Strict candidate gate and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release --exclude chess-bench
+          cargo test -p chess-bench --release tests::suite_is_deterministic_within_the_same_build
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/bin/${{ matrix.variant }}
+          chmod +x .qualification/bin/${{ matrix.variant }}
+          sha256sum .qualification/bin/${{ matrix.variant }} \
+            > .qualification/history-v2/${{ matrix.variant }}/candidate.sha256
+
+      - name: Download exact certified CC0 network
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' \
+            --output .qualification/history-v2/gestalt-b840.nnue
+          test "$(stat -c%s .qualification/history-v2/gestalt-b840.nnue)" = '21242944'
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  .qualification/history-v2/gestalt-b840.nnue' \
+            | sha256sum --check --strict
+
+      - name: Reproduce frozen 5000-root M6 suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip' \
+            --output /tmp/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/UHO_Lichess_4852_v1.epd.zip' \
+            | sha256sum --check --strict
+          mkdir -p .qualification/m6-openings
+          python scripts/build_m6_opening_suite.py \
+            --archive /tmp/UHO_Lichess_4852_v1.epd.zip \
+            --output-dir .qualification/m6-openings
+          echo '5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e  .qualification/m6-openings/m6-uho-lichess-5000-v1.epd' \
+            | sha256sum --check --strict
+
+      - name: Build pinned Fastchess
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = 'f618e34540f94f4719ad3817950618dabe441318'
+          make -C .qualification/fastchess-src -j2
+          test -x .qualification/fastchess-src/fastchess
+
+      - name: Create identical-network launchers
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$PWD"
+          mkdir -p .qualification/launchers
+          cat > .qualification/launchers/reference.sh <<EOF
+          #!/usr/bin/env bash
+          export CHESS_GESTALT_NETWORK='$ROOT/.qualification/history-v2/gestalt-b840.nnue'
+          exec '$ROOT/.qualification/bin/reference'
+          EOF
+          cat > .qualification/launchers/candidate.sh <<EOF
+          #!/usr/bin/env bash
+          export CHESS_GESTALT_NETWORK='$ROOT/.qualification/history-v2/gestalt-b840.nnue'
+          exec '$ROOT/.qualification/bin/${{ matrix.variant }}'
+          EOF
+          chmod +x .qualification/launchers/*.sh
+
+      - name: Run paired 200-game 25k-node strength screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=.qualification/history-v2/${{ matrix.variant }}/match
+          mkdir -p "$OUT"
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/.qualification/launchers/candidate.sh" name=${{ matrix.variant }} nodes=25000 option.Hash=32 \
+            -engine cmd="$PWD/.qualification/launchers/reference.sh" name=production-main nodes=25000 option.Hash=32 \
+            -openings file="$PWD/.qualification/m6-openings/m6-uho-lichess-5000-v1.epd" format=epd order=random \
+            -srand 20260908 -rounds 100 -repeat -concurrency 1 -maxmoves 300 \
+            -ratinginterval 20 \
+            -pgnout file="$OUT/games.pgn" notation=uci append=false nodes=true nps=true \
+            -log file="$OUT/uci.log" level=info engine=true append=false \
+            | tee "$OUT/fastchess.stdout.log"
+          python scripts/analyze_fastchess_node_times.py \
+            "$OUT/games.pgn" \
+            --output "$OUT/times.json"
+
+      - name: Summarize effective search cost
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' | tee .qualification/history-v2/${{ matrix.variant }}/timing-summary.txt
+          import json
+          from pathlib import Path
+
+          path = Path('.qualification/history-v2/${{ matrix.variant }}/match/times.json')
+          engines = json.loads(path.read_text())['engines']
+          reference = engines['production-main']['mean_seconds']
+          candidate = engines['${{ matrix.variant }}']['mean_seconds']
+          ratio = candidate / reference
+          print(f'reference_mean_seconds={reference:.9f}')
+          print(f'candidate_mean_seconds={candidate:.9f}')
+          print(f'candidate/reference={ratio:.4f}x')
+          PY
+
+      - name: Record immutable experiment identity
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          DIR=.qualification/history-v2/${{ matrix.variant }}
+          git rev-parse HEAD > "$DIR/checkout-head.txt"
+          cat > "$DIR/evidence.txt" <<EOF
+          purpose=Search-v2 main+continuation history with once-scored quiet ordering
+          variant=${{ matrix.variant }}
+          production_base=$PRODUCTION_BASE
+          history_training=scout nodes only; quiet cutoff +bonus; searched fail-low -bonus/2
+          history_gravity_limit=16384
+          max_history_update=2048
+          quiet_scoring=single cached pass per node; allocation-free cached tuple sort
+          history_conditioned_lmr=${{ matrix.variant == 'history-lmr' }}
+          nodes_per_move=25000
+          paired_games=200
+          opening_suite=m6-uho-lichess-5000-v1
+          opening_sha256=5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e
+          network_sha256=956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6
+          seed=20260908
+          hash_mib=32
+          concurrency=1
+          maxmoves=300
+          fastchess_commit=f618e34540f94f4719ad3817950618dabe441318
+          EOF
+
+      - name: Upload complete evidence without network bytes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m6-history-v2-${{ matrix.variant }}-${{ github.sha }}
+          path: |
+            .qualification/history-v2/${{ matrix.variant }}/
+          retention-days: 30
