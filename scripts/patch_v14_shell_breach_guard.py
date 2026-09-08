@@ -77,7 +77,7 @@ def _opponent_has_quiet_slider_check(
             continue
         if move_promotion(move) != 0:
             continue
-        child_castling, child_ep, captured_piece, captured_square = make_move_inplace(
+        _, _, captured_piece, captured_square = make_move_inplace(
             board, opponent, castling, ep_square, move
         )
         gives_check = is_square_attacked(board, own_king, opponent)
@@ -102,6 +102,13 @@ def _root(
 '''
     source = replace_once(source, anchor, helper, "root helper insertion")
 
+    root_start = source.index('@njit(cache=False)\ndef _root(')
+    try:
+        root_end = source.index('\n\n@njit(cache=False)\ndef iterative_search_stateful(', root_start)
+    except ValueError:
+        root_end = source.index('\n\n@njit(cache=False)\ndef iterative_search_stateful_timed', root_start)
+    root = source[root_start:root_end]
+
     old_probe = '''        move = int(moves[index])
         child_depth = depth - 1
 '''
@@ -114,7 +121,7 @@ def _root(
         )
         child_depth = depth - 1
 '''
-    source = replace_once(source, old_probe, new_probe, "root probe setup")
+    root = replace_once(root, old_probe, new_probe, "root probe setup")
 
     old_make = '''        child_castling, child_ep, captured_piece, captured_square = make_move_inplace(
             board, side, castling, ep_square, move
@@ -138,7 +145,7 @@ def _root(
             )
         path_keys[1] = _child_position_key(
 '''
-    source = replace_once(source, old_make, new_make, "root shell check")
+    root = replace_once(root, old_make, new_make, "root shell check")
 
     old_score = '''        score = -score
         if score > best_score:
@@ -148,8 +155,9 @@ def _root(
             score -= 100
         if score > best_score:
 '''
-    source = replace_once(source, old_score, new_score, "root score penalty")
+    root = replace_once(root, old_score, new_score, "root score penalty")
 
+    source = source[:root_start] + root + source[root_end:]
     if source.count("shell_breach") < 5:
         raise SystemExit("shell-breach patch structure drifted")
     path.write_text(source)
