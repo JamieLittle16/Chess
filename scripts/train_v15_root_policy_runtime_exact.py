@@ -8,7 +8,11 @@ from the encoded board/move representation before search.
 """
 from __future__ import annotations
 
-import scripts.train_v15_root_policy as base
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import train_v15_root_policy as base
 
 _original_move_features = base.move_features
 
