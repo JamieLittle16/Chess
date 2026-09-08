@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""Apply the M6 main + continuation history search experiment.
+"""Apply M6 main + continuation history with a bounded ranked-quiet prefix.
 
-The committed substrate is semantics-neutral: ordinary MovePicker::next remains the accepted path.
-This script activates the candidate policy only in qualification builds. Exact source-count checks make
-source drift fail loudly rather than silently producing a partially active heuristic.
+History v1 produced a promising +27.85 Elo equal-node centre but cost ~18.7% wall time because every
+remaining quiet was repeatedly rescanned. V2 preserves the same tables and scout-node learning while
+ranking only the first six ordinary quiets after TT/tactical/killers, then falls back exactly to the
+existing generator order. The committed ordinary MovePicker::next path remains unchanged.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+
+TOP_K = 6
 
 
 class PatchError(RuntimeError):
@@ -20,6 +23,94 @@ def replace_exact(text: str, old: str, new: str, *, count: int = 1, label: str) 
     if actual != count:
         raise PatchError(f"{label}: expected {count} occurrence(s), found {actual}")
     return text.replace(old, new, count)
+
+
+def patch_move_picker() -> None:
+    path = Path("crates/chess-search/src/move_picker.rs")
+    text = path.read_text(encoding="utf-8")
+    text = replace_exact(
+        text,
+        "const ORDER_VALUES: [i32; 6] = [100, 320, 330, 500, 900, 20_000];\n",
+        "const ORDER_VALUES: [i32; 6] = [100, 320, 330, 500, 900, 20_000];\n"
+        f"const HISTORY_RANKED_QUIETS: u8 = {TOP_K};\n",
+        label="top-k constant",
+    )
+    text = replace_exact(
+        text,
+        """    stage: Stage,
+    cursor: usize,
+}""",
+        """    stage: Stage,
+    cursor: usize,
+    scored_quiets: u8,
+}""",
+        label="ranked quiet counter field",
+    )
+    text = replace_exact(
+        text,
+        """            stage: Stage::Tt,
+            cursor: 0,
+        }""",
+        """            stage: Stage::Tt,
+            cursor: 0,
+            scored_quiets: 0,
+        }""",
+        label="ranked quiet counter init",
+    )
+    old = """                Stage::Quiet => {
+                    if self.cursor >= self.moves.len() {
+                        self.stage = Stage::Done;
+                        continue;
+                    }
+
+                    let mut best_index = self.cursor;
+                    let mut best_score = quiet_score(self.moves[self.cursor]);
+                    for index in self.cursor + 1..self.moves.len() {
+                        let score = quiet_score(self.moves[index]);
+                        if score > best_score {
+                            best_score = score;
+                            best_index = index;
+                        }
+                    }
+                    self.moves.swap(self.cursor, best_index);
+                    let mv = self.moves[self.cursor];
+                    self.cursor += 1;
+                    return Some(mv);
+                }
+"""
+    new = """                Stage::Quiet => {
+                    if self.cursor >= self.moves.len() {
+                        self.stage = Stage::Done;
+                        continue;
+                    }
+
+                    // History matters most for the first few ordinary quiets. After the bounded
+                    // prefix, preserve accepted generator order and pay no further scoring scans.
+                    if self.scored_quiets >= HISTORY_RANKED_QUIETS {
+                        let mv = self.moves[self.cursor];
+                        self.cursor += 1;
+                        return Some(mv);
+                    }
+
+                    let mut best_index = self.cursor;
+                    let mut best_score = quiet_score(self.moves[self.cursor]);
+                    for index in self.cursor + 1..self.moves.len() {
+                        let score = quiet_score(self.moves[index]);
+                        if score > best_score {
+                            best_score = score;
+                            best_index = index;
+                        }
+                    }
+                    self.moves.swap(self.cursor, best_index);
+                    let mv = self.moves[self.cursor];
+                    self.cursor += 1;
+                    self.scored_quiets += 1;
+                    return Some(mv);
+                }
+"""
+    # Only the candidate next_scored quiet block has the scan shape above.
+    text = replace_exact(text, old, new, label="bounded scored-quiet stage")
+    path.write_text(text, encoding="utf-8")
 
 
 def patch_search() -> None:
@@ -72,8 +163,6 @@ use move_picker::MovePicker;""",
         label="Searcher history construction",
     )
 
-    # Clear once per top-level search invocation, not once per iterative-deepening depth. This lets
-    # earlier iterations teach later iterations but prevents cross-game process history.
     reset = """        self.nodes = 1;
         self.tt_hits = 0;
         self.killers = [[None; 2]; MAX_SEARCH_PLY];
@@ -104,8 +193,6 @@ use move_picker::MovePicker;""",
         label="iterative history reset",
     )
 
-    # Root ordering can consume main-history knowledge learned in earlier ID iterations. Root itself
-    # has no predecessor context and is not used as a history-training node.
     root_picker = """        let mut moves = moves;
         let mut picker = MovePicker::new(&mut moves, hint, [None; 2]);
         let mut first_move = true;
@@ -180,9 +267,6 @@ use move_picker::MovePicker;""",
             first_move = false;
             move_index = move_index.saturating_add(1);
 
-            // Train only on null-window/scout evidence. A quiet fail-high is a strong positive
-            // ordering signal; a searched quiet that failed to cut gets a smaller gravity malus.
-            // Full-window PV nodes do not train history, avoiding noisy value-based reinforcement.
             if quiet && null_window {
                 let bonus = depth_bonus(depth);
                 let update = if score >= beta { bonus } else { -(bonus / 2) };
@@ -244,9 +328,10 @@ def patch_root_analysis() -> None:
 
 
 def main() -> int:
+    patch_move_picker()
     patch_search()
     patch_root_analysis()
-    print("applied M6 main + continuation history candidate")
+    print(f"applied M6 bounded top-{TOP_K} main + continuation history candidate")
     return 0
 
 
