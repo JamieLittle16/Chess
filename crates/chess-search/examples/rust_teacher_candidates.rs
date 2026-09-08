@@ -1,4 +1,4 @@
-//! Batch root-candidate oracle for Python V15 distillation/book generation.
+//! Batch Rust V15 teacher oracle for Python distillation/book generation.
 //!
 //! Usage:
 //!   CHESS_GESTALT_NETWORK=/path/gestalt-b840.nnue \
@@ -6,11 +6,16 @@
 //!
 //! Input is one complete FEN per line. Output is TSV:
 //!   FEN<TAB>uci:score,uci:score,...
-//! Scores and ranking come from the production Searcher root-analysis path, including Gestalt when
-//! CHESS_GESTALT_NETWORK is configured. This binary is an offline teacher tool only; it is never
-//! shipped in the Python competition submission.
+//!
+//! MAX_CANDIDATES=1 deliberately uses the normal production PVS root search, which is much cheaper
+//! and can therefore be run deeper for moves we will actually play. Wider requests use the
+//! full-window root-analysis API to obtain reliable opponent/MultiPV ranking. This binary is an
+//! offline teacher tool only; it is never shipped in the Python competition submission.
 
-use std::{env, io::{self, BufRead}};
+use std::{
+    env,
+    io::{self, BufRead},
+};
 
 use chess_core::{ChessMove, PieceKind, Position};
 use chess_search::Searcher;
@@ -54,15 +59,22 @@ fn main() -> Result<(), String> {
         }
         let mut position = Position::from_fen(fen)
             .map_err(|error| format!("invalid FEN on line {}: {error}: {fen}", index + 1))?;
-        // A fresh searcher per unrelated root prevents cross-position TT/history state from turning
-        // an offline dataset into a function of input ordering.
+        // Fresh search state per unrelated root makes the offline labels independent of input order.
         let mut searcher = Searcher::with_tt_megabytes(64);
-        let candidates = searcher.analyze_root_candidates(&mut position, depth, max_candidates);
-        let encoded = candidates
-            .iter()
-            .map(|candidate| format!("{}:{}", uci(candidate.mv), candidate.score))
-            .collect::<Vec<_>>()
-            .join(",");
+        let encoded = if max_candidates == 1 {
+            let result = searcher.search_depth(&mut position, depth);
+            result
+                .best_move
+                .map(|mv| format!("{}:{}", uci(mv), result.score))
+                .unwrap_or_default()
+        } else {
+            searcher
+                .analyze_root_candidates(&mut position, depth, max_candidates)
+                .iter()
+                .map(|candidate| format!("{}:{}", uci(candidate.mv), candidate.score))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
         println!("{fen}\t{encoded}");
     }
     Ok(())
