@@ -1,0 +1,165 @@
+name: V14 hard regression mining
+
+on:
+  push:
+    branches: [analysis/v14-hard-regression-mine-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  mine:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Download frozen V14 self-play teacher corpus
+        uses: actions/download-artifact@v4
+        with:
+          name: v14-single-student-teacher-bb7d2a4ed05ff78d344cc4374d54e35189584993
+          path: selfplay-teacher
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34202820525
+
+      - name: Verify corpus provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat selfplay-teacher/teacher.jsonl.manifest.json
+          test "$(wc -l < selfplay-teacher/teacher.jsonl)" -eq 1827
+          grep -Fq '"groups": 80' selfplay-teacher/teacher.jsonl.manifest.json
+          grep -Fq '"train": 1464' selfplay-teacher/teacher.jsonl.manifest.json
+          grep -Fq '"validation": 148' selfplay-teacher/teacher.jsonl.manifest.json
+          grep -Fq '"holdout": 215' selfplay-teacher/teacher.jsonl.manifest.json
+
+      - name: Reconstruct immutable V13 BEST
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum --check --strict
+          rm -rf /tmp/v13 && mkdir /tmp/v13
+          unzip -q /tmp/v13.zip -d /tmp/v13
+          patch /tmp/v13/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/v13/experiments/numba_search.py'); s=p.read_text()
+          old='    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          new='    correction = correction // 6\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          assert s.count(old)==1,s.count(old)
+          p.write_text(s.replace(old,new,1))
+          PY
+          python scripts/patch_v13_legality_context.py /tmp/v13/experiments/numba_core.py
+          python scripts/patch_v13_qsearch_tactical.py /tmp/v13/experiments/numba_core.py /tmp/v13/experiments/numba_search.py
+          echo '401f6580028a72361286bd99bee1f0022c74e6c8a65da8acd47448835a1ff360  /tmp/v13/experiments/numba_search.py' | sha256sum --check --strict
+          python -m py_compile tools/v14_mine_static_residuals.py tools/v14_regression_probe.py tools/v14_teacher_grade.py
+
+      - name: Mine diverse high-static-residual training positions
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p hard-results
+          python tools/v14_mine_static_residuals.py \
+            --teacher selfplay-teacher/teacher.jsonl \
+            --engine-dir /tmp/v13 --positions 32 \
+            --json-out hard-results/static-hard-32.json \
+            | tee hard-results/static-hard-32.log
+
+      - name: Record exact V13 search choices on hard positions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/v14_regression_probe.py \
+            --engine /tmp/v13 --control /tmp/v13 \
+            --manifest hard-results/static-hard-32.json \
+            --budgets 12000 \
+            --json-out hard-results/v13-hard-probe.json \
+            | tee hard-results/v13-hard-probe.log
+          python - <<'PY'
+          import json
+          row=json.load(open('hard-results/v13-hard-probe.json'))
+          assert row['candidate']==row['control']
+          assert len(row['candidate'])==32
+          PY
+
+      - name: Fetch pinned Stockfish 19
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/stockfish
+          curl --fail --location --retry 3 \
+            --output .qualification/stockfish.tar.gz \
+            https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  .qualification/stockfish.tar.gz' | sha256sum --check --strict
+          tar -xzf .qualification/stockfish.tar.gz -C .qualification/stockfish
+          STOCKFISH_BIN=$(find "$PWD/.qualification/stockfish" -type f -name 'stockfish*' -perm -111 -print -quit)
+          test -n "$STOCKFISH_BIN"
+          echo "STOCKFISH_BIN=$STOCKFISH_BIN" >> "$GITHUB_ENV"
+          "$STOCKFISH_BIN" bench 1 1 4 default depth >/dev/null
+
+      - name: Grade V13 search loss and freeze hardest independent suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/v14_teacher_grade.py \
+            --probe hard-results/v13-hard-probe.json \
+            --manifest hard-results/static-hard-32.json \
+            --stockfish "$STOCKFISH_BIN" --search-budget 12000 \
+            --teacher-nodes 100000 --hash-mb 64 \
+            --json-out hard-results/v13-hard-teacher-grade.json \
+            | tee hard-results/v13-hard-teacher-grade.log
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          manifest=json.load(open('hard-results/static-hard-32.json'))
+          grade=json.load(open('hard-results/v13-hard-teacher-grade.json'))
+          by_id={row['id']:row for row in manifest['fixtures']}
+          ranked=sorted(
+              grade['positions'],
+              key=lambda row:(int(row['control_loss']['cp']), float(row['control_loss']['expectation'])),
+              reverse=True,
+          )
+          selected=[]
+          for row in ranked:
+              fixture=dict(by_id[row['id']])
+              fixture['v13_12k_uci']=row['control_move']
+              fixture['stockfish100k_best_uci']=row['teacher_best_move']
+              fixture['v13_12k_teacher_loss_cp']=int(row['control_loss']['cp'])
+              fixture['v13_12k_teacher_expectation_loss']=float(row['control_loss']['expectation'])
+              selected.append(fixture)
+              if len(selected)==16:
+                  break
+          severe=sum(int(row['v13_12k_teacher_loss_cp'])>=200 for row in selected)
+          mistakes=sum(int(row['v13_12k_teacher_loss_cp'])>=80 for row in selected)
+          output={
+              'schema_version':1,
+              'kind':'v14_v13_selfplay_hard_search_regression_suite',
+              'source':'train split only; validation and holdout untouched',
+              'search_budget':12000,
+              'teacher_nodes':100000,
+              'positions':len(selected),
+              'loss_ge_80cp':mistakes,
+              'loss_ge_200cp':severe,
+              'fixtures':selected,
+          }
+          Path('hard-results/v14-hard-search-16.json').write_text(json.dumps(output,indent=2,sort_keys=True)+'\n')
+          print(json.dumps({k:v for k,v in output.items() if k!='fixtures'},indent=2,sort_keys=True))
+          for row in selected[:8]:
+              print(row['id'],row['category'],row['v13_12k_teacher_loss_cp'],row['v13_12k_uci'],'->',row['stockfish100k_best_uci'])
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v14-hard-regression-mine-${{ github.sha }}
+          path: hard-results/
+          retention-days: 30
