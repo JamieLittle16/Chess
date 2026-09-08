@@ -1,0 +1,176 @@
+name: V15 Python bucket residual large data v2
+
+on:
+  push:
+    branches: [analysis/v15-python-bucket-residual-large-data-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  teacher-shard:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {id: s0, start: 1800}
+          - {id: s1, start: 2300}
+          - {id: s2, start: 2800}
+          - {id: s3, start: 3300}
+          - {id: s4, start: 3800}
+          - {id: s5, start: 4300}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Materialize exact V14 and pinned data tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name 'Little-Gambit-V14.zip' -print -quit);test -n "$ZIP"
+          rm -rf /tmp/v14;mkdir /tmp/v14;unzip -q "$ZIP" -d /tmp/v14
+          PIN=d84d5bfa6135461389637ef70eed409693aa5a34
+          curl --fail --location --retry 3 -o /tmp/generate.py https://raw.githubusercontent.com/JamieLittle16/Chess/$PIN/tools/v14_generate_selfplay_positions.py
+          curl --fail --location --retry 3 -o /tmp/label.py https://raw.githubusercontent.com/JamieLittle16/Chess/$PIN/tools/v14_label_selfplay_teacher.py
+          curl --fail --location --retry 3 -o /tmp/v14_fixed_node_arena.py https://raw.githubusercontent.com/JamieLittle16/Chess/$PIN/tools/v14_fixed_node_arena.py
+          python -m py_compile /tmp/generate.py /tmp/label.py /tmp/v14_fixed_node_arena.py
+      - name: Build disjoint UHO root shard
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/uho;mkdir /tmp/uho;unzip -q /tmp/uho.zip -d /tmp/uho
+          UHO=$(find /tmp/uho -type f -name '*.epd' -print -quit);test -n "$UHO"
+          UHO="$UHO" START=${{ matrix.start }} python - <<'PY'
+          import os,chess
+          from pathlib import Path
+          rows=Path(os.environ['UHO']).read_text(errors='ignore').splitlines();start=int(os.environ['START']);out=[]
+          for raw in rows[start:start+500]:
+              f=raw.strip().split()
+              if len(f)<4:continue
+              fen=' '.join(f[:4])+' 0 1'
+              try:b=chess.Board(fen)
+              except ValueError:continue
+              if b.is_game_over(claim_draw=False):continue
+              out.append(fen)
+              if len(out)==360:break
+          assert len(out)==360,(start,len(out));Path('/tmp/roots.epd').write_text('\n'.join(out)+'\n')
+          PY
+      - name: Generate V14 self-play positions
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p shard
+          PYTHONPATH=/tmp python -u /tmp/generate.py --engine /tmp/v14 --openings /tmp/roots.epd --nodes 4500 --games 360 --opening-offset 0 --min-ply 8 --max-ply 160 --stride 3 --max-positions 10000 --output shard/selfplay-positions.json | tee shard/selfplay.log
+      - name: Fetch pinned Stockfish 19
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/stockfish
+          curl --fail --location --retry 3 -o /tmp/stockfish.tar.gz https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  /tmp/stockfish.tar.gz' | sha256sum --check --strict
+          tar -xzf /tmp/stockfish.tar.gz -C /tmp/stockfish
+          SF=$(find /tmp/stockfish -type f -name 'stockfish*' -perm -111 -print -quit);test -n "$SF";echo "SF=$SF" >> "$GITHUB_ENV"
+      - name: Label shard with Stockfish 19
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=/tmp python -u /tmp/label.py --positions shard/selfplay-positions.json --stockfish "$SF" --nodes 12000 --threads 1 --hash-mb 64 --split-salt Chess/v15-bucket-large-20260908 --validation-permille 100 --holdout-permille 100 --output shard/teacher.jsonl | tee shard/teacher.log
+          wc -l shard/teacher.jsonl;sha256sum shard/teacher.jsonl > shard/teacher.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v15-bucket-v2-teacher-${{ matrix.id }}-${{ github.sha }}
+          path: shard/
+          retention-days: 30
+
+  merge:
+    needs: teacher-shard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: v15-bucket-v2-teacher-*-${{ github.sha }}
+          path: shards
+          merge-multiple: false
+      - name: Merge and deduplicate teacher corpus
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p combined
+          python - <<'PY'
+          import json
+          from collections import Counter
+          from pathlib import Path
+          files=sorted(Path('shards').glob('**/teacher.jsonl'));assert len(files)==6,files
+          by={}
+          for p in files:
+              for line in p.read_text().splitlines():
+                  if not line.strip():continue
+                  r=json.loads(line);by.setdefault(r['fen'],r)
+          rows=sorted(by.values(),key=lambda r:r['fen']);c=Counter(str(r['split']) for r in rows)
+          Path('combined/teacher.jsonl').write_text(''.join(json.dumps(r,sort_keys=True)+'\n' for r in rows))
+          Path('combined/summary.json').write_text(json.dumps({'records':len(rows),'splits':c},indent=2)+'\n')
+          assert len(rows)>=40000,(len(rows),c);print(len(rows),c)
+          PY
+          sha256sum combined/teacher.jsonl > combined/teacher.sha256
+          cat combined/summary.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v15-bucket-v2-teacher-combined-${{ github.sha }}
+          path: combined/
+          retention-days: 30
+
+  train:
+    needs: merge
+    strategy:
+      fail-fast: false
+      matrix:
+        hidden: [8, 16]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: v15-bucket-v2-teacher-combined-${{ github.sha }}
+          path: combined
+      - uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Train compact residual on large corpus
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name 'Little-Gambit-V14.zip' -print -quit);test -n "$ZIP"
+          rm -rf /tmp/v14;mkdir /tmp/v14;unzip -q "$ZIP" -d /tmp/v14
+          mkdir -p results
+          python -u scripts/train_v15_bucket_residual.py --teacher combined/teacher.jsonl --engine-dir /tmp/v14 --output-dir results/h${{ matrix.hidden }} --hidden ${{ matrix.hidden }} --epochs 50 --batch-size 512 --lr 0.0015 --weight-decay 0.00002 --seed 20260928 | tee results/h${{ matrix.hidden }}.log
+          cat results/h${{ matrix.hidden }}/training-metadata.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v15-bucket-v2-large-residual-h${{ matrix.hidden }}-${{ github.sha }}
+          path: results/
+          retention-days: 30
