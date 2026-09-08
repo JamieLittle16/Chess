@@ -10,6 +10,15 @@ import sys
 
 if len(sys.argv)!=3: raise SystemExit('usage: patch_v15_python_qsearch_delta.py SEARCH.py MARGIN')
 p=Path(sys.argv[1]);margin=int(sys.argv[2]);s=p.read_text()
+head_old='''    checked = _state_in_check(board, side, eval_stack[ply])
+    if not checked:
+'''
+head_new='''    checked = _state_in_check(board, side, eval_stack[ply])
+    stand_pat = -INFINITY
+    if not checked:
+'''
+if s.count(head_old)!=1:raise SystemExit(f'stand-pat anchor count={s.count(head_old)}')
+s=s.replace(head_old,head_new,1)
 old='''    for index in range(count):
         _pick_next_scored_move(moves, score_stack[ply], index, count)
         move = int(moves[index])
