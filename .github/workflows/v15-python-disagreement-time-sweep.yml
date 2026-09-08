@@ -1,0 +1,100 @@
+name: V15 Python disagreement time sweep
+
+on:
+  push:
+    branches: [analysis/v15-python-disagreement-time-sweep-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        threshold: [25, 50, 75, 100]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Install exact runtime and Stockfish
+        run: |
+          python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+          sudo apt-get update -qq
+          sudo apt-get install -y stockfish
+      - uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Materialize exact A/B and fresh roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name 'Little-Gambit-V14.zip' -print -quit);test -n "$ZIP"
+          rm -rf /tmp/base /tmp/cand /tmp/m6;mkdir -p /tmp/base /tmp/cand /tmp/m6 results
+          unzip -q "$ZIP" -d /tmp/base;cp -a /tmp/base/. /tmp/cand/
+          python scripts/patch_v15_python_disagreement_time.py /tmp/cand/experiments/numba_search.py ${{ matrix.threshold }}
+          python -m py_compile /tmp/cand/experiments/numba_search.py
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old];chosen=fresh[976:992]
+          assert len(chosen)==16 and len(set(chosen))==16
+          Path('/tmp/disagree-16.epd').write_text('\n'.join(chosen)+'\n')
+          PY
+      - name: Real-clock move-quality probe
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json,queue,subprocess,sys,threading
+          from pathlib import Path
+          import chess,chess.engine
+          class A:
+              def __init__(self,d):
+                  self.p=subprocess.Popen([sys.executable,'tools/v15_agent_probe.py',d],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,bufsize=1);self.q=queue.Queue();threading.Thread(target=self.o,daemon=True).start();assert json.loads(self.line(95)).get('ready')
+              def o(self):
+                  for x in self.p.stdout:self.q.put(x.rstrip())
+                  self.q.put(None)
+              def line(self,t):
+                  x=self.q.get(timeout=t)
+                  if x is None:raise RuntimeError('closed')
+                  return x
+              def reset(self):self.p.stdin.write('{"reset":true}\n');self.p.stdin.flush();assert json.loads(self.line(5)).get('reset')
+              def move(self,fen,ms):self.p.stdin.write(json.dumps({'fen':fen,'time_left_ms':ms})+'\n');self.p.stdin.flush();return json.loads(self.line(20))
+              def stop(self):
+                  if self.p.poll() is None:self.p.kill()
+                  self.p.wait(timeout=5)
+          roots=[x.strip() for x in Path('/tmp/disagree-16.epd').read_text().splitlines() if x.strip()]
+          b=A('/tmp/base');c=A('/tmp/cand');sf=chess.engine.SimpleEngine.popen_uci('/usr/games/stockfish');rows=[]
+          try:
+              # Warm all Numba paths under a tiny low-clock call, then reset state before measurements.
+              b.move(roots[0],2500);c.move(roots[0],2500)
+              for i,fen in enumerate(roots):
+                  b.reset();c.reset(); rb=b.move(fen,120000);rc=c.move(fen,120000);board=chess.Board(fen)
+                  mb=chess.Move.from_uci(rb['move']);mc=chess.Move.from_uci(rc['move']);assert mb in board.legal_moves and mc in board.legal_moves
+                  best=sf.analyse(board,chess.engine.Limit(depth=11));bestcp=best['score'].pov(board.turn).score(mate_score=100000) or 0
+                  def value(m):
+                      z=sf.analyse(board,chess.engine.Limit(depth=11),root_moves=[m]);return z['score'].pov(board.turn).score(mate_score=100000) or 0
+                  vb=value(mb);vc=vb if mc==mb else value(mc)
+                  row={'i':i,'base_move':rb['move'],'candidate_move':rc['move'],'changed':mc!=mb,'base_ms':rb['elapsed_ms'],'candidate_ms':rc['elapsed_ms'],'sf_best':int(bestcp),'sf_base':int(vb),'sf_candidate':int(vc),'base_regret':int(bestcp-vb),'candidate_regret':int(bestcp-vc),'regret_improvement':int(vc-vb)};rows.append(row);print(row,flush=True)
+          finally:b.stop();c.stop();sf.quit()
+          out={'threshold_cp':${{ matrix.threshold }},'positions':len(rows),'move_changes':sum(r['changed'] for r in rows),'base_mean_ms':sum(r['base_ms'] for r in rows)/len(rows),'candidate_mean_ms':sum(r['candidate_ms'] for r in rows)/len(rows),'base_mean_regret':sum(r['base_regret'] for r in rows)/len(rows),'candidate_mean_regret':sum(r['candidate_regret'] for r in rows)/len(rows),'mean_regret_improvement':sum(r['regret_improvement'] for r in rows)/len(rows),'improved':sum(r['regret_improvement']>0 for r in rows),'worsened':sum(r['regret_improvement']<0 for r in rows),'rows':rows}
+          Path('results/probe.json').write_text(json.dumps(out,indent=2)+'\n');print('FINAL',json.dumps({k:v for k,v in out.items() if k!='rows'}))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-disagreement-${{ matrix.threshold }}-${{ github.sha }}
+          path: results/
+          retention-days: 30
