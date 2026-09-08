@@ -2,13 +2,16 @@ name: V15 Python incremental child EP key
 
 on:
   push:
-    branches: [analysis/v15-python-incremental-child-ep-key-20260908]
+    branches:
+      - analysis/v15-python-incremental-child-ep-key-20260908
     paths:
       - scripts/patch_v15_python_incremental_child_ep_key.py
       - .github/workflows/v15-python-incremental-child-ep-key.yml
   workflow_dispatch:
 
-permissions: {contents: read, actions: read}
+permissions:
+  contents: read
+  actions: read
 
 jobs:
   qualify:
@@ -17,7 +20,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: {python-version: '3.12'}
+        with:
+          python-version: '3.12'
       - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
       - name: Download exact packaged V14
         uses: actions/download-artifact@v4
@@ -38,12 +42,11 @@ jobs:
           python scripts/patch_v15_python_incremental_child_ep_key.py /tmp/cand/experiments/numba_search.py
           python -m py_compile tools/v14_agent_runner.py /tmp/base/agent.py /tmp/cand/agent.py /tmp/base/experiments/*.py /tmp/cand/experiments/*.py
           PYTHONPATH=/tmp/cand python - <<'PY'
-          import chess,numpy as np
+          import chess
           from experiments.numba_core import encode_position
-          from experiments.numba_search import position_key,_build_eval_state_into,EVAL_WIDTH,_child_position_key
-          # Exercise ordinary new-EP transitions and prove incremental child key equals full rebuild.
-          for fen,uci in [('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1','e2e4'),('rnbqkbnr/pppp1ppp/8/4p3/8/8/PPPPPPPP/RNBQKBNR w KQkq e6 0 2','d2d4')]:
-              b=chess.Board(fen); e=encode_position(b); print(fen,uci,int(position_key(e.board,e.side,e.castling,e.ep_square)))
+          from experiments.numba_search import position_key
+          for fen in ['rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1','rnbqkbnr/pppp1ppp/8/4p3/8/8/PPPPPPPP/RNBQKBNR w KQkq e6 0 2']:
+              b=chess.Board(fen); e=encode_position(b); print(fen,int(position_key(e.board,e.side,e.castling,e.ep_square)))
           PY
       - name: Build fresh roots
         shell: bash
@@ -54,8 +57,11 @@ jobs:
           rm -rf /tmp/m6; mkdir /tmp/m6; python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
           python - <<'PY'
           from pathlib import Path
-          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}; large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]; fresh=[x for x in large if x not in old]
-          Path('/tmp/ep-screen.epd').write_text('\n'.join(fresh[4550:4614])+'\n');Path('/tmp/ep-timed.epd').write_text('\n'.join(fresh[4620:4652])+'\n')
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          Path('/tmp/ep-screen.epd').write_text('\n'.join(fresh[4550:4614])+'\n')
+          Path('/tmp/ep-timed.epd').write_text('\n'.join(fresh[4620:4652])+'\n')
           PY
       - name: Exact fixed-node parity
         run: python -u tools/v14_fixed_node_arena.py /tmp/cand /tmp/base --nodes 24000 --pairs 32 --opening-file /tmp/ep-screen.epd --opening-offset 0 --max-plies 220 --json-out results/equal-node.json | tee results/equal-node.log
@@ -77,7 +83,7 @@ jobs:
           def start(d):
               e=os.environ.copy();e['PYTHONPATH']=d;return subprocess.Popen([sys.executable,'/tmp/worker.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=e)
           def one(p,fen,n):p.stdin.write(json.dumps({'fen':fen,'nodes':n})+'\n');p.stdin.flush();return json.loads(p.stdout.readline())
-          b=start('/tmp/base');c=start('/tmp/cand'); ratios=[]; rows=[]
+          b=start('/tmp/base');c=start('/tmp/cand');ratios=[];rows=[]
           try:
               one(b,roots[0],500);one(c,roots[0],500)
               for r in range(5):
@@ -96,4 +102,7 @@ jobs:
         run: python -u scripts/v15_competition_gate.py --candidate /tmp/cand --control /tmp/base --openings /tmp/ep-timed.epd --output results/timed.json --label incremental-child-ep-presort --base-ms 2500 --inc-ms 50 --max-plies 180 | tee results/timed.log
       - uses: actions/upload-artifact@v4
         if: always()
-        with: {name: v15-python-incremental-child-ep-${{ github.sha }}, path: results/, retention-days: 30}
+        with:
+          name: v15-python-incremental-child-ep-${{ github.sha }}
+          path: results/
+          retention-days: 30
