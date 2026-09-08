@@ -56,8 +56,12 @@ const HALF_BUCKET_MAP: [u8; 32] = [
 pub struct Network {
     feature_weights: Box<[i16]>,
     feature_bias: Box<[i16]>,
-    /// Canonical output-major rows, converted from Viridithas's four-byte SIMD interleave at load.
+    /// Canonical output-major rows used by the portable scalar backend.
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
     l1_weights: Box<[i8]>,
+    /// Native v92 `[four-input chunk][output][lane]` bytes consumed directly by AVX2.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    l1_weights_simd: Box<[i8]>,
     l1_bias: Box<[f32]>,
     /// Canonical output-major rows, converted from Viridithas's SIMD input-major storage at load.
     l2_weights: Box<[f32]>,
@@ -79,7 +83,10 @@ impl Network {
         let feature_weights = read_i16s(bytes, &mut cursor, FEATURE_WEIGHTS)?;
         let feature_bias = read_i16s(bytes, &mut cursor, FEATURE_BIAS)?;
         let serialized_l1 = read_i8s(bytes, &mut cursor, L1_WEIGHTS)?;
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
         let l1_weights = canonicalize_simd_l1(&serialized_l1);
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        let l1_weights_simd = serialized_l1;
         let l1_bias = read_f32s(bytes, &mut cursor, L1_BIAS)?;
         let serialized_l2 = read_f32s(bytes, &mut cursor, L2_WEIGHTS)?;
         let l2_weights = canonicalize_simd_l2(&serialized_l2);
@@ -94,7 +101,10 @@ impl Network {
         Ok(Self {
             feature_weights,
             feature_bias,
+            #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
             l1_weights,
+            #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+            l1_weights_simd,
             l1_bias,
             l2_weights,
             l2_bias,
@@ -196,18 +206,28 @@ impl Network {
 
         let l1_weight_base = bucket * HIDDEN * L2;
         let l1_bias_base = bucket * L2;
-        let mut l1 = [0_f32; L2];
-        for (output, output_value) in l1.iter_mut().enumerate() {
-            let row = &self.l1_weights
-                [l1_weight_base + output * HIDDEN..l1_weight_base + (output + 1) * HIDDEN];
-            let mut sum = 0_i32;
-            for (&input, &weight) in ft.iter().zip(row) {
-                sum += i32::from(input) * i32::from(weight);
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        let l1 = propagate_l1_safe_avx2(
+            &ft,
+            &self.l1_weights_simd[l1_weight_base..l1_weight_base + HIDDEN * L2],
+            &self.l1_bias[l1_bias_base..l1_bias_base + L2],
+        );
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+        let l1 = {
+            let mut values = [0_f32; L2];
+            for (output, output_value) in values.iter_mut().enumerate() {
+                let row = &self.l1_weights
+                    [l1_weight_base + output * HIDDEN..l1_weight_base + (output + 1) * HIDDEN];
+                let mut sum = 0_i32;
+                for (&input, &weight) in ft.iter().zip(row) {
+                    sum += i32::from(input) * i32::from(weight);
+                }
+                let value = (sum as f32).mul_add(L1_MUL, self.l1_bias[l1_bias_base + output]);
+                let clipped = value.clamp(0.0, 1.0);
+                *output_value = clipped * clipped;
             }
-            let value = (sum as f32).mul_add(L1_MUL, self.l1_bias[l1_bias_base + output]);
-            let clipped = value.clamp(0.0, 1.0);
-            *output_value = clipped * clipped;
-        }
+            values
+        };
 
         let l2_weight_base = bucket * L2 * L3;
         let l2_bias_base = bucket * L3;
@@ -247,6 +267,67 @@ fn activate_pairwise_simd_quantized(accumulator: &[i16; HIDDEN], output: &mut [u
         let product = (left * right) >> FT_SHIFT;
         output[index] = product.clamp(0, i32::from(u8::MAX)) as u8;
     }
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+fn propagate_l1_safe_avx2(ft: &[u8; HIDDEN], weights: &[i8], biases: &[f32]) -> [f32; L2] {
+    use safe_arch::{
+        add_i32_m256i, m256i, mul_i16_horizontal_add_m256i,
+        mul_u8i8_add_horizontal_saturating_m256i,
+    };
+
+    debug_assert_eq!(weights.len(), HIDDEN * L2);
+    debug_assert_eq!(biases.len(), L2);
+
+    let zero = m256i::from([0_i32; 8]);
+    let ones = m256i::from([1_i16; 16]);
+    let mut sums_lo = zero;
+    let mut sums_hi = zero;
+
+    for chunk in 0..HIDDEN / L1_INPUT_CHUNK {
+        let input_base = chunk * L1_INPUT_CHUNK;
+        let input_word = i32::from_le_bytes(
+            ft[input_base..input_base + L1_INPUT_CHUNK]
+                .try_into()
+                .expect("four-byte FT chunk"),
+        );
+        let input = m256i::from([input_word; 8]);
+        let weight_base = chunk * L1_INPUT_CHUNK * L2;
+        let weights_lo = m256i::from(
+            <[i8; 32]>::try_from(&weights[weight_base..weight_base + 32])
+                .expect("eight four-byte L1 rows"),
+        );
+        let weights_hi = m256i::from(
+            <[i8; 32]>::try_from(&weights[weight_base + 32..weight_base + 64])
+                .expect("eight four-byte L1 rows"),
+        );
+
+        let partial_lo = mul_i16_horizontal_add_m256i(
+            mul_u8i8_add_horizontal_saturating_m256i(input, weights_lo),
+            ones,
+        );
+        let partial_hi = mul_i16_horizontal_add_m256i(
+            mul_u8i8_add_horizontal_saturating_m256i(input, weights_hi),
+            ones,
+        );
+        sums_lo = add_i32_m256i(sums_lo, partial_lo);
+        sums_hi = add_i32_m256i(sums_hi, partial_hi);
+    }
+
+    let sums_lo: [i32; 8] = sums_lo.into();
+    let sums_hi: [i32; 8] = sums_hi.into();
+    let mut output = [0_f32; L2];
+    for index in 0..8 {
+        let value = (sums_lo[index] as f32).mul_add(L1_MUL, biases[index]);
+        let clipped = value.clamp(0.0, 1.0);
+        output[index] = clipped * clipped;
+    }
+    for index in 0..8 {
+        let value = (sums_hi[index] as f32).mul_add(L1_MUL, biases[index + 8]);
+        let clipped = value.clamp(0.0, 1.0);
+        output[index + 8] = clipped * clipped;
+    }
+    output
 }
 
 fn output_bucket(position: &Position) -> usize {
@@ -546,6 +627,7 @@ fn square(file: u8, rank: u8) -> Square {
 /// Convert Viridithas's SIMD L1 serialization into output-major rows. The serialized index order is
 /// `[four-input chunk][output neuron][byte within chunk]`; scalar inference is clearer as
 /// `[output neuron][input]`. This is a one-time setup cost and never occurs in search.
+#[cfg(any(test, not(all(target_arch = "x86_64", target_feature = "avx2"))))]
 fn canonicalize_simd_l1(serialized: &[i8]) -> Box<[i8]> {
     debug_assert_eq!(serialized.len(), L1_WEIGHTS);
     let per_bucket = HIDDEN * L2;
@@ -669,6 +751,13 @@ mod tests {
         assert!(frame_for_king(Color::White, h1).mirror_files);
         assert_eq!(frame_for_king(Color::White, e1).bucket, 3);
         assert!(frame_for_king(Color::White, e1).mirror_files);
+    }
+
+    #[test]
+    fn native_l1_layout_is_two_avx2_vectors_per_four_input_chunk() {
+        assert_eq!(L1_INPUT_CHUNK, 4);
+        assert_eq!(L2, 16);
+        assert_eq!(L1_INPUT_CHUNK * L2, 64);
     }
 
     #[test]
