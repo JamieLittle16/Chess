@@ -1,0 +1,2 @@
+Regression lab checkpoint before launching qcheck branch.
+The lab remains engine-neutral; all candidates reconstruct exact V13 separately.
