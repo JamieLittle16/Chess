@@ -2,13 +2,16 @@ name: V15 Python exact runtime superstack
 
 on:
   push:
-    branches: [analysis/v15-python-runtime-superstack-20260909]
+    branches:
+      - analysis/v15-python-runtime-superstack-20260909
     paths:
       - .github/workflows/v15-python-runtime-superstack.yml
       - scripts/patch_v15_python_lazy_h64_chain.py
   workflow_dispatch:
 
-permissions: {contents: read, actions: read}
+permissions:
+  contents: read
+  actions: read
 
 jobs:
   qualify:
@@ -17,7 +20,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: {python-version: '3.12'}
+        with:
+          python-version: '3.12'
       - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
       - name: Download exact V14
         uses: actions/download-artifact@v4
@@ -31,9 +35,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
-          rm -rf /tmp/base /tmp/cand /tmp/m6 results; mkdir -p /tmp/base /tmp/cand /tmp/m6 results
-          unzip -q "$ZIP" -d /tmp/base; cp -a /tmp/base/. /tmp/cand/
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit)
+          test -n "$ZIP"
+          rm -rf /tmp/base /tmp/cand /tmp/m6 results
+          mkdir -p /tmp/base /tmp/cand /tmp/m6 results
+          unzip -q "$ZIP" -d /tmp/base
+          cp -a /tmp/base/. /tmp/cand/
           python scripts/patch_v15_python_presort_once.py /tmp/cand/experiments/numba_search.py
           python scripts/patch_v15_python_lazy_h64_chain.py /tmp/cand/experiments/numba_search.py
           python scripts/patch_v15_python_scoremeta_hotloop.py /tmp/cand/experiments/numba_search.py
@@ -46,7 +53,9 @@ jobs:
           from experiments.numba_search import iterative_search_stateful
           b=chess.Board();e=encode_position(b);h=np.empty(0,dtype=np.uint64)
           o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,8000)
-          m=chess.Move.from_uci(move_to_uci(int(o[0])));assert m in b.legal_moves;print(tuple(int(x) for x in o),m)
+          m=chess.Move.from_uci(move_to_uci(int(o[0])))
+          assert m in b.legal_moves
+          print(tuple(int(x) for x in o),m)
           PY
       - name: Build fresh roots
         shell: bash
@@ -59,9 +68,12 @@ jobs:
           from pathlib import Path
           old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
           large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
-          fresh=[x for x in large if x not in old]; roots=fresh[4860:4924];timed=fresh[4930:4962]
+          fresh=[x for x in large if x not in old]
+          roots=fresh[4860:4924]
+          timed=fresh[4930:4962]
           assert len(roots)==64 and len(timed)==32
-          Path('/tmp/super-roots.epd').write_text('\n'.join(roots)+'\n');Path('/tmp/super-timed.epd').write_text('\n'.join(timed)+'\n')
+          Path('/tmp/super-roots.epd').write_text('\n'.join(roots)+'\n')
+          Path('/tmp/super-timed.epd').write_text('\n'.join(timed)+'\n')
           PY
       - name: Exact fixed-node parity
         run: python -u tools/v14_fixed_node_arena.py /tmp/cand /tmp/base --nodes 24000 --pairs 32 --opening-file /tmp/super-roots.epd --opening-offset 0 --max-plies 220 --json-out results/equal-node.json | tee results/equal-node.log
@@ -74,15 +86,19 @@ jobs:
           from experiments.numba_core import encode_position
           from experiments.numba_search import iterative_search_stateful
           for line in sys.stdin:
-              q=json.loads(line);b=chess.Board(q['fen']);e=encode_position(b);h=np.empty(0,dtype=np.uint64);o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,int(q['nodes']));print(json.dumps({'nodes':int(o[3])}),flush=True)
+              q=json.loads(line);b=chess.Board(q['fen']);e=encode_position(b);h=np.empty(0,dtype=np.uint64)
+              o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,int(q['nodes']))
+              print(json.dumps({'nodes':int(o[3])}),flush=True)
           PY
           python - <<'PY'
           import json,os,statistics,subprocess,sys,time
           from pathlib import Path
           roots=[x.strip() for x in Path('/tmp/super-roots.epd').read_text().splitlines() if x.strip()][:20]
           def start(d):
-              e=os.environ.copy();e['PYTHONPATH']=d;return subprocess.Popen([sys.executable,'/tmp/worker.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=e)
-          def one(p,fen,n):p.stdin.write(json.dumps({'fen':fen,'nodes':n})+'\n');p.stdin.flush();return json.loads(p.stdout.readline())
+              e=os.environ.copy();e['PYTHONPATH']=d
+              return subprocess.Popen([sys.executable,'/tmp/worker.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=e)
+          def one(p,fen,n):
+              p.stdin.write(json.dumps({'fen':fen,'nodes':n})+'\n');p.stdin.flush();return json.loads(p.stdout.readline())
           b=start('/tmp/base');c=start('/tmp/cand');rat=[];rows=[]
           try:
               one(b,roots[0],500);one(c,roots[0],500)
@@ -95,11 +111,17 @@ jobs:
                   if r%2==0:bn=timed(b);cn=timed(c)
                   else:cn=timed(c);bn=timed(b)
                   rat.append(cn/bn);rows.append({'rep':r,'base_nps':bn,'candidate_nps':cn,'ratio':cn/bn})
-          finally:b.terminate();c.terminate();b.wait();c.wait()
-          out={'median_nps_ratio':statistics.median(rat),'rows':rows};Path('results/throughput.json').write_text(json.dumps(out,indent=2)+'\n');print('FINAL',out)
+          finally:
+              b.terminate();c.terminate();b.wait();c.wait()
+          out={'median_nps_ratio':statistics.median(rat),'rows':rows}
+          Path('results/throughput.json').write_text(json.dumps(out,indent=2)+'\n')
+          print('FINAL',out)
           PY
       - name: Competition-clock sanity
         run: python -u scripts/v15_competition_gate.py --candidate /tmp/cand --control /tmp/base --openings /tmp/super-timed.epd --output results/timed.json --label exact-runtime-superstack --base-ms 2500 --inc-ms 50 --max-plies 180 | tee results/timed.log
       - uses: actions/upload-artifact@v4
         if: always()
-        with: {name: v15-python-runtime-superstack-${{ github.sha }}, path: results/, retention-days: 30}
+        with:
+          name: v15-python-runtime-superstack-${{ github.sha }}
+          path: results/
+          retention-days: 30
