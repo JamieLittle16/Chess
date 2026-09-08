@@ -1,0 +1,87 @@
+name: V14 materialize accepted Search-v2 production
+
+on:
+  push:
+    branches: [m6/v14-history-lmr-learned-pruning]
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    env:
+      PRODUCTION_BASE: f6ac75d644b844fabf35195d6054703e68bcc60f
+      TARGET_BRANCH: v14/search-v2-production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: Preserve exact accepted materializer inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/v14-source
+          cp crates/chess-search/src/history.rs /tmp/v14-source/history.rs
+          cp crates/chess-search/src/move_picker.rs /tmp/v14-source/move_picker.rs
+          cp scripts/apply_history_v2_probe.py /tmp/v14-source/apply_history_v2_probe.py
+          cp scripts/apply_v14_learned_pruning_probe.py /tmp/v14-source/apply_v14_learned_pruning_probe.py
+          sha256sum /tmp/v14-source/* | tee /tmp/v14-source/inputs.sha256
+
+      - name: Materialize exact H1-accepted source on production base
+        shell: bash
+        run: |
+          set -euo pipefail
+          git switch --force-create "$TARGET_BRANCH" "$PRODUCTION_BASE"
+          cp /tmp/v14-source/history.rs crates/chess-search/src/history.rs
+          cp /tmp/v14-source/move_picker.rs crates/chess-search/src/move_picker.rs
+          python /tmp/v14-source/apply_history_v2_probe.py --variant history-lmr
+          python /tmp/v14-source/apply_v14_learned_pruning_probe.py
+          cargo fmt --all
+          git diff --check
+
+          mapfile -t changed < <(git status --short | awk '{print $2}' | sort)
+          expected=(
+            crates/chess-search/src/history.rs
+            crates/chess-search/src/lib.rs
+            crates/chess-search/src/move_picker.rs
+            crates/chess-search/src/root_analysis.rs
+          )
+          if [[ "${changed[*]}" != "${expected[*]}" ]]; then
+            printf 'unexpected production diff:\n'; printf '  %s\n' "${changed[@]}"
+            exit 1
+          fi
+
+      - name: Strict production source gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q '^mod history;' crates/chess-search/src/lib.rs
+          grep -q 'Some(self.leaf_evaluate(position))' crates/chess-search/src/lib.rs
+          grep -q 'history_adjusted_lmr_reduction' crates/chess-search/src/lib.rs
+          grep -q 'pub(super) struct HistoryTables' crates/chess-search/src/history.rs
+          grep -q 'pub(super) fn next_scored' crates/chess-search/src/move_picker.rs
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+
+      - name: Commit only accepted engine source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            crates/chess-search/src/history.rs \
+            crates/chess-search/src/lib.rs \
+            crates/chess-search/src/move_picker.rs \
+            crates/chess-search/src/root_analysis.rs
+          git diff --cached --check
+          git commit -m 'feat(search): promote H1-accepted v14 Search-v2 stack'
+          git push --force origin "HEAD:$TARGET_BRANCH"
