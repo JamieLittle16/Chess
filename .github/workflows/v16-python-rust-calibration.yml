@@ -6,7 +6,8 @@ on:
     branches: [v16/python-rust-calibration]
     paths:
       - '.github/workflows/v16-python-rust-calibration.yml'
-      - 'tools/python_agent_uci.py'
+      - 'tools/python_rust_clock_arena.py'
+      - 'tools/v14_agent_runner.py'
 
 permissions:
   actions: read
@@ -15,7 +16,6 @@ permissions:
 env:
   GESTALT_URL: https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue
   GESTALT_SHA256: 956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6
-  FASTCHESS_COMMIT: f618e34540f94f4719ad3817950618dabe441318
 
 jobs:
   calibrate:
@@ -47,11 +47,11 @@ jobs:
           ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit)
           test -n "$ZIP"
           rm -rf /tmp/python .qualification
-          mkdir -p /tmp/python .qualification/bin .qualification/net .qualification/launchers .qualification/match
+          mkdir -p /tmp/python .qualification/bin .qualification/net .qualification/match
           unzip -q "$ZIP" -d /tmp/python
           python scripts/patch_v16_python_presort_once.py /tmp/python/experiments/numba_search.py
           python scripts/patch_v16_python_trusted_continuity.py /tmp/python/agent.py
-          python -m py_compile tools/python_agent_uci.py /tmp/python/agent.py /tmp/python/experiments/*.py
+          python -m py_compile tools/v14_agent_runner.py tools/python_rust_clock_arena.py /tmp/python/agent.py /tmp/python/experiments/*.py
       - name: Build production Rust V15
         shell: bash
         env:
@@ -87,48 +87,20 @@ jobs:
           assert len(chosen)==32 and len(set(chosen))==32
           Path('.qualification/match/python-rust-32.epd').write_text('\n'.join(chosen)+'\n')
           PY
-      - name: Build pinned Fastchess
-        shell: bash
-        run: |
-          set -euo pipefail
-          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
-          git -C .qualification/fastchess-src checkout --quiet "$FASTCHESS_COMMIT"
-          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = "$FASTCHESS_COMMIT"
-          make -C .qualification/fastchess-src -j2
-      - name: Create launchers and UCI smoke
-        shell: bash
-        run: |
-          set -euo pipefail
-          ROOT="$PWD"
-          cat > .qualification/launchers/python.sh <<EOF
-          #!/usr/bin/env bash
-          exec python '$ROOT/tools/python_agent_uci.py' /tmp/python
-          EOF
-          cat > .qualification/launchers/rust.sh <<EOF
-          #!/usr/bin/env bash
-          export CHESS_GESTALT_NETWORK='$ROOT/.qualification/net/gestalt-b840.nnue'
-          exec '$ROOT/.qualification/bin/rust-v15'
-          EOF
-          chmod +x .qualification/launchers/python.sh .qualification/launchers/rust.sh
-          { printf 'uci\nisready\nucinewgame\nposition startpos\ngo movetime 100\nquit\n'; } | .qualification/launchers/python.sh | tee .qualification/match/python-smoke.txt
-          { printf 'uci\nisready\nposition startpos\ngo movetime 100\nquit\n'; } | .qualification/launchers/rust.sh | tee .qualification/match/rust-smoke.txt
-          grep -q '^uciok$' .qualification/match/python-smoke.txt
-          grep -q '^bestmove ' .qualification/match/python-smoke.txt
-          grep -q '^uciok$' .qualification/match/rust-smoke.txt
-          grep -q '^bestmove ' .qualification/match/rust-smoke.txt
       - name: 64-game paired wall-clock calibration
         shell: bash
         run: |
           set -euo pipefail
-          .qualification/fastchess-src/fastchess \
-            -engine cmd="$PWD/.qualification/launchers/python.sh" name=python-v16 tc=2.5+0.05 \
-            -engine cmd="$PWD/.qualification/launchers/rust.sh" name=rust-v15 tc=2.5+0.05 option.Hash=32 \
-            -openings file="$PWD/.qualification/match/python-rust-32.epd" format=epd order=sequential \
-            -rounds 32 -repeat -concurrency 1 -maxmoves 300 -ratinginterval 16 \
-            -pgnout file=.qualification/match/games.pgn notation=uci append=false nodes=true nps=true \
-            -log file=.qualification/match/uci.log level=info engine=true append=false \
-            | tee .qualification/match/fastchess.stdout.log
+          python -u tools/python_rust_clock_arena.py \
+            --python-dir /tmp/python \
+            --rust-bin "$PWD/.qualification/bin/rust-v15" \
+            --gestalt "$PWD/.qualification/net/gestalt-b840.nnue" \
+            --openings .qualification/match/python-rust-32.epd \
+            --base-ms 2500 --inc-ms 50 --max-plies 220 \
+            --output .qualification/match/result.json \
+            | tee .qualification/match/arena.log
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: v16-python-rust-calibration-${{ github.sha }}
           path: .qualification/match/
