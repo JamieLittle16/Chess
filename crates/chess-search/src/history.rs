@@ -29,9 +29,9 @@ impl MoveContext {
 
 /// Search-local main + one-ply continuation history.
 ///
-/// Tables are cleared once per top-level search, so iterative deepening can teach later iterations
-/// without making tournament games depend on earlier games in the same process. Storage is owned by
-/// `Searcher`; probes and updates allocate nothing in the recursive hot path.
+/// The engine owns one `Searcher` for an entire game, so the stronger experiment retains learned
+/// history across moves and ages it before each new top-level search. `ucinewgame` constructs a new
+/// searcher, preventing cross-game contamination. Probes and updates allocate nothing recursively.
 pub(super) struct HistoryTables {
     main: [i16; MAIN_HISTORY_ENTRIES],
     continuation: Box<[i16]>,
@@ -46,9 +46,20 @@ impl HistoryTables {
         }
     }
 
+    #[allow(dead_code)]
     pub(super) fn clear(&mut self) {
         self.main.fill(0);
         self.continuation.fill(0);
+    }
+
+    /// Retain useful game-local evidence while allowing stale move preferences to decay.
+    pub(super) fn age(&mut self) {
+        for entry in &mut self.main {
+            *entry = (i32::from(*entry) * 3 / 4) as i16;
+        }
+        for entry in &mut self.continuation {
+            *entry = (i32::from(*entry) * 3 / 4) as i16;
+        }
     }
 
     #[must_use]
@@ -130,6 +141,19 @@ mod tests {
         assert_eq!(history.score(Color::Black, None, mv), 0);
         history.clear();
         assert_eq!(history.score(Color::White, None, mv), 0);
+    }
+
+    #[test]
+    fn aging_retains_signal_but_reduces_stale_magnitude() {
+        let mut history = HistoryTables::new();
+        let previous = context(PieceKind::Pawn, 4, 3);
+        let current = context(PieceKind::Knight, 5, 2);
+        history.update(Color::White, Some(previous), current, 1_200);
+        let before = history.score(Color::White, Some(previous), current);
+        history.age();
+        let after = history.score(Color::White, Some(previous), current);
+        assert!(after > 0);
+        assert!(after < before);
     }
 
     #[test]
