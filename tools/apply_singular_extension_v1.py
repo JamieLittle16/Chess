@@ -422,4 +422,24 @@ search = replace_once(
 )
 
 path.write_text(search)
+
+root_path = Path("crates/chess-search/src/root_analysis.rs")
+root = root_path.read_text()
+root = replace_once(
+    root,
+    """                    1,
+                    1,
+                    &NeverStop,
+""",
+    """                    1,
+                    1,
+                    None,
+                    true,
+                    false,
+                    &NeverStop,
+""",
+    "root analysis negamax call",
+)
+root_path.write_text(root)
+
 print("applied V15 Gestalt-gated TT singular extension v1")
