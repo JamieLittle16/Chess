@@ -1,0 +1,131 @@
+name: V15 Python NMP sweep
+
+on:
+  push:
+    branches: [analysis/v15-python-nmp-sweep-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  screen:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: conservative
+            min_depth: 5
+            margin: 120
+            base: 2
+            divisor: 6
+            min_phase: 6
+          - id: balanced
+            min_depth: 4
+            margin: 80
+            base: 2
+            divisor: 5
+            min_phase: 5
+          - id: strong
+            min_depth: 4
+            margin: 40
+            base: 2
+            divisor: 4
+            min_phase: 4
+          - id: aggressive
+            min_depth: 4
+            margin: 0
+            base: 3
+            divisor: 5
+            min_phase: 4
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Materialize candidate and JIT smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name 'Little-Gambit-V14.zip' -print -quit); test -n "$ZIP"
+          rm -rf /tmp/base /tmp/cand; mkdir -p /tmp/base /tmp/cand results
+          unzip -q "$ZIP" -d /tmp/base; cp -a /tmp/base/. /tmp/cand/
+          python scripts/patch_v15_python_nmp.py /tmp/cand/experiments/numba_search.py ${{ matrix.min_depth }} ${{ matrix.margin }} ${{ matrix.base }} ${{ matrix.divisor }} ${{ matrix.min_phase }}
+          python -m py_compile /tmp/cand/experiments/numba_search.py
+          PYTHONPATH=/tmp/cand python - <<'PY'
+          import chess,numpy as np
+          from experiments.numba_core import encode_position,move_to_uci
+          from experiments.numba_search import iterative_search_stateful
+          for fen in (chess.STARTING_FEN,'r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1'):
+              b=chess.Board(fen);e=encode_position(b);h=np.empty(0,dtype=np.uint64)
+              o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,8000)
+              m=chess.Move.from_uci(move_to_uci(int(o[0])));assert m in b.legal_moves,(fen,o,m);print(o,m)
+          PY
+      - name: Build disjoint fresh roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6; mkdir /tmp/m6; python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]; chosen=fresh[1328:1360]
+          assert len(chosen)==32 and len(set(chosen))==32
+          Path('/tmp/nmp-32.epd').write_text('\n'.join(chosen)+'\n')
+          PY
+      - name: Fixed-node throughput and depth
+        shell: bash
+        run: |
+          cat >/tmp/worker.py <<'PY'
+          import json,sys,chess,numpy as np
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful
+          for line in sys.stdin:
+              q=json.loads(line);b=chess.Board(q['fen']);e=encode_position(b);h=np.empty(0,dtype=np.uint64)
+              o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,int(q['nodes']))
+              print(json.dumps({'nodes':int(o[3]),'depth':int(o[2])}),flush=True)
+          PY
+          python - <<'PY'
+          import json,os,statistics,subprocess,sys,time
+          from pathlib import Path
+          roots=[x.strip() for x in Path('/tmp/nmp-32.epd').read_text().splitlines() if x.strip()][:16]
+          def start(d):
+              e=os.environ.copy();e['PYTHONPATH']=d;return subprocess.Popen([sys.executable,'/tmp/worker.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=e)
+          def one(p,fen,n):p.stdin.write(json.dumps({'fen':fen,'nodes':n})+'\n');p.stdin.flush();return json.loads(p.stdout.readline())
+          def timed(p,order):
+              nodes=0;t=time.perf_counter();depths=[]
+              for fen in order:
+                  z=one(p,fen,25000);nodes+=z['nodes'];depths.append(z['depth'])
+              return nodes/(time.perf_counter()-t),sum(depths)/len(depths)
+          b=start('/tmp/base');c=start('/tmp/cand');rows=[];rat=[]
+          try:
+              one(b,roots[0],500);one(c,roots[0],500)
+              for rep in range(3):
+                  order=roots if rep%2==0 else list(reversed(roots))
+                  if rep%2==0:bn,bd=timed(b,order);cn,cd=timed(c,order)
+                  else:cn,cd=timed(c,order);bn,bd=timed(b,order)
+                  rat.append(cn/bn);rows.append({'rep':rep,'base_nps':bn,'candidate_nps':cn,'ratio':cn/bn,'base_mean_depth':bd,'candidate_mean_depth':cd})
+          finally:b.terminate();c.terminate();b.wait();c.wait()
+          out={'median_nps_ratio':statistics.median(rat),'rows':rows};Path('results/throughput.json').write_text(json.dumps(out,indent=2)+'\n');print('FINAL',out)
+          PY
+      - name: 64-game equal-node screen
+        run: python -u tools/v14_fixed_node_arena.py /tmp/cand /tmp/base --nodes 16000 --pairs 32 --opening-file /tmp/nmp-32.epd --max-plies 220 --json-out results/arena.json | tee results/arena.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-nmp-${{ matrix.id }}-${{ github.sha }}
+          path: results/
+          retention-days: 30
