@@ -8,17 +8,32 @@ additional teacher-V14 correction it was trained to predict.
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 if len(sys.argv) != 3:
     raise SystemExit("usage: patch_v15_python_bucket_residual_on_v14.py SEARCH.py HIDDEN")
 search = Path(sys.argv[1])
 hidden = int(sys.argv[2])
-subprocess.run(
-    [sys.executable, str(Path(__file__).with_name("patch_v15_python_bucket_student_runtime.py")), str(search), str(hidden)],
-    check=True,
-)
-s = search.read_text()
+if hidden not in (8, 16, 24, 32):
+    raise SystemExit("HIDDEN must be 8, 16, 24 or 32")
 
+# The shared runtime patch was originally qualified only at H16/H32. For the residual experiment
+# we reuse its exact implementation while widening only its generation-time width guard.
+runtime_patch = Path(__file__).with_name("patch_v15_python_bucket_student_runtime.py").read_text()
+old_guard = "if hidden not in (16,32): raise SystemExit('HIDDEN must be 16 or 32')"
+new_guard = "if hidden not in (8,16,24,32): raise SystemExit('HIDDEN must be 8, 16, 24 or 32')"
+if runtime_patch.count(old_guard) != 1:
+    raise SystemExit(f"runtime-width guard count={runtime_patch.count(old_guard)}")
+runtime_patch = runtime_patch.replace(old_guard, new_guard, 1)
+with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as handle:
+    handle.write(runtime_patch)
+    widened_patch = Path(handle.name)
+try:
+    subprocess.run([sys.executable, str(widened_patch), str(search), str(hidden)], check=True)
+finally:
+    widened_patch.unlink(missing_ok=True)
+
+s = search.read_text()
 anchor = '''STUDENT_QA = 255
 STUDENT_QB = 64
 STUDENT_CP_SCALE = 400
@@ -59,8 +74,6 @@ if s.count(anchor) != 1:
     raise SystemExit(f"layout anchor count={s.count(anchor)}")
 s = s.replace(anchor, insert, 1)
 
-# The already-tested bucket helpers used EVAL_WIDTH as the end of their black accumulator. Once
-# legacy H64 is appended, freeze those slices at BUCKET_END instead.
 count = s.count("STUDENT_BLACK_OFFSET:EVAL_WIDTH")
 if count < 2:
     raise SystemExit(f"bucket black-slice anchor count={count}")
