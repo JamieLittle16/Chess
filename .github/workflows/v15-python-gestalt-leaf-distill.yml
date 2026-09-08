@@ -1,0 +1,122 @@
+name: V15 Python Gestalt search-leaf distillation
+
+on:
+  push:
+    branches: [analysis/v15-python-gestalt-leaf-distill-20260908]
+    paths: [.github/workflows/v15-python-gestalt-leaf-distill.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  corpus:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2
+      - name: Build traced Rust V15 and exact Gestalt oracle
+        run: |
+          CARGO_TARGET_DIR="$PWD/target-trace" cargo build --release -p chess-uci --features search-trace
+          cargo build --release -p chess-eval --example gestalt_teacher
+      - name: Download exact production Gestalt
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/leaf
+          curl --fail --location --retry 5 'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' -o /tmp/leaf/gestalt-b840.nnue
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  /tmp/leaf/gestalt-b840.nnue' | sha256sum --check --strict
+      - name: Build 96 fresh Rust-search roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/leaf/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/leaf/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old];roots=fresh[200:296]
+          assert len(roots)==96
+          Path('/tmp/leaf/roots.epd').write_text('\n'.join(roots)+'\n')
+          PY
+      - name: Collect deterministic real search-evaluation leaves
+        shell: bash
+        env:
+          CHESS_GESTALT_NETWORK: /tmp/leaf/gestalt-b840.nnue
+        run: |
+          set -euo pipefail
+          python tools/collect_search_leaf_corpus.py --engine target-trace/release/chess-uci --openings /tmp/leaf/roots.epd --roots 96 --nodes 24000 --stride 16 --output /tmp/leaf/leaves.tsv --manifest /tmp/leaf/leaves.json | tee /tmp/leaf/collect.log
+          wc -l /tmp/leaf/leaves.tsv
+          test "$(wc -l </tmp/leaf/leaves.tsv)" -ge 5000
+      - name: Label leaf positions with exact Gestalt and group-safe splits
+        shell: bash
+        env:
+          CHESS_GESTALT_NETWORK: /tmp/leaf/gestalt-b840.nnue
+        run: |
+          set -euo pipefail
+          cut -f2- /tmp/leaf/leaves.tsv > /tmp/leaf/fens.txt
+          target/release/examples/gestalt_teacher < /tmp/leaf/fens.txt > /tmp/leaf/scores.tsv
+          python - <<'PY'
+          import hashlib,json
+          from pathlib import Path
+          owner={fen:group for group,fen in (x.split('\t',1) for x in Path('/tmp/leaf/leaves.tsv').read_text().splitlines())}
+          rows=[]
+          for line in Path('/tmp/leaf/scores.tsv').read_text().splitlines():
+              fen,score=line.rsplit('\t',1);g=owner[fen];h=int.from_bytes(hashlib.sha256(g.encode()).digest()[:8],'big')%10;split='holdout' if h==0 else ('validation' if h==1 else 'train');rows.append(json.dumps({'split':split,'fen':fen,'teacher_cp':int(score),'teacher_mate':None,'group':g},separators=(',',':')))
+          Path('/tmp/leaf/teacher.jsonl').write_text('\n'.join(rows)+'\n')
+          counts={s:sum(json.loads(r)['split']==s for r in rows) for s in ('train','validation','holdout')};print({'records':len(rows),'counts':counts});assert min(counts.values())>200
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v15-rust-search-leaf-gestalt-${{ github.sha }}
+          path: |
+            /tmp/leaf/teacher.jsonl
+            /tmp/leaf/leaves.json
+            /tmp/leaf/collect.log
+          retention-days: 30
+
+  train:
+    needs: corpus
+    strategy:
+      fail-fast: false
+      matrix:
+        hidden: [16, 24, 32]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: v15-rust-search-leaf-gestalt-${{ github.sha }}
+          path: leaf-artifact
+          merge-multiple: true
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Train exact-topology student on real search leaves
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit);test -n "$ZIP"
+          rm -rf /tmp/v14 results;mkdir -p /tmp/v14 results;unzip -q "$ZIP" -d /tmp/v14
+          python -u scripts/train_v15_gestalt_topology_student.py --teacher leaf-artifact/teacher.jsonl --engine-dir /tmp/v14 --output-dir results/h${{ matrix.hidden }} --hidden ${{ matrix.hidden }} --epochs 30 --batch-size 256 | tee results/h${{ matrix.hidden }}.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-leaf-gestalt-topology-h${{ matrix.hidden }}-${{ github.sha }}
+          path: results/
+          retention-days: 30
