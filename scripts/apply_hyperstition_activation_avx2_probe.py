@@ -62,7 +62,8 @@ def main() -> int:
 }
 
 """
-    replacement = marker + """#[cfg(all(target_arch = \"x86_64\", target_feature = \"avx2\"))]
+    replacement = """#[cfg(any(not(all(target_arch = \"x86_64\", target_feature = \"avx2\")), test))]
+""" + marker + """#[cfg(all(target_arch = \"x86_64\", target_feature = \"avx2\"))]
 fn activate_pairwise_safe_avx2(accumulator: &[i16; HIDDEN], output: &mut [u8]) {
     use safe_arch::{
         m256i, max_i16_m256i, min_i16_m256i, mul_i16_keep_high_m256i,
