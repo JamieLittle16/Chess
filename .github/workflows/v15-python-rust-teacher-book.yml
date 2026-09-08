@@ -42,7 +42,12 @@ jobs:
           CHESS_GESTALT_NETWORK: ${{ github.workspace }}/.qualification/v15-python-teacher/gestalt-b840.nnue
         run: |
           set -euo pipefail
-          head -n 2 match/openings/chessathon-observed-starts-v1.tsv | tail -n 1 | cut -f3- > /tmp/one.fen
+          python - <<'PY' >/tmp/one.fen
+          from pathlib import Path
+          rows=[x for x in Path('match/openings/chessathon-observed-starts-v1.tsv').read_text().splitlines() if x and not x.startswith('#')]
+          _color,_opening,fen=rows[0].split('\\t',2)
+          print(fen)
+          PY
           target/release/examples/rust_teacher_candidates 2 3 < /tmp/one.fen | tee results/teacher-smoke.tsv
           target/release/examples/rust_teacher_candidates 3 1 < /tmp/one.fen | tee results/teacher-best-smoke.tsv
           python - <<'PY'
