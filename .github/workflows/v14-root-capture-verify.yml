@@ -1,0 +1,119 @@
+name: V14 root capture verification
+
+on:
+  push:
+    branches: [analysis/v14-root-capture-verify-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact H64 model
+        uses: actions/download-artifact@v4
+        with:
+          pattern: v14-single-student-h64-bb7d2a4ed05ff78d344cc4374d54e35189584993
+          path: model-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34202820525
+
+      - name: Materialize lean H64 control and capture-verifier candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODEL=$(find model-artifact -type f -name 'student-h64.npz' -print -quit);test -n "$MODEL"
+          echo '3422cecc3b1226767412e08746ffd6eef9f7e38602ac15b9256b475e6762b598  '"$MODEL" | sha256sum --check --strict
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum --check --strict
+          rm -rf /tmp/control /tmp/cand
+          for DIR in /tmp/control /tmp/cand; do
+            mkdir -p "$DIR";unzip -q /tmp/v13.zip -d "$DIR"
+            patch "$DIR/experiments/numba_search.py" < .analysis/v13_jit_refactor.patch
+            DIR="$DIR" python - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path(os.environ['DIR'])/'experiments/numba_search.py';s=p.read_text();old='    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into(';new='    correction = correction // 6\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into(';assert s.count(old)==1;p.write_text(s.replace(old,new,1))
+          PY
+            python scripts/patch_v13_legality_context.py "$DIR/experiments/numba_core.py"
+            python scripts/patch_v13_qsearch_tactical.py "$DIR/experiments/numba_core.py" "$DIR/experiments/numba_search.py"
+            cp experiments/v14_student_single_runtime.py "$DIR/experiments/v14_student_single_runtime.py"
+            cp "$MODEL" "$DIR/experiments/v14_student_h64.npz"
+            python scripts/patch_v14_single_student_search.py "$DIR/experiments/numba_search.py" --numerator 1 --denominator 12
+            python scripts/patch_v14_student_lean_qsearch.py "$DIR/experiments/numba_search.py"
+          done
+          python scripts/patch_v14_root_capture_verify.py /tmp/cand/experiments/numba_search.py
+          python -m py_compile /tmp/control/experiments/*.py /tmp/cand/experiments/*.py tools/v14_timed_agent_arena.py
+          mkdir -p results
+
+      - name: Historical Qxb5 tactical sentinel curve
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/probe.py <<'PY'
+          import json,sys,chess,numpy as np
+          from experiments.numba_core import encode_position,move_to_uci
+          from experiments.numba_search import iterative_search_stateful
+          fen='r2qk2r/pp1nbppp/5n2/1Qp1N3/3p4/8/PPPN1PPP/R1B1R1K1 b kq - 4 12'
+          b=chess.Board(fen);e=encode_position(b);h=np.empty(0,dtype=np.uint64)
+          for nodes in (10000,30000,100000,300000):
+              o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,nodes)
+              print(json.dumps({'budget':nodes,'move':move_to_uci(int(o[0])),'score':int(o[1]),'depth':int(o[2]),'nodes':int(o[3])}))
+          PY
+          PYTHONPATH=/tmp/control python /tmp/probe.py | tee results/control-qxb5.jsonl
+          PYTHONPATH=/tmp/cand python /tmp/probe.py | tee results/candidate-qxb5.jsonl
+
+      - name: Build untouched official-UHO book
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/master/UHO_Lichess_4852_v1.epd.zip
+          rm -rf /tmp/uho && mkdir /tmp/uho && unzip -q /tmp/uho.zip -d /tmp/uho
+          UHO=$(find /tmp/uho -type f -name '*.epd' -print -quit);test -n "$UHO"
+          UHO="$UHO" python - <<'PY'
+          import os,chess
+          from pathlib import Path
+          rows=Path(os.environ['UHO']).read_text(errors='ignore').splitlines();out=[]
+          for raw in rows[4500:4852]:
+              f=raw.strip().split()
+              if len(f)<4:continue
+              fen=' '.join(f[:4])+' 0 1'
+              try:b=chess.Board(fen)
+              except ValueError:continue
+              if b.is_game_over(claim_draw=False):continue
+              out.append(fen)
+              if len(out)==24:break
+          assert len(out)==24;Path('/tmp/test.epd').write_text('\n'.join(out)+'\n')
+          PY
+
+      - name: Fresh 48-game equal-node verifier versus lean control
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u tools/v14_fixed_node_arena.py /tmp/cand /tmp/control --nodes 16000 --pairs 24 --opening-offset 0 --max-plies 220 --opening-file /tmp/test.epd --json-out results/equal-48.json | tee results/equal-48.log
+          grep '^FINAL ' results/equal-48.log
+
+      - name: Timed 32-game verifier versus lean control
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u tools/v14_timed_agent_arena.py /tmp/cand /tmp/control --opening-file /tmp/test.epd --pairs 16 --base-ms 2500 --increment-ms 50 --max-plies 180 --json-out results/timed-32.json | tee results/timed-32.log
+          grep '^FINAL ' results/timed-32.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v14-root-capture-verify-${{ github.sha }}
+          path: results/
+          retention-days: 30
