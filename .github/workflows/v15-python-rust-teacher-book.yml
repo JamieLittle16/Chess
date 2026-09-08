@@ -35,7 +35,7 @@ jobs:
           test "$(stat -c%s .qualification/v15-python-teacher/gestalt-b840.nnue)" = '21242944'
           echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  .qualification/v15-python-teacher/gestalt-b840.nnue' | sha256sum --check --strict
       - name: Build production Rust teacher oracle
-        run: cargo build --locked --release -p chess-search --example rust_teacher_candidates
+        run: cargo build --release -p chess-search --example rust_teacher_candidates
       - name: Teacher smoke and legality check
         shell: bash
         env:
