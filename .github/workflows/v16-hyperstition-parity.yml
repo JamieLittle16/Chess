@@ -18,6 +18,8 @@ jobs:
       NETWORK_URL: https://github.com/cosmobobak/viridithas-networks/releases/download/v92/hyperstition-b400.nnue.zst
       COMPRESSED_BYTES: '22895545'
       RAW_BYTES: '50616896'
+      COMPRESSED_SHA256: 5b4045557ae14c2c89001bdb4dde84ff0bb5b24bbeb79632f868108e56a24c6f
+      RAW_SHA256: 36bcc6b3354ecbdb88fb95a341e494558b052223143f38ff6e6387aed99ab193
     steps:
       - uses: actions/checkout@v4
         with:
@@ -46,8 +48,10 @@ jobs:
           curl --fail --location --retry 5 "$NETWORK_URL" \
             --output .qualification/hyperstition/hyperstition-b400.nnue.zst
           test "$(stat -c%s .qualification/hyperstition/hyperstition-b400.nnue.zst)" = "$COMPRESSED_BYTES"
+          echo "$COMPRESSED_SHA256  .qualification/hyperstition/hyperstition-b400.nnue.zst" \
+            | sha256sum --check --strict
           sha256sum .qualification/hyperstition/hyperstition-b400.nnue.zst \
-            | tee .qualification/hyperstition/network-compressed.sha256
+            > .qualification/hyperstition/network-compressed.sha256
           if ! command -v zstd >/dev/null 2>&1; then
             sudo apt-get update -qq
             sudo apt-get install -y zstd
@@ -56,8 +60,10 @@ jobs:
             .qualification/hyperstition/hyperstition-b400.nnue.zst \
             -o .qualification/hyperstition/hyperstition-b400.nnue
           test "$(stat -c%s .qualification/hyperstition/hyperstition-b400.nnue)" = "$RAW_BYTES"
+          echo "$RAW_SHA256  .qualification/hyperstition/hyperstition-b400.nnue" \
+            | sha256sum --check --strict
           sha256sum .qualification/hyperstition/hyperstition-b400.nnue \
-            | tee .qualification/hyperstition/network-raw.sha256
+            > .qualification/hyperstition/network-raw.sha256
 
       - name: Build Little Gambit scalar oracle
         shell: bash
@@ -71,12 +77,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git clone --quiet https://github.com/cosmobobak/viridithas.git .qualification/viridithas
-          git -C .qualification/viridithas checkout --quiet "$VIRI_COMMIT"
-          test "$(git -C .qualification/viridithas rev-parse HEAD)" = "$VIRI_COMMIT"
+          rm -rf /tmp/viridithas-v14
+          git clone --quiet https://github.com/cosmobobak/viridithas.git /tmp/viridithas-v14
+          git -C /tmp/viridithas-v14 checkout --quiet "$VIRI_COMMIT"
+          test "$(git -C /tmp/viridithas-v14 rev-parse HEAD)" = "$VIRI_COMMIT"
           EVALFILE="$PWD/.qualification/hyperstition/hyperstition-b400.nnue.zst" \
-            cargo build --release --manifest-path .qualification/viridithas/Cargo.toml
-          cp .qualification/viridithas/target/release/viridithas \
+            cargo build --release --manifest-path /tmp/viridithas-v14/Cargo.toml
+          cp /tmp/viridithas-v14/target/release/viridithas \
             .qualification/hyperstition/viridithas-reference
           chmod +x .qualification/hyperstition/viridithas-reference
 
@@ -169,7 +176,9 @@ jobs:
             echo "network_asset=hyperstition-b400.nnue.zst"
             echo "network_url=$NETWORK_URL"
             echo "compressed_bytes=$COMPRESSED_BYTES"
+            echo "compressed_sha256=$COMPRESSED_SHA256"
             echo "raw_bytes=$RAW_BYTES"
+            echo "raw_sha256=$RAW_SHA256"
           } > .qualification/hyperstition/identity.txt
 
       - name: Upload parity evidence
