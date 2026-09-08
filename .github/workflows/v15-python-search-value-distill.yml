@@ -1,0 +1,285 @@
+name: V15 Python search-aligned value distillation
+
+on:
+  push:
+    branches: [analysis/v15-python-search-value-distill-20260908]
+    paths:
+      - crates/chess-search/examples/rust_v15_value_teacher.rs
+      - scripts/train_v15_search_value_student.py
+      - .github/workflows/v15-python-search-value-distill.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  labels:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Build exact Rust V15 search-value teacher
+        run: cargo build --release -p chess-search --example rust_v15_value_teacher
+      - name: Download exact Gestalt production network
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/value
+          curl --fail --location --retry 5 'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' --output /tmp/value/gestalt-b840.nnue
+          test "$(stat -c%s /tmp/value/gestalt-b840.nnue)" = '21242944'
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  /tmp/value/gestalt-b840.nnue' | sha256sum --check --strict
+      - name: Download exact packaged Python V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Materialize qcap6 trajectory engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
+          mkdir -p /tmp/pyq6
+          unzip -q "$ZIP" -d /tmp/pyq6
+          python scripts/patch_v15_python_qsearch_cap.py /tmp/pyq6/experiments/numba_search.py 6
+          python -m py_compile /tmp/pyq6/agent.py /tmp/pyq6/experiments/*.py
+      - name: Build shard roots
+        shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6; mkdir /tmp/m6
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          shard=int(os.environ['SHARD'])
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          start=500+250*shard
+          chosen=fresh[start:start+250]
+          assert len(chosen)==250 and len(set(chosen))==250
+          Path('/tmp/value/roots.epd').write_text('\n'.join(chosen)+'\n')
+          print({'shard':shard,'start':start,'end':start+len(chosen),'fresh':len(fresh)})
+          PY
+      - name: Generate qcap6 search trajectories
+        shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          PYTHONPATH=/tmp/pyq6 python - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          import chess, numpy as np
+          from experiments.numba_core import encode_position, move_to_uci
+          from experiments.numba_search import iterative_search_stateful
+          roots=Path('/tmp/value/roots.epd').read_text().splitlines()
+          out=[]; seen=set(); history=np.empty(0,dtype=np.uint64)
+          # Warm Numba once before the corpus loop.
+          b=chess.Board(roots[0]);e=encode_position(b);iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,history,0,500)
+          for root_index,fen in enumerate(roots):
+              b=chess.Board(fen)
+              for ply in range(7):
+                  if ply in (0,2,4,6):
+                      f=b.fen()
+                      if f not in seen:
+                          seen.add(f);out.append(f)
+                  if b.outcome(claim_draw=False) is not None: break
+                  e=encode_position(b)
+                  r=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,history,0,6000)
+                  move=chess.Move.from_uci(move_to_uci(int(r[0])))
+                  if move not in b.legal_moves: raise SystemExit(f'illegal search move {move} at {b.fen()}')
+                  b.push(move)
+          Path('/tmp/value/trajectory.fen').write_text('\n'.join(out)+'\n')
+          print({'shard':int(os.environ['SHARD']),'roots':len(roots),'positions':len(out),'unique':len(seen)})
+          assert len(out)>=900
+          PY
+      - name: Label trajectory with Rust V15 depth-3 backed-up values
+        shell: bash
+        env:
+          CHESS_GESTALT_NETWORK: /tmp/value/gestalt-b840.nnue
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          /usr/bin/time -v target/release/examples/rust_v15_value_teacher 3 32 </tmp/value/trajectory.fen >/tmp/value/raw.tsv 2>/tmp/value/time.log
+          python - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+          shard=int(os.environ['SHARD']); rows=[]
+          for line in Path('/tmp/value/raw.tsv').read_text().splitlines():
+              fen,score=line.rsplit('\t',1);score=int(score)
+              bucket=int.from_bytes(hashlib.sha256(fen.encode()).digest()[:8],'big')%10
+              split='holdout' if bucket==0 else ('validation' if bucket==1 else 'train')
+              rows.append(json.dumps({'split':split,'fen':fen,'teacher_cp':score,'teacher_mate':None},separators=(',',':')))
+          path=Path(f'/tmp/value/search-value-{shard}.jsonl');path.write_text('\n'.join(rows)+'\n')
+          counts={s:sum(json.loads(x)['split']==s for x in rows) for s in ('train','validation','holdout')}
+          print({'records':len(rows),'split_counts':counts,'first':json.loads(rows[0])})
+          assert len(rows)>=850
+          PY
+          cat /tmp/value/time.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v15-search-value-labels-${{ matrix.shard }}-${{ github.sha }}
+          path: |
+            /tmp/value/search-value-${{ matrix.shard }}.jsonl
+            /tmp/value/time.log
+          retention-days: 30
+
+  train:
+    needs: labels
+    strategy:
+      fail-fast: false
+      matrix:
+        hidden: [16, 32]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact packaged Python V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: v15-search-value-labels-*-${{ github.sha }}
+          path: label-artifacts
+          merge-multiple: true
+      - name: Train quantized search-value student
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit);test -n "$ZIP"
+          rm -rf /tmp/v14 results;mkdir -p /tmp/v14 results
+          unzip -q "$ZIP" -d /tmp/v14
+          cat label-artifacts/search-value-*.jsonl > results/search-value-teacher.jsonl
+          echo "teacher_records=$(wc -l < results/search-value-teacher.jsonl)"
+          python -u scripts/train_v15_search_value_student.py --teacher results/search-value-teacher.jsonl --engine-dir /tmp/v14 --output-dir results/h${{ matrix.hidden }} --hidden ${{ matrix.hidden }} --epochs 30 --batch-size 256 --seed 20260908 | tee results/h${{ matrix.hidden }}.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-search-value-student-h${{ matrix.hidden }}-${{ github.sha }}
+          path: results/
+          retention-days: 30
+
+  screen:
+    needs: train
+    strategy:
+      fail-fast: false
+      matrix:
+        hidden: [16, 32]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact packaged Python V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - uses: actions/download-artifact@v4
+        with:
+          name: v15-search-value-student-h${{ matrix.hidden }}-${{ github.sha }}
+          path: model-artifact
+      - name: Materialize qcap6 control and candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit)
+          MODEL=$(find model-artifact -type f -name 'search-value-h${{ matrix.hidden }}.npz' -print -quit)
+          test -n "$ZIP";test -n "$MODEL"
+          rm -rf /tmp/base /tmp/cand /tmp/m6 results;mkdir -p /tmp/base /tmp/cand /tmp/m6 results
+          unzip -q "$ZIP" -d /tmp/base
+          python scripts/patch_v15_python_qsearch_cap.py /tmp/base/experiments/numba_search.py 6
+          cp -a /tmp/base/. /tmp/cand/
+          cp "$MODEL" /tmp/cand/experiments/v15_bucket_student.npz
+          python scripts/patch_v15_python_bucket_student_runtime.py /tmp/cand/experiments/numba_search.py ${{ matrix.hidden }}
+          python -m py_compile /tmp/base/agent.py /tmp/cand/agent.py /tmp/base/experiments/*.py /tmp/cand/experiments/*.py
+      - name: Build completely disjoint screen roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          fixed=fresh[4650:4682];timed=fresh[4682:4698]
+          assert len(fixed)==32 and len(timed)==16 and not set(fixed)&set(timed)
+          Path('/tmp/value-fixed.epd').write_text('\n'.join(fixed)+'\n');Path('/tmp/value-timed.epd').write_text('\n'.join(timed)+'\n')
+          PY
+      - name: Throughput gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/worker.py <<'PY'
+          import json,sys,chess,numpy as np
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful
+          for line in sys.stdin:
+              q=json.loads(line);b=chess.Board(q['fen']);e=encode_position(b);h=np.empty(0,dtype=np.uint64)
+              o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,int(q['nodes']))
+              print(json.dumps({'nodes':int(o[3])}),flush=True)
+          PY
+          python - <<'PY'
+          import json,os,statistics,subprocess,sys,time
+          from pathlib import Path
+          roots=Path('/tmp/value-fixed.epd').read_text().splitlines()[:12]
+          def start(d):
+              e=os.environ.copy();e['PYTHONPATH']=d;return subprocess.Popen([sys.executable,'/tmp/worker.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=e)
+          def one(p,f,n):p.stdin.write(json.dumps({'fen':f,'nodes':n})+'\n');p.stdin.flush();return json.loads(p.stdout.readline())['nodes']
+          def run(p,order):
+              n=0;t=time.perf_counter()
+              for f in order:n+=one(p,f,25000)
+              return n/(time.perf_counter()-t)
+          b=start('/tmp/base');c=start('/tmp/cand');rat=[]
+          try:
+              one(b,roots[0],500);one(c,roots[0],500)
+              for r in range(3):
+                  order=roots if r%2==0 else list(reversed(roots))
+                  if r%2==0:bn=run(b,order);cn=run(c,order)
+                  else:cn=run(c,order);bn=run(b,order)
+                  rat.append(cn/bn)
+          finally:b.terminate();c.terminate();b.wait();c.wait()
+          out={'hidden':${{ matrix.hidden }},'median_nps_ratio':statistics.median(rat),'ratios':rat};Path('results/throughput.json').write_text(json.dumps(out,indent=2)+'\n');print('FINAL',out)
+          PY
+      - name: 64-game equal-node screen
+        run: python -u tools/v14_fixed_node_arena.py /tmp/cand /tmp/base --nodes 18000 --pairs 32 --opening-file /tmp/value-fixed.epd --opening-offset 0 --max-plies 220 --json-out results/fixed.json | tee results/fixed.log
+      - name: 32-game competition-clock screen
+        run: python -u scripts/v15_competition_gate.py --control /tmp/base --candidate /tmp/cand --openings /tmp/value-timed.epd --output results/timed.json --label 'search-value-h${{ matrix.hidden }} vs qcap6' --base-ms 2500 --inc-ms 50 --max-plies 180 | tee results/timed.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-search-value-screen-h${{ matrix.hidden }}-${{ github.sha }}
+          path: results/
+          retention-days: 30
