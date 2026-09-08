@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Grade V14 fixed-node regression choices with a pinned full-strength Stockfish teacher.
 
-Input is a `v14_regression_probe.py` JSON result.  For each fixture this tool clears the teacher hash,
+Input is a `v14_regression_probe.py` JSON result. For each fixture this tool clears the teacher hash,
 analyses the position unrestricted, then evaluates the candidate and control moves as root-restricted
-searches at the same fixed node budget.  The resulting centipawn and WDL-expectation losses are much
+searches at the same fixed node budget. The resulting centipawn and WDL-expectation losses are much
 safer regression metrics than exact best-move equality alone.
 """
 from __future__ import annotations
@@ -98,8 +98,7 @@ def analyse(
 
 
 def move_at_budget(engine_result: dict[str, Any], budget: int) -> str:
-    rows = engine_result["searches"]
-    for row in rows:
+    for row in engine_result["searches"]:
         if int(row["budget"]) == budget:
             return str(row["uci"])
     raise KeyError(f"probe has no search at budget {budget}")
@@ -128,8 +127,10 @@ def main() -> int:
 
     stockfish = args.stockfish.resolve()
     engine = chess.engine.SimpleEngine.popen_uci(str(stockfish))
+    teacher_id: dict[str, Any] = {}
     try:
         engine.configure({"Threads": 1, "Hash": args.hash_mb, "UCI_LimitStrength": False})
+        teacher_id = dict(engine.id)
         rows: list[dict[str, Any]] = []
         for fixture_id, fixture in fixtures.items():
             board = chess.Board(fixture["fen"])
@@ -165,22 +166,28 @@ def main() -> int:
                 "control_move": control_uci,
                 "teacher_best_move": best["best_move"],
                 "reported_expected_uci": fixture.get("expected_uci", []),
-                "teacher_best_matches_reported": best["best_move"] in set(fixture.get("expected_uci", [])),
+                "teacher_best_matches_reported": best["best_move"]
+                in set(fixture.get("expected_uci", [])),
                 "best": best,
                 "candidate": candidate,
                 "control": control,
                 "candidate_loss": candidate_loss,
                 "control_loss": control_loss,
                 "delta_cp_loss": int(candidate_loss["cp"]) - int(control_loss["cp"]),
-                "delta_expectation_loss": float(candidate_loss["expectation"]) - float(control_loss["expectation"]),
+                "delta_expectation_loss": float(candidate_loss["expectation"])
+                - float(control_loss["expectation"]),
             }
             rows.append(row)
             print(
                 fixture_id,
-                "candidate", candidate_uci,
-                "control", control_uci,
-                "teacher", best["best_move"],
-                "delta_cp", row["delta_cp_loss"],
+                "candidate",
+                candidate_uci,
+                "control",
+                control_uci,
+                "teacher",
+                best["best_move"],
+                "delta_cp",
+                row["delta_cp_loss"],
                 flush=True,
             )
     finally:
@@ -191,11 +198,20 @@ def main() -> int:
         category = str(row["category"])
         bucket = categories.setdefault(
             category,
-            {"positions": 0, "candidate_cp_loss": 0, "control_cp_loss": 0, "delta_cp_loss": 0},
+            {
+                "positions": 0,
+                "candidate_cp_loss": 0,
+                "control_cp_loss": 0,
+                "delta_cp_loss": 0,
+            },
         )
         bucket["positions"] = int(bucket["positions"]) + 1
-        bucket["candidate_cp_loss"] = int(bucket["candidate_cp_loss"]) + int(row["candidate_loss"]["cp"])
-        bucket["control_cp_loss"] = int(bucket["control_cp_loss"]) + int(row["control_loss"]["cp"])
+        bucket["candidate_cp_loss"] = int(bucket["candidate_cp_loss"]) + int(
+            row["candidate_loss"]["cp"]
+        )
+        bucket["control_cp_loss"] = int(bucket["control_cp_loss"]) + int(
+            row["control_loss"]["cp"]
+        )
         bucket["delta_cp_loss"] = int(bucket["delta_cp_loss"]) + int(row["delta_cp_loss"])
 
     output = {
@@ -205,7 +221,7 @@ def main() -> int:
         "teacher": {
             "path": str(stockfish),
             "sha256": sha256_file(stockfish),
-            "id": dict(engine.id),
+            "id": teacher_id,
             "threads": 1,
             "hash_mb": args.hash_mb,
             "python_chess_version": importlib.metadata.version("chess"),
@@ -213,7 +229,9 @@ def main() -> int:
         "positions": rows,
         "categories": categories,
         "total_delta_cp_loss": sum(int(row["delta_cp_loss"]) for row in rows),
-        "total_delta_expectation_loss": sum(float(row["delta_expectation_loss"]) for row in rows),
+        "total_delta_expectation_loss": sum(
+            float(row["delta_expectation_loss"]) for row in rows
+        ),
     }
     args.json_out.parent.mkdir(parents=True, exist_ok=True)
     args.json_out.write_text(json.dumps(output, indent=2, sort_keys=True) + "\n")
