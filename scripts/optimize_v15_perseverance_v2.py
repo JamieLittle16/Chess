@@ -58,6 +58,23 @@ text = replace_once(
 
 text = replace_once(
     text,
+    """fn activate_half(accumulator: &[i16; HIDDEN], output: &mut [u8]) {
+    debug_assert_eq!(output.len(), HALF_HIDDEN);
+    for index in 0..HALF_HIDDEN {
+        let left = i32::from(accumulator[index]).clamp(0, QA);
+        let right = i32::from(accumulator[HALF_HIDDEN + index]).clamp(0, QA);
+        let product = (left * right) >> FT_SHIFT;
+        output[index] = u8::try_from(product).expect(\"SCReLU pair product fits u8\");
+    }
+}
+
+""",
+    "",
+    "remove obsolete activation helper",
+)
+
+text = replace_once(
+    text,
     """fn output_bucket(position: &Position) -> usize {
     let men: usize = Color::ALL
         .into_iter()
