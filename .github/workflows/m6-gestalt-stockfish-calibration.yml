@@ -1,0 +1,158 @@
+name: M6 gestalt Stockfish calibration ladder
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  calibration:
+    if: github.head_ref == 'm6/gestalt-stockfish-calibration-v1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      RUSTFLAGS: -C target-cpu=native
+    strategy:
+      fail-fast: false
+      matrix:
+        elo: [2000, 2200, 2400]
+    name: Stockfish 19 Elo ${{ matrix.elo }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Verify calibration branch leaves production source untouched
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git diff --exit-code origin/main -- crates Cargo.toml Cargo.lock rust-toolchain.toml
+
+      - name: Strict production gate and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/bin .qualification/m6-calibration
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/bin/chess-m6-gestalt
+          chmod +x .qualification/bin/chess-m6-gestalt
+          sha256sum .qualification/bin/chess-m6-gestalt > .qualification/m6-calibration/candidate.sha256
+
+      - name: Download exact certified CC0 network
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' \
+            --output .qualification/m6-calibration/gestalt-b840.nnue
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  .qualification/m6-calibration/gestalt-b840.nnue' \
+            | sha256sum --check --strict
+
+      - name: Reproduce frozen 5000-root M6 suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip' \
+            --output /tmp/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/UHO_Lichess_4852_v1.epd.zip' \
+            | sha256sum --check --strict
+          mkdir -p .qualification/m6-openings
+          python scripts/build_m6_opening_suite.py \
+            --archive /tmp/UHO_Lichess_4852_v1.epd.zip \
+            --output-dir .qualification/m6-openings
+          echo '5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e  .qualification/m6-openings/m6-uho-lichess-5000-v1.epd' \
+            | sha256sum --check --strict
+
+      - name: Fetch pinned Fastchess and Stockfish 19
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = 'f618e34540f94f4719ad3817950618dabe441318'
+          make -C .qualification/fastchess-src -j2
+
+          mkdir -p .qualification/stockfish
+          curl --fail --location --retry 5 \
+            --output .qualification/stockfish.tar.gz \
+            'https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz'
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  .qualification/stockfish.tar.gz' \
+            | sha256sum --check --strict
+          tar -xzf .qualification/stockfish.tar.gz -C .qualification/stockfish
+          STOCKFISH_BIN=$(find "$PWD/.qualification/stockfish" -type f -name 'stockfish*' -perm -111 -print -quit)
+          test -n "$STOCKFISH_BIN"
+          echo "STOCKFISH_BIN=$STOCKFISH_BIN" >> "$GITHUB_ENV"
+
+      - name: Create fixed-network production launcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$PWD"
+          cat > .qualification/bin/chess-m6-launcher <<EOF
+          #!/usr/bin/env bash
+          export CHESS_GESTALT_NETWORK='$ROOT/.qualification/m6-calibration/gestalt-b840.nnue'
+          exec '$ROOT/.qualification/bin/chess-m6-gestalt'
+          EOF
+          chmod +x .qualification/bin/chess-m6-launcher
+
+      - name: Record exact identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD | tee .qualification/m6-calibration/candidate-head.txt
+          .qualification/fastchess-src/fastchess -version | tee .qualification/m6-calibration/fastchess-version.txt
+          printf 'uci\nquit\n' | "$STOCKFISH_BIN" | head -n 60 | tee .qualification/m6-calibration/stockfish-identity.txt
+          sha256sum "$STOCKFISH_BIN" .qualification/fastchess-src/fastchess \
+            .qualification/m6-openings/m6-uho-lichess-5000-v1.epd \
+            > .qualification/m6-calibration/reference-identities.sha256
+
+      - name: Run paired calibration rung
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHORT_SHA=${GITHUB_SHA:0:12}
+          python3 scripts/match_harness.py \
+            --protocol match/protocols/m6-stockfish-calibration-v1.json \
+            --candidate "$PWD/.qualification/bin/chess-m6-launcher" \
+            --candidate-name "Chess-M6-gestalt@$SHORT_SHA" \
+            --candidate-option Hash=32 \
+            --reference "$STOCKFISH_BIN" \
+            --reference-name 'Stockfish-19-Elo${{ matrix.elo }}' \
+            --reference-option Threads=1 \
+            --reference-option Hash=32 \
+            --reference-option UCI_LimitStrength=true \
+            --reference-option UCI_Elo=${{ matrix.elo }} \
+            --fastchess "$PWD/.qualification/fastchess-src/fastchess" \
+            --openings "$PWD/.qualification/m6-openings/m6-uho-lichess-5000-v1.epd" \
+            --output-dir "calibration-results-${{ matrix.elo }}"
+
+      - name: Upload retained calibration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m6-gestalt-stockfish${{ matrix.elo }}-${{ github.sha }}
+          path: |
+            calibration-results-${{ matrix.elo }}/
+            .qualification/m6-calibration/candidate.sha256
+            .qualification/m6-calibration/candidate-head.txt
+            .qualification/m6-calibration/fastchess-version.txt
+            .qualification/m6-calibration/stockfish-identity.txt
+            .qualification/m6-calibration/reference-identities.sha256
+          if-no-files-found: warn
+          retention-days: 30
