@@ -364,14 +364,14 @@ impl Searcher {
         if moves.is_empty() {
             let score = terminal_score(position, 0);
             self.table
-                .store(key, depth, score_to_tt(score, 0), Bound::Exact, None);
+                .store(key, depth, score_to_tt(score, 0), Bound::Exact, None, None);
             return Some(self.result(None, score, depth));
         }
 
         if depth == 0 {
             let score = self.leaf_evaluate(position);
             self.table
-                .store(key, depth, score_to_tt(score, 0), Bound::Exact, None);
+                .store(key, depth, score_to_tt(score, 0), Bound::Exact, None, None);
             return Some(self.result(None, score, depth));
         }
 
@@ -449,6 +449,7 @@ impl Searcher {
             score_to_tt(best_score, 0),
             Bound::Exact,
             best_move,
+            None,
         );
         Some(self.result(best_move, best_score, depth))
     }
@@ -522,11 +523,22 @@ impl Searcher {
         let pruning_static_eval = if pruning_eligible {
             if !has_legal_move_mut(position) {
                 let score = terminal_score(position, ply);
-                self.table
-                    .store(key, depth, score_to_tt(score, ply), Bound::Exact, None);
+                self.table.store(
+                    key,
+                    depth,
+                    score_to_tt(score, ply),
+                    Bound::Exact,
+                    None,
+                    None,
+                );
                 return Some(score);
             }
-            Some(self.leaf_evaluate(position))
+            Some(
+                table_entry
+                    .and_then(|entry| entry.static_eval)
+                    .map(i32::from)
+                    .unwrap_or_else(|| self.leaf_evaluate(position)),
+            )
         } else {
             None
         };
@@ -540,8 +552,14 @@ impl Searcher {
         let moves = generate_legal_moves_mut(position);
         if moves.is_empty() {
             let score = terminal_score(position, ply);
-            self.table
-                .store(key, depth, score_to_tt(score, ply), Bound::Exact, None);
+            self.table.store(
+                key,
+                depth,
+                score_to_tt(score, ply),
+                Bound::Exact,
+                None,
+                None,
+            );
             return Some(score);
         }
 
@@ -700,8 +718,14 @@ impl Searcher {
         } else {
             Bound::Exact
         };
-        self.table
-            .store(key, depth, score_to_tt(best, ply), bound, best_move);
+        self.table.store(
+            key,
+            depth,
+            score_to_tt(best, ply),
+            bound,
+            best_move,
+            pruning_static_eval,
+        );
         Some(best)
     }
 
@@ -884,6 +908,10 @@ fn score_to_tt(score: i32, ply: u16) -> i32 {
     }
 }
 
+fn static_eval_to_tt(score: i32) -> i16 {
+    score.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
+}
+
 fn score_from_tt(score: i32, ply: u16) -> i32 {
     let ply = i32::from(ply);
     if score >= MATE_TT_THRESHOLD {
@@ -911,6 +939,7 @@ struct TtEntry {
     score: i32,
     bound: Bound,
     best_move: Option<ChessMove>,
+    static_eval: Option<i16>,
 }
 
 impl TtEntry {
@@ -921,6 +950,7 @@ impl TtEntry {
         score: 0,
         bound: Bound::Exact,
         best_move: None,
+        static_eval: None,
     };
 }
 
@@ -952,12 +982,18 @@ impl TranspositionTable {
         score: i32,
         bound: Bound,
         best_move: Option<ChessMove>,
+        static_eval: Option<i32>,
     ) {
         let Some(slot) = self.slot(key) else {
             return;
         };
         let old = self.entries[slot];
         if !old.valid || old.key != key || depth >= old.depth {
+            let inherited_static_eval = if old.valid && old.key == key {
+                old.static_eval
+            } else {
+                None
+            };
             self.entries[slot] = TtEntry {
                 valid: true,
                 key,
@@ -965,6 +1001,7 @@ impl TranspositionTable {
                 score,
                 bound,
                 best_move,
+                static_eval: static_eval.map(static_eval_to_tt).or(inherited_static_eval),
             };
         }
     }
@@ -982,6 +1019,11 @@ mod tests {
         MATE_SCORE, SearchControl, Searcher, has_two_prior_occurrences, iterative_deepening,
         score_from_tt, score_to_tt, search, search_mut, tt_entries_for_megabytes,
     };
+
+    #[test]
+    fn static_eval_cache_preserves_24_byte_tt_entry() {
+        assert_eq!(core::mem::size_of::<super::TtEntry>(), 24);
+    }
 
     #[test]
     fn megabyte_tt_sizing_matches_entry_layout_and_never_returns_zero() {
