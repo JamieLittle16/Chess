@@ -44,20 +44,21 @@ jobs:
           python /tmp/v14-source/apply_history_v2_probe.py --variant history-lmr
           python /tmp/v14-source/apply_v14_learned_pruning_probe.py
 
-          # The accepted Search-v2 semantics intentionally change deterministic search shape.
-          # The first materialization run reviewed the complete five-case report and produced
-          # signature 4540270176151201882 (0x3f0247ab79cae85a). Refresh only the pinned
-          # regression signature; this file is benchmark metadata and does not affect engine play.
+          # Search-v2 intentionally changes deterministic search shape. The first materialization
+          # reviewed the full five-case report and yielded 0x3f0247ab79cae85a. Refresh only the
+          # pinned regression signature; this benchmark metadata cannot affect engine play.
           python - <<'PY'
           from pathlib import Path
 
           path = Path('tools/chess-bench/src/lib.rs')
           text = path.read_text(encoding='utf-8')
           old = 'pub const EXPECTED_SIGNATURE: u64 = 0x4c3b_be87_01fb_bb68;'
-          new = '''/// Reviewed after the H1-accepted V14 Search-v2 promotion. The case set is unchanged;
-/// only the deterministic search trace changed. Frozen M6 SPRT: 132W/70D/6L over 208 games,
-/// +243.97 +/- 37.36 Elo, LLR 2.95 beyond the 2.94 H1 boundary.
-pub const EXPECTED_SIGNATURE: u64 = 0x3f02_47ab_79ca_e85a;'''
+          new = (
+              '/// Reviewed after the H1-accepted V14 Search-v2 promotion. The case set is unchanged;\n'
+              '/// only the deterministic search trace changed. Frozen M6 SPRT: 132W/70D/6L over 208 games,\n'
+              '/// +243.97 +/- 37.36 Elo, LLR 2.95 beyond the 2.94 H1 boundary.\n'
+              'pub const EXPECTED_SIGNATURE: u64 = 0x3f02_47ab_79ca_e85a;'
+          )
           if text.count(old) != 1:
               raise SystemExit('expected exactly one old benchmark signature')
           path.write_text(text.replace(old, new, 1), encoding='utf-8')
