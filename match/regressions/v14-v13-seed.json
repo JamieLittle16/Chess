@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "baseline": "Little Gambit V13 BEST",
+  "source": "60-game V13 BEST Stockfish diagnostic corpus",
+  "fixtures": [
+    {
+      "id": "v13-tactical-qxb5",
+      "category": "tactical_capture_exactness",
+      "fen": "r2qk2r/pp1nbppp/5n2/1Qp1N3/3p4/8/PPPN1PPP/R1B1R1K b kq - 4 12",
+      "expected_uci": ["d8b5"],
+      "v13_observed_san": "b6",
+      "teacher_preferred_san": "Qxb5",
+      "teacher_loss_cp_approx": 582,
+      "purpose": "Exact tactical move among several attractive candidates; ordering/search precision regression."
+    },
+    {
+      "id": "v13-endgame-kg6",
+      "category": "endgame_exact_tempo",
+      "fen": "4k3/8/8/5K2/8/6P1/8/8 w - - 0 54",
+      "expected_uci": ["f5g6"],
+      "v13_observed_san": "g4",
+      "teacher_preferred_san": "Kg6",
+      "teacher_loss_cp_approx": 3500,
+      "purpose": "King-and-pawn tempo/opposition exactness; one tempo changes the result."
+    }
+  ]
+}
