@@ -1,0 +1,161 @@
+name: V15 Python root-qcheck over packaged V14
+
+on:
+  push:
+    branches: [analysis/v15-python-root-qcheck-over-v14-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Download exact packaged V14 baseline
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+
+      - name: Materialize control and candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE_ZIP=$(find v14-artifact -type f -name 'Little-Gambit-V14.zip' -print -quit)
+          test -n "$BASE_ZIP"
+          rm -rf /tmp/v14-control /tmp/v15-candidate
+          mkdir -p /tmp/v14-control /tmp/v15-candidate results
+          unzip -q "$BASE_ZIP" -d /tmp/v14-control
+          cp -a /tmp/v14-control/. /tmp/v15-candidate/
+          python scripts/patch_v15_python_root_qcheck.py /tmp/v15-candidate/experiments/numba_search.py
+          python -m py_compile /tmp/v14-control/agent.py /tmp/v14-control/experiments/*.py /tmp/v15-candidate/agent.py /tmp/v15-candidate/experiments/*.py
+          diff -u /tmp/v14-control/experiments/numba_search.py /tmp/v15-candidate/experiments/numba_search.py > results/integration.patch || true
+          test -s results/integration.patch
+          cmp /tmp/v14-control/agent.py /tmp/v15-candidate/agent.py
+          cmp /tmp/v14-control/experiments/numba_core.py /tmp/v15-candidate/experiments/numba_core.py
+          cmp /tmp/v14-control/experiments/v13_residual.i16 /tmp/v15-candidate/experiments/v13_residual.i16
+          cmp /tmp/v14-control/experiments/v14_student_h64.npz /tmp/v15-candidate/experiments/v14_student_h64.npz
+
+      - name: Competition API smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=/tmp/v15-candidate python - <<'PY'
+          import chess, agent
+          for fen in (
+              chess.STARTING_FEN,
+              '2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23',
+              '4r2k/8/8/8/8/8/6Q1/4K3 w - - 0 1',
+          ):
+              b=chess.Board(fen)
+              move=chess.Move.from_uci(agent.get_move(fen,80000))
+              assert move in b.legal_moves,(fen,move)
+              print('legal',fen,move)
+          PY
+
+      - name: Derive fresh disjoint official UHO roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p fresh-openings
+          curl --fail --location --retry 3 \
+            --output fresh-openings/UHO_Lichess_4852_v1.epd.zip \
+            https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  fresh-openings/UHO_Lichess_4852_v1.epd.zip' | sha256sum --check --strict
+          python scripts/build_m6_opening_suite.py --archive fresh-openings/UHO_Lichess_4852_v1.epd.zip --output-dir fresh-openings/derived
+          echo '5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e  fresh-openings/derived/m6-uho-lichess-5000-v1.epd' | sha256sum --check --strict
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('fresh-openings/derived/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          # 96:144 is disjoint from the earlier neural and root-qcheck confirmation subsets.
+          chosen=fresh[96:144]
+          assert len(chosen)==48 and len(set(chosen))==48
+          Path('fresh-openings/v15-python-48.epd').write_text('\n'.join(chosen)+'\n')
+          print('old',len(old),'fresh',len(fresh),'chosen',len(chosen))
+          PY
+          sha256sum fresh-openings/v15-python-48.epd | tee results/openings.sha256
+
+      - name: Fixed-node throughput cost
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/v15_worker.py <<'PY'
+          import json,sys,chess,numpy as np
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful
+          for line in sys.stdin:
+              q=json.loads(line); b=chess.Board(q['fen']); e=encode_position(b); h=np.empty(0,dtype=np.uint64)
+              o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,int(q['nodes']))
+              print(json.dumps({'move':int(o[0]),'score':int(o[1]),'depth':int(o[2]),'nodes':int(o[3])}),flush=True)
+          PY
+          python - <<'PY'
+          import json,os,statistics,subprocess,sys,time
+          from pathlib import Path
+          roots=[x.strip() for x in Path('fresh-openings/v15-python-48.epd').read_text().splitlines() if x.strip()][:16]
+          def start(path):
+              env=os.environ.copy(); env['PYTHONPATH']=path
+              return subprocess.Popen([sys.executable,'/tmp/v15_worker.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=env)
+          def run(p,order):
+              total=0; t=time.perf_counter()
+              for fen in order:
+                  p.stdin.write(json.dumps({'fen':fen,'nodes':25000})+'\n'); p.stdin.flush()
+                  total += json.loads(p.stdout.readline())['nodes']
+              return time.perf_counter()-t,total
+          base=start('/tmp/v14-control'); cand=start('/tmp/v15-candidate'); ratios=[]; rows=[]
+          try:
+              for p in (base,cand):
+                  p.stdin.write(json.dumps({'fen':roots[0],'nodes':500})+'\n'); p.stdin.flush(); json.loads(p.stdout.readline())
+              for rep in range(3):
+                  order=roots if rep%2==0 else list(reversed(roots))
+                  if rep%2==0: bt,bn=run(base,order); ct,cn=run(cand,order)
+                  else: ct,cn=run(cand,order); bt,bn=run(base,order)
+                  ratio=(cn/ct)/(bn/bt); ratios.append(ratio)
+                  rows.append({'rep':rep,'base_nps':bn/bt,'candidate_nps':cn/ct,'ratio':ratio})
+          finally:
+              for p in (base,cand): p.terminate(); p.wait()
+          out={'median_nps_ratio':statistics.median(ratios),'rows':rows}
+          Path('results/throughput.json').write_text(json.dumps(out,indent=2)+'\n')
+          print(out)
+          PY
+
+      - name: Fresh 96-game equal-node stack test
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u tools/v14_fixed_node_arena.py /tmp/v15-candidate /tmp/v14-control \
+            --nodes 16000 --pairs 48 --opening-offset 0 --max-plies 220 \
+            --opening-file fresh-openings/v15-python-48.epd \
+            --json-out results/arena.json | tee results/arena.log
+          grep '^FINAL ' results/arena.log
+
+      - name: Build candidate submission ZIP
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -d /tmp/v15-candidate ]; then
+            (cd /tmp/v15-candidate && zip -q -9 -r "$GITHUB_WORKSPACE/results/Little-Gambit-V15-python-root-qcheck.zip" .)
+            sha256sum results/Little-Gambit-V15-python-root-qcheck.zip > results/Little-Gambit-V15-python-root-qcheck.sha256
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-root-qcheck-over-v14-${{ github.sha }}
+          path: results/
+          retention-days: 30
