@@ -1,0 +1,117 @@
+name: M6 bounded context history current-baseline probe
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  equal-nodes:
+    if: github.head_ref == 'm6/context-history-topk-v2-current'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      RUSTFLAGS: -C target-cpu=native
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Strict feature-off gate and exact reference build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/bin .qualification/context-history
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/bin/reference
+          chmod +x .qualification/bin/reference
+          sha256sum .qualification/bin/reference > .qualification/context-history/reference.sha256
+
+      - name: Materialize bounded top-6 context history candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/apply_context_history_probe.py
+          cargo fmt --all
+          git diff --check
+          git diff -- crates/chess-search/src/move_picker.rs crates/chess-search/src/lib.rs crates/chess-search/src/root_analysis.rs \
+            > .qualification/context-history/candidate.patch
+          test -s .qualification/context-history/candidate.patch
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release --exclude chess-bench
+          cargo test -p chess-bench --release tests::suite_is_deterministic_within_the_same_build
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/bin/candidate
+          chmod +x .qualification/bin/candidate
+
+      - name: Reproduce certified 5000-root M6 suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip' \
+            --output /tmp/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/UHO_Lichess_4852_v1.epd.zip' | sha256sum --check --strict
+          mkdir -p .qualification/m6-openings
+          python scripts/build_m6_opening_suite.py --archive /tmp/UHO_Lichess_4852_v1.epd.zip --output-dir .qualification/m6-openings
+          echo '5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e  .qualification/m6-openings/m6-uho-lichess-5000-v1.epd' | sha256sum --check --strict
+
+      - name: Build pinned Fastchess
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          make -C .qualification/fastchess-src -j2
+
+      - name: Run paired 100-game 25k-node screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/context-history/match
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/.qualification/bin/candidate" name=context-history-top6 nodes=25000 option.Hash=32 \
+            -engine cmd="$PWD/.qualification/bin/reference" name=current-reference nodes=25000 option.Hash=32 \
+            -openings file="$PWD/.qualification/m6-openings/m6-uho-lichess-5000-v1.epd" format=epd order=random \
+            -srand 20261205 -rounds 50 -repeat -concurrency 1 -maxmoves 300 -ratinginterval 20 \
+            -pgnout file=.qualification/context-history/match/games.pgn notation=uci append=false nodes=true nps=true \
+            | tee .qualification/context-history/match/stdout.log
+          python scripts/analyze_fastchess_node_times.py .qualification/context-history/match/games.pgn \
+            --output .qualification/context-history/match/times.json
+
+      - name: Record identity
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum scripts/apply_context_history_probe.py .qualification/bin/reference .qualification/bin/candidate \
+            > .qualification/context-history/hashes.txt || true
+          cat > .qualification/context-history/evidence.txt <<'EOF'
+          purpose=bounded-top6-main-plus-one-ply-continuation-history
+          predecessor=v1-full-lazy-history:+27.85-Elo-equal-node,+18.7%-time-overhead
+          ranked_quiet_prefix=6
+          nodes_per_move=25000
+          paired_games=100
+          opening_sha256=5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e
+          seed=20261205
+          EOF
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m6-context-history-topk-current-${{ github.sha }}
+          path: .qualification/context-history/
+          retention-days: 30
