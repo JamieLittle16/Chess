@@ -1,27 +1,11 @@
-#!/usr/bin/env python3
-"""Add the distilled H64 policy as a shallow root-ordering seed.
-
-The policy is deliberately conservative: it is evaluated only at root depth 1, where its top-k
-moves are rotated ahead of V14's otherwise unchanged stable order. Later iterative-deepening
-iterations use the engine's own previous best move as usual, so the student can seed search but can
-never bypass verification or keep overriding deeper evidence.
-"""
-from __future__ import annotations
-
 from pathlib import Path
 import sys
+p=Path(sys.argv[1]); top_k=int(sys.argv[2]); s=p.read_text()
 
-if len(sys.argv) != 3:
-    raise SystemExit("usage: patch_v15_python_root_policy_runtime.py SEARCH.py TOP_K")
-p=Path(sys.argv[1]); top_k=int(sys.argv[2])
-if top_k not in (1,3): raise SystemExit("TOP_K must be 1 or 3")
-s=p.read_text()
-
-
-def rep(old,new,n=1,label=""):
+def rep(old,new,n=1,label=''):
     global s
     c=s.count(old)
-    if c!=n: raise SystemExit(f"{label or old[:40]} count={c} expected={n}")
+    if c!=n: raise SystemExit(f'{label} count={c} expected={n}')
     s=s.replace(old,new,n)
 
 anchor='''del _student_model
@@ -47,26 +31,22 @@ POLICY_TOP_K = %d
 
 if STUDENT_FEATURE_WEIGHTS.shape != (768, 64):
 ''' % top_k
-rep(anchor,insert,label="policy load")
-
-old='''    BISHOP,
+rep(anchor,insert,label='policy load')
+rep('''    BISHOP,
     EMPTY,
     FLAG_CASTLE,
-'''
-new='''    BISHOP,
+''','''    BISHOP,
     CASTLE_BK,
     CASTLE_BQ,
     CASTLE_WK,
     CASTLE_WQ,
     EMPTY,
     FLAG_CASTLE,
-'''
-rep(old,new,label="castling imports")
-
+''',label='imports')
 marker='''@njit(cache=False)
 def _order_moves(
 '''
-helpers='''@njit(cache=False, inline="always")
+helpers=r'''@njit(cache=False, inline="always")
 def _policy_board_feature_plane(signed_piece: int) -> int:
     return (0 if signed_piece > 0 else 6) + abs(signed_piece) - 1
 
@@ -89,27 +69,15 @@ def _policy_board_hidden(board: np.ndarray, side: int, castling: int, out: np.nd
 
 
 @njit(cache=False)
-def _policy_move_logit(
-    board: np.ndarray,
-    move: int,
-    board_hidden: np.ndarray,
-    move_hidden: np.ndarray,
-    head_hidden: np.ndarray,
-) -> float:
-    from_square = move_from(move)
-    to_square = move_to(move)
-    moving = abs(int(board[from_square]))
-    captured = PAWN if (move & FLAG_EP) else abs(int(board[to_square]))
-    promotion = move_promotion(move)
+def _policy_move_logit(board: np.ndarray, move: int, board_hidden: np.ndarray, move_hidden: np.ndarray, head_hidden: np.ndarray) -> float:
+    from_square = move_from(move); to_square = move_to(move)
+    moving = abs(int(board[from_square])); captured = PAWN if (move & FLAG_EP) else abs(int(board[to_square])); promotion = move_promotion(move)
     for h in range(64):
-        value = float(POLICY_MOVE_B[h])
-        value += float(POLICY_MOVE_W[h, from_square])
-        value += float(POLICY_MOVE_W[h, 64 + to_square])
+        value = float(POLICY_MOVE_B[h]) + float(POLICY_MOVE_W[h, from_square]) + float(POLICY_MOVE_W[h, 64 + to_square])
         if moving: value += float(POLICY_MOVE_W[h, 128 + moving - 1])
         if captured: value += float(POLICY_MOVE_W[h, 134 + captured - 1])
         if promotion: value += float(POLICY_MOVE_W[h, 140 + promotion - 1])
         if captured or (move & FLAG_EP): value += float(POLICY_MOVE_W[h, 145])
-        # Feature 146 (gives-check) was zeroed during runtime-exact training.
         if move & FLAG_CASTLE: value += float(POLICY_MOVE_W[h, 147])
         if move & FLAG_EP: value += float(POLICY_MOVE_W[h, 148])
         move_hidden[h] = value if value > 0.0 else 0.0
@@ -120,72 +88,85 @@ def _policy_move_logit(
             value += float(POLICY_HEAD_W[h, 64 + j]) * float(move_hidden[j])
         head_hidden[h] = value if value > 0.0 else 0.0
     score = POLICY_OUT_B
-    for h in range(64):
-        score += float(POLICY_OUT_W[h]) * float(head_hidden[h])
+    for h in range(64): score += float(POLICY_OUT_W[h]) * float(head_hidden[h])
     return score
 
 
 @njit(cache=False)
-def _promote_policy_top_k(
-    board: np.ndarray,
-    side: int,
-    castling: int,
-    moves: np.ndarray,
-    scores: np.ndarray,
-    count: int,
-) -> None:
-    if count <= 1:
-        return
-    board_hidden = np.empty(64, dtype=np.float32)
-    move_hidden = np.empty(64, dtype=np.float32)
-    head_hidden = np.empty(64, dtype=np.float32)
-    policy_scores = np.empty(MAX_MOVES, dtype=np.float32)
-    _policy_board_hidden(board, side, castling, board_hidden)
-    for i in range(count):
-        policy_scores[i] = _policy_move_logit(
-            board, int(moves[i]), board_hidden, move_hidden, head_hidden
-        )
-    limit = min(POLICY_TOP_K, count)
+def _compute_policy_moves(board: np.ndarray, side: int, castling: int, moves: np.ndarray, count: int, out_moves: np.ndarray) -> int:
+    if count <= 0: return 0
+    board_hidden=np.empty(64,dtype=np.float32); move_hidden=np.empty(64,dtype=np.float32); head_hidden=np.empty(64,dtype=np.float32)
+    scores=np.empty(MAX_MOVES,dtype=np.float32); _policy_board_hidden(board,side,castling,board_hidden)
+    for i in range(count): scores[i]=_policy_move_logit(board,int(moves[i]),board_hidden,move_hidden,head_hidden)
+    limit=min(POLICY_TOP_K,count)
     for index in range(limit):
-        best = index
-        best_score = float(policy_scores[index])
-        for candidate in range(index + 1, count):
-            value = float(policy_scores[candidate])
-            if value > best_score:
-                best = candidate
-                best_score = value
-        if best == index:
-            continue
-        best_move = int(moves[best])
-        best_base_score = int(scores[best])
-        best_policy = float(policy_scores[best])
-        cursor = best
-        while cursor > index:
-            moves[cursor] = moves[cursor - 1]
-            scores[cursor] = scores[cursor - 1]
-            policy_scores[cursor] = policy_scores[cursor - 1]
-            cursor -= 1
-        moves[index] = best_move
-        scores[index] = best_base_score
-        policy_scores[index] = best_policy
+        best=index; best_score=float(scores[index])
+        for candidate in range(index+1,count):
+            value=float(scores[candidate])
+            if value>best_score: best=candidate; best_score=value
+        out_moves[index]=int(moves[best])
+        scores[best]=np.float32(-1.0e30)
+    return limit
+
+
+@njit(cache=False, inline="always")
+def _apply_policy_moves(moves: np.ndarray, scores: np.ndarray, count: int, preferred: int, policy_moves: np.ndarray, policy_count: int) -> None:
+    cursor=1 if count>0 and int(moves[0])==preferred else 0
+    for p in range(policy_count):
+        target=int(policy_moves[p])
+        if target<0 or target==preferred: continue
+        found=-1
+        for i in range(cursor,count):
+            if int(moves[i])==target: found=i; break
+        if found<0: continue
+        move=int(moves[found]); score=int(scores[found])
+        while found>cursor:
+            moves[found]=moves[found-1]; scores[found]=scores[found-1]; found-=1
+        moves[cursor]=move; scores[cursor]=score; cursor+=1
 
 
 @njit(cache=False)
 def _order_moves(
 '''
-rep(marker,helpers,label="policy helpers")
-
-old='''    _order_moves(board, moves, count, preferred, score_stack[0])
+rep(marker,helpers,label='helpers')
+rep('''    history_contexts: np.ndarray,
+    tt_table: np.ndarray,
+) -> tuple[int, int, bool]:
+''','''    history_contexts: np.ndarray,
+    policy_moves: np.ndarray,
+    policy_count: int,
+    tt_table: np.ndarray,
+) -> tuple[int, int, bool]:
+''',label='root sig')
+rep('''    _order_moves(board, moves, count, preferred, score_stack[0])
 
     best_move = int(moves[0])
-'''
-new='''    _order_moves(board, moves, count, preferred, score_stack[0])
-    # Seed only the first completed iteration. Deeper iterations retain the engine's own PV move.
-    if depth == 1:
-        _promote_policy_top_k(board, side, castling, moves, score_stack[0], count)
+''','''    _order_moves(board, moves, count, preferred, score_stack[0])
+    _apply_policy_moves(moves, score_stack[0], count, preferred, policy_moves, policy_count)
 
     best_move = int(moves[0])
-'''
-rep(old,new,label="root policy call")
+''',label='root apply')
+needle='''    if count == 0:
+        return -1, 0, 0, 0
 
+'''
+add='''    if count == 0:
+        return -1, 0, 0, 0
+    policy_moves = np.full(POLICY_TOP_K, -1, dtype=np.int32)
+    policy_count = _compute_policy_moves(board, side, castling, move_stack[0], count, policy_moves)
+
+'''
+rep(needle,add,n=3,label='policy precompute')
+rep('''            history_contexts,
+            tt_table,
+''','''            history_contexts,
+            policy_moves,
+            policy_count,
+            tt_table,
+''',n=1,label='root call long')
+rep('''            killers, hash_keys, hash_moves, history_contexts,
+            tt_table,
+''','''            killers, hash_keys, hash_moves, history_contexts,
+            policy_moves, policy_count, tt_table,
+''',n=2,label='root calls compact')
 p.write_text(s)
