@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Probe named V14 regression fixtures across fixed-node budgets.
+"""Probe V14 regression fixtures across deterministic fixed-node budgets.
 
-This is diagnostic, not an Elo substitute. It records when a candidate first reaches the
-Stockfish-preferred move on known historical failures, while also showing whether a control loses a
-previously-good fixture. The harness intentionally uses the engine's direct fixed-node search entry
-rather than `agent.get_move` so results are deterministic and clock-independent.
+Named historical fixtures may carry an `expected_uci` label so the tool can record first-hit depth.
+General regression corpora may deliberately omit exact move labels; those positions are still useful
+because candidate/control choices can be graded by the full-strength Stockfish teacher afterwards.
 """
 from __future__ import annotations
 
@@ -22,13 +21,7 @@ class SearchWorker:
     def __init__(self, engine_dir: Path) -> None:
         self.engine_dir = engine_dir.resolve()
         self.proc = subprocess.Popen(
-            [
-                sys.executable,
-                str(Path(__file__).resolve()),
-                "--worker",
-                "--engine",
-                str(self.engine_dir),
-            ],
+            [sys.executable, str(Path(__file__).resolve()), "--worker", "--engine", str(self.engine_dir)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             text=True,
@@ -43,7 +36,7 @@ class SearchWorker:
         self.stdin.flush()
         line = self.stdout.readline()
         if not line:
-            raise RuntimeError(f"search worker exited with {self.proc.poll()}")
+            raise RuntimeError(f"engine worker exited with {self.proc.poll()}")
         return json.loads(line)
 
     def close(self) -> None:
@@ -53,10 +46,7 @@ class SearchWorker:
 
 
 def worker_main(engine_dir: Path) -> int:
-    # The script itself lives in the repository, so executing it places repo/tools ahead of
-    # PYTHONPATH. Insert the reconstructed candidate explicitly before importing experiments.*.
     sys.path.insert(0, str(engine_dir.resolve()))
-
     import numpy as np
     from experiments.numba_core import encode_position, move_to_uci
     from experiments.numba_search import iterative_search_stateful
@@ -76,17 +66,12 @@ def worker_main(engine_dir: Path) -> int:
             0,
             int(query["nodes"]),
         )
-        print(
-            json.dumps(
-                {
-                    "uci": move_to_uci(int(out[0])),
-                    "score": int(out[1]),
-                    "depth": int(out[2]),
-                    "nodes": int(out[3]),
-                }
-            ),
-            flush=True,
-        )
+        print(json.dumps({
+            "uci": move_to_uci(int(out[0])),
+            "score": int(out[1]),
+            "depth": int(out[2]),
+            "nodes": int(out[3]),
+        }), flush=True)
     return 0
 
 
@@ -102,22 +87,20 @@ def parse_args() -> argparse.Namespace:
 
 
 def first_hit(rows: list[dict[str, Any]], expected: set[str]) -> int | None:
+    if not expected:
+        return None
     for row in rows:
         if row["uci"] in expected:
             return int(row["budget"])
     return None
 
 
-def run_engine(
-    worker: SearchWorker,
-    fixtures: list[dict[str, Any]],
-    budgets: list[int],
-) -> dict[str, Any]:
+def run_engine(worker: SearchWorker, fixtures: list[dict[str, Any]], budgets: list[int]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     if fixtures:
         worker.search(fixtures[0]["fen"], min(300, budgets[0]))
     for fixture in fixtures:
-        expected = set(fixture["expected_uci"])
+        expected = set(fixture.get("expected_uci", []))
         rows = []
         board = chess.Board(fixture["fen"])
         for budget in budgets:
@@ -125,10 +108,9 @@ def run_engine(
             move = chess.Move.from_uci(reply["uci"])
             if move not in board.legal_moves:
                 raise RuntimeError(f"illegal move {move} on fixture {fixture['id']}")
-            row = {"budget": budget, **reply, "hit": reply["uci"] in expected}
-            rows.append(row)
+            rows.append({"budget": budget, **reply, "hit": bool(expected) and reply["uci"] in expected})
         result[fixture["id"]] = {
-            "category": fixture["category"],
+            "category": fixture.get("category", "unclassified"),
             "expected_uci": sorted(expected),
             "first_hit_nodes": first_hit(rows, expected),
             "searches": rows,
@@ -163,17 +145,20 @@ def main() -> int:
     if control_result is not None:
         for fixture in fixtures:
             fixture_id = fixture["id"]
-            cand_hit = candidate_result[fixture_id]["first_hit_nodes"]
-            ctrl_hit = control_result[fixture_id]["first_hit_nodes"]
+            cand = candidate_result[fixture_id]
+            ctrl = control_result[fixture_id]
+            cand_hit = cand["first_hit_nodes"]
+            ctrl_hit = ctrl["first_hit_nodes"]
             comparisons[fixture_id] = {
                 "candidate_first_hit_nodes": cand_hit,
                 "control_first_hit_nodes": ctrl_hit,
                 "candidate_improves": cand_hit is not None and (ctrl_hit is None or cand_hit < ctrl_hit),
                 "candidate_regresses": ctrl_hit is not None and (cand_hit is None or cand_hit > ctrl_hit),
+                "identical_searches": cand["searches"] == ctrl["searches"],
             }
 
     output = {
-        "schema_version": 1,
+        "schema_version": 2,
         "manifest": str(args.manifest),
         "budgets": budgets,
         "candidate": candidate_result,
