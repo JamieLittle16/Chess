@@ -1,0 +1,151 @@
+name: V16 Python clean strength baseline
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v16/python-strength-baseline]
+    paths:
+      - '.github/workflows/v16-python-strength-baseline.yml'
+      - 'scripts/patch_v16_python_trusted_continuity.py'
+      - 'scripts/patch_v16_python_presort_once.py'
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  timed:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Materialize clean candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit)
+          test -n "$ZIP"
+          rm -rf /tmp/base /tmp/candidate results
+          mkdir -p /tmp/base /tmp/candidate results
+          unzip -q "$ZIP" -d /tmp/base
+          cp -a /tmp/base/. /tmp/candidate/
+          python scripts/patch_v16_python_presort_once.py /tmp/candidate/experiments/numba_search.py
+          python scripts/patch_v16_python_trusted_continuity.py /tmp/candidate/agent.py
+          python -m py_compile tools/v14_agent_runner.py /tmp/base/agent.py /tmp/candidate/agent.py /tmp/candidate/experiments/*.py
+          grep -q 'continued = bool(_GAME_KEYS)$' /tmp/candidate/agent.py
+          grep -q 'materialise the stable descending order once' /tmp/candidate/experiments/numba_search.py
+      - name: Build fresh 96-root book
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip \
+            https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6; mkdir /tmp/m6
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          chosen=fresh[3400:3496]
+          assert len(chosen)==96 and len(set(chosen))==96
+          Path('/tmp/v16-python-clean-96.epd').write_text('\n'.join(chosen)+'\n')
+          PY
+      - name: Competition API timed A/B — 192 colour-swapped games
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json,math,queue,subprocess,sys,threading,time
+          from collections import Counter
+          from pathlib import Path
+          import chess
+
+          BASE_MS=2500; INC_MS=50; MAX_PLIES=180; GRACE=1500
+          roots=[x.strip() for x in Path('/tmp/v16-python-clean-96.epd').read_text().splitlines() if x.strip()]
+
+          class Agent:
+              def __init__(self,d):
+                  self.p=subprocess.Popen([sys.executable,'tools/v14_agent_runner.py',d],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,bufsize=1)
+                  self.q=queue.Queue()
+                  def pump():
+                      for line in self.p.stdout:
+                          self.q.put(line.rstrip())
+                      self.q.put(None)
+                  threading.Thread(target=pump,daemon=True).start()
+                  msg=json.loads(self.q.get(timeout=120)); assert msg.get('ready'),msg
+              def reset(self):
+                  self.p.stdin.write(json.dumps({'reset':True})+'\n'); self.p.stdin.flush()
+                  msg=json.loads(self.q.get(timeout=5)); assert msg.get('reset'),msg
+              def move(self,b,ms):
+                  t=time.monotonic()
+                  self.p.stdin.write(json.dumps({'fen':b.fen(),'time_left_ms':max(0,int(ms))})+'\n'); self.p.stdin.flush()
+                  z=json.loads(self.q.get(timeout=(max(0,ms)+GRACE)/1000))
+                  return chess.Move.from_uci(z['move']),(time.monotonic()-t)*1000
+              def stop(self):
+                  self.p.kill(); self.p.wait()
+
+          control=Agent('/tmp/base'); candidate=Agent('/tmp/candidate'); rows=[]
+          try:
+              for i,fen in enumerate(roots):
+                  for candidate_white in (True,False):
+                      board=chess.Board(fen)
+                      clocks={True:float(BASE_MS),False:float(BASE_MS)}
+                      control.reset(); candidate.reset(); cm=[]; bm=[]
+                      for _ in range(MAX_PLIES):
+                          outcome=board.outcome(claim_draw=True)
+                          if outcome is not None:
+                              score=.5 if outcome.winner is None else float(outcome.winner==candidate_white)
+                              term=board.result(claim_draw=True); break
+                          side=board.turn; engine=candidate if side==candidate_white else control
+                          try:
+                              move,dt=engine.move(board,clocks[side]); assert move in board.legal_moves
+                          except Exception:
+                              score=0.0 if side==candidate_white else 1.0; term='engine-failure'; break
+                          clocks[side]-=dt
+                          if clocks[side] < 0:
+                              score=0.0 if side==candidate_white else 1.0; term='flag'; break
+                          (cm if side==candidate_white else bm).append(dt)
+                          board.push(move); clocks[side]+=INC_MS
+                      else:
+                          score=.5; term='max-ply-draw'
+                      rows.append({'opening':i,'candidate_white':candidate_white,'score':score,'termination':term,'candidate_ms':cm,'control_ms':bm})
+                      print(i,candidate_white,score,term,flush=True)
+          finally:
+              control.stop(); candidate.stop()
+
+          score=sum(r['score'] for r in rows); n=len(rows); f=score/n
+          elo=400*math.log10(f/(1-f)) if 0<f<1 else None
+          cm=[z for r in rows for z in r['candidate_ms']]; bm=[z for r in rows for z in r['control_ms']]
+          pair_scores=[rows[i]['score']+rows[i+1]['score'] for i in range(0,n,2)]
+          out={
+              'candidate':'V14 + trusted continuity + stable presort',
+              'control':'exact packaged V14',
+              'games':n,'score':score,'score_fraction':f,'naive_elo_from_score':elo,
+              'candidate_mean_move_ms':sum(cm)/len(cm),'control_mean_move_ms':sum(bm)/len(bm),
+              'pair_histogram':dict(Counter(pair_scores)),
+              'terminations':dict(Counter(r['termination'] for r in rows)),
+              'details':rows,
+          }
+          Path('results/timed.json').write_text(json.dumps(out,indent=2)+'\n')
+          print('FINAL',json.dumps({k:v for k,v in out.items() if k!='details'}),flush=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v16-python-clean-${{ github.sha }}
+          path: results/
+          retention-days: 30
