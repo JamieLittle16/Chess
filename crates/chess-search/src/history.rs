@@ -1,6 +1,6 @@
 use chess_core::{Color, PieceKind, Square};
 
-const MOVE_CONTEXTS: usize = PieceKind::ALL.len() * usize::from(Square::COUNT);
+const MOVE_CONTEXTS: usize = PieceKind::ALL.len() * Square::COUNT as usize;
 const MAIN_HISTORY_ENTRIES: usize = 2 * MOVE_CONTEXTS;
 const CONTINUATION_HISTORY_ENTRIES: usize = MOVE_CONTEXTS * MOVE_CONTEXTS;
 const HISTORY_LIMIT: i32 = 16_384;
@@ -18,7 +18,7 @@ pub(super) struct MoveContext(u16);
 impl MoveContext {
     #[must_use]
     pub(super) const fn new(piece: PieceKind, to: Square) -> Self {
-        Self((piece.index() * usize::from(Square::COUNT) + to.index() as usize) as u16)
+        Self((piece.index() * Square::COUNT as usize + to.index() as usize) as u16)
     }
 
     #[must_use]
