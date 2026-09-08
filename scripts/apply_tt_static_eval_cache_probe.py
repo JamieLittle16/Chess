@@ -64,27 +64,18 @@ def main() -> int:
         label="negamax TT store carries static eval",
     )
 
+    # Root terminal/depth-zero stores have identical source syntax. Neither needs to seed this
+    # experiment: the useful cache is learned at ordinary pruning-eligible negamax nodes.
+    text = replace_exact(
+        text,
+        """                .store(key, depth, score_to_tt(score, 0), Bound::Exact, None);""",
+        """                .store(key, depth, score_to_tt(score, 0), Bound::Exact, None, None);""",
+        count=2,
+        label="root terminal/depth-zero stores",
+    )
+
     # Every other store has no newly computed static eval. Same-key replacement still inherits one.
     store_calls = [
-        (
-            """                .store(key, depth, score_to_tt(score, 0), Bound::Exact, None);""",
-            """                .store(key, depth, score_to_tt(score, 0), Bound::Exact, None, None);""",
-            1,
-            "root terminal store",
-        ),
-        (
-            """                .store(key, depth, score_to_tt(score, 0), Bound::Exact, None);""",
-            """                .store(
-                    key,
-                    depth,
-                    score_to_tt(score, 0),
-                    Bound::Exact,
-                    None,
-                    Some(score),
-                );""",
-            1,
-            "root depth-zero store",
-        ),
         (
             """            best_move,
         );
