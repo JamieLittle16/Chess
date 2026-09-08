@@ -1,0 +1,41 @@
+name: V14 exact-upload Stockfish check
+on:
+  push:
+    branches: [analysis/v14-upload-target-probe-20260908]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  score:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: |
+          python -m pip install chess==1.11.2
+          sudo apt-get update -qq && sudo apt-get install -y stockfish
+      - shell: bash
+        run: |
+          mkdir -p sf-results
+          python - <<'PY' | tee sf-results/scores.txt
+          import chess,chess.engine
+          e=chess.engine.SimpleEngine.popen_uci('/usr/games/stockfish')
+          cases=[
+          ('R61','2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23','f2f3'),
+          ('R62a','1r1r2k1/4qpnp/1p1pb1pQ/p7/2P1P1P1/1PN4P/P4RB1/3R2K1 b - - 2 21','g8h8'),
+          ('R62b','1r1r2k1/3q1pnp/1p1pb1pQ/p7/2P1P1P1/1PN4P/P4RB1/2R3K1 b - - 4 22','f7f5')]
+          for name,fen,uci in cases:
+              b=chess.Board(fen);m=chess.Move.from_uci(uci)
+              best=e.analyse(b,chess.engine.Limit(nodes=500000)); played=e.analyse(b,chess.engine.Limit(nodes=500000),root_moves=[m])
+              pov=b.turn
+              bs=best['score'].pov(pov).score(mate_score=100000);ps=played['score'].pov(pov).score(mate_score=100000)
+              print(name,'played',b.san(m),'best',b.san(best['pv'][0]),'best_cp',bs,'played_cp',ps,'loss_cp',bs-ps,'best_pv',' '.join(b.variation_san(best['pv'][:10]).split()))
+          e.quit()
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v14-exact-upload-stockfish-check
+          path: sf-results
+          retention-days: 7
