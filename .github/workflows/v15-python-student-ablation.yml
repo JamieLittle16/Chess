@@ -1,0 +1,130 @@
+name: V15 Python H64 ablation
+
+on:
+  push:
+    branches: [analysis/v15-python-student-ablation-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Install exact runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Materialize A/B and JIT
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name 'Little-Gambit-V14.zip' -print -quit);test -n "$ZIP"
+          rm -rf /tmp/base /tmp/cand;mkdir -p /tmp/base /tmp/cand results
+          unzip -q "$ZIP" -d /tmp/base;cp -a /tmp/base/. /tmp/cand/
+          python scripts/patch_v15_python_student_ablation.py /tmp/cand/experiments/numba_search.py
+          python -m py_compile /tmp/cand/experiments/numba_search.py
+          PYTHONPATH=/tmp/cand python - <<'PY'
+          import chess,numpy as np
+          from experiments.numba_core import encode_position,move_to_uci
+          from experiments.numba_search import iterative_search_stateful
+          b=chess.Board();e=encode_position(b);h=np.empty(0,dtype=np.uint64);o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,6000);m=chess.Move.from_uci(move_to_uci(int(o[0])));assert m in b.legal_moves;print(o,m)
+          PY
+      - name: Build fresh 48-root suite
+        shell: bash
+        run: |
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6;mkdir /tmp/m6;python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')};large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()];fresh=[x for x in large if x not in old];chosen=fresh[752:800];assert len(chosen)==48;Path('/tmp/ablate-48.epd').write_text('\n'.join(chosen)+'\n')
+          PY
+      - name: Measure NPS
+        shell: bash
+        run: |
+          cat >/tmp/w.py <<'PY'
+          import json,sys,chess,numpy as np
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful
+          for l in sys.stdin:q=json.loads(l);b=chess.Board(q['f']);e=encode_position(b);h=np.empty(0,dtype=np.uint64);o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,q['n']);print(json.dumps({'n':int(o[3]),'d':int(o[2])}),flush=True)
+          PY
+          python - <<'PY'
+          import json,os,statistics,subprocess,sys,time
+          roots=[x.strip() for x in open('/tmp/ablate-48.epd') if x.strip()][:20]
+          def st(d):e=os.environ.copy();e['PYTHONPATH']=d;return subprocess.Popen([sys.executable,'/tmp/w.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,env=e)
+          def one(p,f,n):p.stdin.write(json.dumps({'f':f,'n':n})+'\n');p.stdin.flush();return json.loads(p.stdout.readline())
+          def run(p,rs):
+              n=0;ds=[];t=time.perf_counter()
+              for f in rs:z=one(p,f,30000);n+=z['n'];ds.append(z['d'])
+              return n/(time.perf_counter()-t),sum(ds)/len(ds)
+          b=st('/tmp/base');c=st('/tmp/cand');rat=[];rows=[]
+          try:
+              one(b,roots[0],500);one(c,roots[0],500)
+              for r in range(5):
+                  rs=roots if r%2==0 else list(reversed(roots))
+                  if r%2==0:bn,bd=run(b,rs);cn,cd=run(c,rs)
+                  else:cn,cd=run(c,rs);bn,bd=run(b,rs)
+                  rat.append(cn/bn);rows.append({'rep':r,'ratio':cn/bn,'base_nps':bn,'candidate_nps':cn,'base_depth':bd,'candidate_depth':cd})
+          finally:b.terminate();c.terminate();b.wait();c.wait()
+          out={'median_nps_ratio':statistics.median(rat),'rows':rows};open('results/throughput.json','w').write(json.dumps(out,indent=2)+'\n');print('FINAL',out)
+          PY
+      - name: 96 equal-node games
+        shell: bash
+        run: |
+          python -u tools/v14_fixed_node_arena.py /tmp/cand /tmp/base --nodes 16000 --pairs 48 --opening-file /tmp/ablate-48.epd --opening-offset 0 --max-plies 220 --json-out results/arena.json | tee results/arena.log
+          grep '^FINAL ' results/arena.log
+      - name: 64 competition-clock games
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json,math,queue,subprocess,sys,threading,time,chess
+          roots=[x.strip() for x in open('/tmp/ablate-48.epd') if x.strip()][:32];BASE=2500.;INC=50.;MAX=180;GRACE=1200
+          class A:
+              def __init__(self,d):self.p=subprocess.Popen([sys.executable,'tools/v14_agent_runner.py',d],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,bufsize=1);self.q=queue.Queue();threading.Thread(target=self.ro,daemon=True).start();assert json.loads(self.line(95)).get('ready')
+              def ro(self):
+                  for x in self.p.stdout:self.q.put(x.rstrip())
+                  self.q.put(None)
+              def line(self,t):
+                  x=self.q.get(timeout=t)
+                  if x is None:raise RuntimeError('closed')
+                  return x
+              def reset(self):self.p.stdin.write('{"reset":true}\n');self.p.stdin.flush();self.line(5)
+              def move(self,b,ms):self.p.stdin.write(json.dumps({'fen':b.fen(),'time_left_ms':max(0,int(ms))})+'\n');self.p.stdin.flush();return chess.Move.from_uci(json.loads(self.line((ms+GRACE)/1000))['move'])
+              def stop(self):
+                  if self.p.poll() is None:self.p.kill()
+                  self.p.wait()
+          ba=A('/tmp/base');ca=A('/tmp/cand');rows=[]
+          def game(f,cw):
+              b=chess.Board(f);cl={True:BASE,False:BASE};ba.reset();ca.reset();ct=[];bt=[]
+              for _ in range(MAX):
+                  o=b.outcome(claim_draw=True)
+                  if o:return (0.5 if o.winner is None else float(o.winner==cw)),ct,bt
+                  use=b.turn==cw;e=ca if use else ba;t=time.monotonic();m=e.move(b,cl[b.turn]);dt=(time.monotonic()-t)*1000;cl[b.turn]-=dt
+                  if cl[b.turn]<0:return (0. if use else 1.),ct,bt
+                  (ct if use else bt).append(dt);b.push(m);cl[not b.turn]+=INC
+              return .5,ct,bt
+          try:
+              for i,f in enumerate(roots):
+                  for cw in (True,False):s,ct,bt=game(f,cw);rows.append({'i':i,'cw':cw,'score':s,'ct':ct,'bt':bt});print(i,cw,s,flush=True)
+          finally:ba.stop();ca.stop()
+          score=sum(r['score'] for r in rows);frac=score/len(rows);elo=400*math.log10(frac/(1-frac)) if 0<frac<1 else None;ct=[x for r in rows for x in r['ct']];bt=[x for r in rows for x in r['bt']];out={'games':len(rows),'score':score,'score_fraction':frac,'naive_elo_from_score':elo,'candidate_mean_move_ms':sum(ct)/len(ct),'control_mean_move_ms':sum(bt)/len(bt),'details':rows};open('results/timed.json','w').write(json.dumps(out,indent=2)+'\n');print('FINAL',json.dumps({k:v for k,v in out.items() if k!='details'}))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-student-ablation-${{ github.sha }}
+          path: results/
+          retention-days: 30
