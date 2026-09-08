@@ -1,0 +1,81 @@
+name: V15 Python evaluator finalist head-to-head
+
+on:
+  push:
+    branches: [analysis/v15-python-evaluator-finalist-20260909]
+    paths: [.github/workflows/v15-python-evaluator-finalist.yml]
+  workflow_dispatch:
+
+permissions: {contents: read, actions: read}
+
+jobs:
+  decide:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Download proven b200 evaluator
+        uses: actions/download-artifact@v4
+        with:
+          name: v15-python-h64-finetune-b200-bb9ec0a83c41ed648c9f70755dee5623a786b662
+          path: b200-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34286341719
+      - name: Download search-leaf b050 evaluator
+        uses: actions/download-artifact@v4
+        with:
+          name: v15-python-searchleaf-h64-b050-94ef8e11b956050aaa057863010ce555d76733af
+          path: leaf-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34290665543
+      - name: Materialize equal-runtime finalists
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit)
+          B200=$(find b200-artifact -type f -name v14_student_h64.npz -print -quit)
+          LEAF=$(find leaf-artifact -type f -name v14_student_h64.npz -print -quit)
+          test -n "$ZIP"; test -n "$B200"; test -n "$LEAF"
+          rm -rf /tmp/b200 /tmp/leaf /tmp/m6 results;mkdir -p /tmp/b200 /tmp/leaf /tmp/m6 results
+          unzip -q "$ZIP" -d /tmp/b200; cp -a /tmp/b200/. /tmp/leaf/
+          for D in /tmp/b200 /tmp/leaf; do
+            python scripts/patch_v15_python_presort_once.py "$D/experiments/numba_search.py"
+            python scripts/patch_v15_python_fused_h64_direct.py "$D/experiments/v14_student_single_runtime.py"
+            python scripts/patch_v15_python_inline_fused_h64.py "$D/experiments/v14_student_single_runtime.py"
+          done
+          cp "$B200" /tmp/b200/experiments/v14_student_h64.npz
+          cp "$LEAF" /tmp/leaf/experiments/v14_student_h64.npz
+          python -m py_compile /tmp/b200/agent.py /tmp/b200/experiments/*.py /tmp/leaf/agent.py /tmp/leaf/experiments/*.py
+      - name: Build fresh 96-root suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old];roots=fresh[4100:4196]
+          assert len(roots)==96 and len(set(roots))==96
+          Path('/tmp/evaluator-final-96.epd').write_text('\n'.join(roots)+'\n')
+          PY
+      - name: 192-game leaf-b050 vs proven-b200
+        run: python -u scripts/v15_competition_gate.py --candidate /tmp/leaf --control /tmp/b200 --openings /tmp/evaluator-final-96.epd --output results/head-to-head-192.json --label searchleaf-b050-vs-b200 --base-ms 2500 --inc-ms 50 --max-plies 180 | tee results/head-to-head-192.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: {name: v15-python-evaluator-finalist-${{ github.sha }}, path: results/, retention-days: 30}
