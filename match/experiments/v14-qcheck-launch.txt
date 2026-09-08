@@ -1,0 +1,1 @@
+Qcheck branch should fork from this regression-lab checkpoint. Engine behavior on the lab branch remains exact V13 reconstruction only.
