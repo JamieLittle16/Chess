@@ -1,0 +1,143 @@
+name: M6 gestalt full-refresh ceiling
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/m6-gestalt-full-refresh-ceiling.yml'
+      - 'crates/chess-eval/**'
+      - 'crates/chess-search/**'
+      - 'crates/chess-uci/**'
+      - 'match/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  equal-nodes:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: Download exact certified CC0 gestalt network
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/gestalt-ceiling
+          curl --fail --location --retry 5 \
+            'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' \
+            --output .qualification/gestalt-ceiling/gestalt-b840.nnue
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  .qualification/gestalt-ceiling/gestalt-b840.nnue' \
+            | sha256sum --check --strict
+
+      - name: Materialize candidate-only full-refresh evaluator dispatch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('crates/chess-search/src/lib.rs')
+          s = p.read_text()
+          old = 'use chess_eval::evaluate;'
+          new = 'use chess_eval::gestalt::evaluate_from_env as evaluate;'
+          if s.count(old) != 1:
+              raise SystemExit(f'expected exactly one evaluate import, got {s.count(old)}')
+          p.write_text(s.replace(old, new))
+          PY
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          git diff --binary > .qualification/gestalt-ceiling/candidate.patch
+          sha256sum .qualification/gestalt-ceiling/candidate.patch > .qualification/gestalt-ceiling/candidate.patch.sha256
+
+      - name: Build candidate
+        shell: bash
+        env:
+          CHESS_GESTALT_NET: ${{ github.workspace }}/.qualification/gestalt-ceiling/gestalt-b840.nnue
+        run: |
+          set -euo pipefail
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/gestalt-ceiling/candidate
+
+      - name: Build exact reference main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --binary > /tmp/candidate.patch
+          git checkout -- crates/chess-search/src/lib.rs
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/gestalt-ceiling/reference
+          git apply /tmp/candidate.patch
+
+      - name: Fetch frozen UHO source and derive M6 book
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/m6-book
+          python3 match/derive_m6_uho.py \
+            --output .qualification/m6-book/m6-uho-5000-v1.epd
+          echo '5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e  .qualification/m6-book/m6-uho-5000-v1.epd' \
+            | sha256sum --check --strict
+
+      - name: Build pinned Fastchess
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone https://github.com/Disservin/fastchess.git .qualification/fastchess
+          git -C .qualification/fastchess checkout f618e34540f94f4719ad3817950618dabe441318
+          cmake -S .qualification/fastchess -B .qualification/fastchess/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build .qualification/fastchess/build -j2
+
+      - name: Equal-node paired ceiling screen
+        shell: bash
+        env:
+          CHESS_GESTALT_NET: ${{ github.workspace }}/.qualification/gestalt-ceiling/gestalt-b840.nnue
+        run: |
+          set -euo pipefail
+          FC=.qualification/fastchess/build/fastchess
+          "$FC" \
+            -engine cmd=.qualification/gestalt-ceiling/candidate name=gestalt-full \
+            -engine cmd=.qualification/gestalt-ceiling/reference name=classical \
+            -each proto=uci option.Hash=32 tc=inf nodes=25000 \
+            -openings file=.qualification/m6-book/m6-uho-5000-v1.epd format=epd order=random plies=0 \
+            -games 2 -rounds 100 -repeat -concurrency 1 \
+            -seed 20261123 \
+            -maxmoves 300 \
+            -pgnout .qualification/gestalt-ceiling/games.pgn 0 \
+            | tee .qualification/gestalt-ceiling/fastchess.txt
+
+      - name: Record provenance
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum .qualification/gestalt-ceiling/gestalt-b840.nnue > .qualification/gestalt-ceiling/network.sha256 || true
+          sha256sum .qualification/m6-book/m6-uho-5000-v1.epd > .qualification/gestalt-ceiling/book.sha256 || true
+          cat > .qualification/gestalt-ceiling/provenance.txt <<'EOF'
+          purpose=equal-node mature-evaluation ceiling probe
+          production_behavior=unchanged
+          candidate_eval=bit-exact Viridithas-v13 gestalt full refresh
+          nodes_per_move=25000
+          games=200 paired
+          network_license=CC0-1.0
+          reference_engine=current main classical evaluator
+          EOF
+
+      - name: Upload evidence without network bytes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m6-gestalt-ceiling-${{ github.sha }}
+          path: |
+            .qualification/gestalt-ceiling/fastchess.txt
+            .qualification/gestalt-ceiling/games.pgn
+            .qualification/gestalt-ceiling/candidate.patch
+            .qualification/gestalt-ceiling/candidate.patch.sha256
+            .qualification/gestalt-ceiling/network.sha256
+            .qualification/gestalt-ceiling/book.sha256
+            .qualification/gestalt-ceiling/provenance.txt
+          retention-days: 30
