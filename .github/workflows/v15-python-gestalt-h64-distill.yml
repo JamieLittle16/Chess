@@ -1,0 +1,230 @@
+name: V15 Python same-cost Gestalt H64 distillation
+
+on:
+  push:
+    branches: [analysis/v15-python-gestalt-h64-distill-20260908]
+    paths:
+      - scripts/train_v14_single_residual.py
+      - scripts/train_v15_gestalt_h64.py
+      - tools/v14_generate_selfplay_positions.py
+      - tools/v15_label_gestalt_teacher.py
+      - crates/chess-eval/examples/gestalt_stream_oracle.rs
+      - .github/workflows/v15-python-gestalt-h64-distill.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  corpus:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - uses: dtolnay/rust-toolchain@master
+        with: {toolchain: '1.98.1'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Materialize exact V14 and fresh M6 roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
+          rm -rf /tmp/v14 /tmp/m6 corpus; mkdir -p /tmp/v14 /tmp/m6 corpus
+          unzip -q "$ZIP" -d /tmp/v14
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          echo '5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e  /tmp/m6/m6-uho-lichess-5000-v1.epd' | sha256sum --check --strict
+      - name: Generate 12k exact-V14 self-play positions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u tools/v14_generate_selfplay_positions.py \
+            --engine /tmp/v14 \
+            --openings /tmp/m6/m6-uho-lichess-5000-v1.epd \
+            --nodes 2500 --games 256 --opening-offset 1600 \
+            --min-ply 8 --max-ply 130 --stride 2 --max-positions 12000 \
+            --output corpus/selfplay-positions.json | tee corpus/selfplay.log
+      - name: Download certified Gestalt and build streaming oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' \
+            --output corpus/gestalt-b840.nnue
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  corpus/gestalt-b840.nnue' | sha256sum --check --strict
+          cargo build --release -p chess-eval --example gestalt_stream_oracle
+      - name: Label self-play distribution with Rust Gestalt
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u tools/v15_label_gestalt_teacher.py \
+            --positions corpus/selfplay-positions.json \
+            --oracle target/release/examples/gestalt_stream_oracle \
+            --network corpus/gestalt-b840.nnue \
+            --split-salt Chess/v15-gestalt-h64-12000-v1 \
+            --validation-permille 100 --holdout-permille 100 \
+            --output corpus/teacher.jsonl | tee corpus/teacher.log
+          wc -l corpus/teacher.jsonl
+          sha256sum corpus/teacher.jsonl > corpus/teacher.sha256
+          rm corpus/gestalt-b840.nnue
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v15-python-gestalt-h64-corpus-${{ github.sha }}
+          path: corpus/
+          retention-days: 30
+
+  train:
+    needs: corpus
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: v15-python-gestalt-h64-corpus-${{ github.sha }}
+          path: corpus
+      - uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Train and quantise exact deployed H64 shape
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
+          rm -rf /tmp/v14 model; mkdir -p /tmp/v14
+          unzip -q "$ZIP" -d /tmp/v14
+          python -u scripts/train_v15_gestalt_h64.py \
+            --teacher corpus/teacher.jsonl --engine-dir /tmp/v14 --output-dir model \
+            --hidden 64 --epochs 80 --batch-size 384 --learning-rate 0.0025 \
+            --weight-decay 0.00001 --seed 20260908 | tee training.log
+          cat model/training-metadata.json
+          sha256sum model/student-h64.npz > model/model.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v15-python-gestalt-h64-model-${{ github.sha }}
+          path: |
+            model/
+            training.log
+          retention-days: 30
+
+  screen:
+    needs: train
+    strategy:
+      fail-fast: false
+      matrix:
+        denominator: [2, 4, 6, 8, 12]
+    name: screen-s1-${{ matrix.denominator }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: v15-python-gestalt-h64-model-${{ github.sha }}
+          path: model-artifact
+      - uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Materialize exact V14 control and same-cost candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); MODEL=$(find model-artifact -type f -name student-h64.npz -print -quit)
+          test -n "$ZIP"; test -n "$MODEL"
+          rm -rf /tmp/base /tmp/cand /tmp/m6 results; mkdir -p /tmp/base /tmp/cand /tmp/m6 results
+          unzip -q "$ZIP" -d /tmp/base; cp -a /tmp/base/. /tmp/cand/
+          cp "$MODEL" /tmp/cand/experiments/v14_student_h64.npz
+          DEN='${{ matrix.denominator }}' python - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path('/tmp/cand/experiments/numba_search.py');s=p.read_text();den=os.environ['DEN']
+          old='STUDENT_SCALE_DEN = 12'
+          assert s.count(old)==1,s.count(old)
+          p.write_text(s.replace(old,f'STUDENT_SCALE_DEN = {den}',1))
+          PY
+          python -m py_compile /tmp/base/agent.py /tmp/cand/agent.py /tmp/cand/experiments/*.py
+          # Same architecture: only model bytes + scalar blend may differ.
+          cmp /tmp/base/experiments/v14_student_single_runtime.py /tmp/cand/experiments/v14_student_single_runtime.py
+      - name: Build unseen fresh 32-root game book
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          chosen=large[2200:2232]
+          assert len(chosen)==32 and len(set(chosen))==32
+          Path('/tmp/gestalt-h64-screen.epd').write_text('\n'.join(chosen)+'\n')
+          PY
+      - name: Same-shape throughput check
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/worker.py <<'PY'
+          import json,sys,chess,numpy as np
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful
+          for line in sys.stdin:
+              q=json.loads(line);b=chess.Board(q['fen']);e=encode_position(b);h=np.empty(0,dtype=np.uint64)
+              o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,int(q['nodes']))
+              print(json.dumps({'nodes':int(o[3])}),flush=True)
+          PY
+          python - <<'PY'
+          import json,os,statistics,subprocess,sys,time
+          from pathlib import Path
+          roots=[x.strip() for x in Path('/tmp/gestalt-h64-screen.epd').read_text().splitlines() if x.strip()][:12]
+          def start(d):
+              e=os.environ.copy();e['PYTHONPATH']=d;return subprocess.Popen([sys.executable,'/tmp/worker.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=e)
+          def one(p,fen,n):p.stdin.write(json.dumps({'fen':fen,'nodes':n})+'\n');p.stdin.flush();return json.loads(p.stdout.readline())['nodes']
+          def run(p,order):
+              n=0;t=time.perf_counter()
+              for f in order:n+=one(p,f,25000)
+              return n/(time.perf_counter()-t)
+          b=start('/tmp/base');c=start('/tmp/cand');r=[]
+          try:
+              one(b,roots[0],500);one(c,roots[0],500)
+              for k in range(3):
+                  order=roots if k%2==0 else list(reversed(roots))
+                  if k%2==0:bn=run(b,order);cn=run(c,order)
+                  else:cn=run(c,order);bn=run(b,order)
+                  r.append(cn/bn)
+          finally:b.terminate();c.terminate();b.wait();c.wait()
+          out={'denominator':${{ matrix.denominator }},'median_nps_ratio':statistics.median(r),'ratios':r};open('results/throughput.json','w').write(json.dumps(out,indent=2)+'\n');print('FINAL',out)
+          PY
+      - name: 64-game equal-node screen
+        run: python -u tools/v14_fixed_node_arena.py /tmp/cand /tmp/base --nodes 18000 --pairs 32 --opening-file /tmp/gestalt-h64-screen.epd --opening-offset 0 --max-plies 220 --json-out results/arena.json | tee results/arena.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-gestalt-h64-s1-${{ matrix.denominator }}-${{ github.sha }}
+          path: results/
+          retention-days: 30
