@@ -1,0 +1,211 @@
+name: V15 Python fast direct qsearch checks
+
+on:
+  push:
+    branches: [analysis/v15-python-fast-direct-check-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+
+      - name: Materialize exact control and fast candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name 'Little-Gambit-V14.zip' -print -quit); test -n "$ZIP"
+          rm -rf /tmp/base /tmp/cand; mkdir -p /tmp/base /tmp/cand results
+          unzip -q "$ZIP" -d /tmp/base; cp -a /tmp/base/. /tmp/cand/
+          python scripts/patch_v15_python_fast_direct_check.py /tmp/cand/experiments/numba_core.py /tmp/cand/experiments/numba_search.py
+          python -m py_compile /tmp/base/agent.py /tmp/base/experiments/*.py /tmp/cand/agent.py /tmp/cand/experiments/*.py
+          diff -u /tmp/base/experiments/numba_core.py /tmp/cand/experiments/numba_core.py > results/core.patch || true
+          diff -u /tmp/base/experiments/numba_search.py /tmp/cand/experiments/numba_search.py > results/search.patch || true
+          test -s results/core.patch; test -s results/search.patch
+          cmp /tmp/base/agent.py /tmp/cand/agent.py
+          cmp /tmp/base/experiments/v13_residual.i16 /tmp/cand/experiments/v13_residual.i16
+          cmp /tmp/base/experiments/v14_student_h64.npz /tmp/cand/experiments/v14_student_h64.npz
+
+      - name: Direct-check legality smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=/tmp/cand python - <<'PY'
+          import chess,numpy as np
+          from experiments.numba_core import (
+              encode_position,generate_legal_tactical_moves_into_with_king,
+              append_legal_quiet_slider_checks_into,move_to_uci
+          )
+          positions=[chess.Board()]
+          b=chess.Board()
+          for u in ('e2e4','e7e5','g1f3','b8c6','f1c4','g8f6','d2d3','f8c5','c1g5','d7d6'):
+              b.push_uci(u);positions.append(b.copy())
+          checked=0
+          for b in positions:
+              e=encode_position(b);pseudo=np.empty(256,dtype=np.int32);moves=np.empty(256,dtype=np.int32)
+              king=b.king(b.turn);opp=b.king(not b.turn)
+              if king is None or opp is None or b.is_check():continue
+              base=generate_legal_tactical_moves_into_with_king(e.board,e.side,e.ep_square,pseudo,moves,king)
+              total=append_legal_quiet_slider_checks_into(e.board,e.side,moves,base,king,opp)
+              for i in range(int(base),int(total)):
+                  u=move_to_uci(int(moves[i]));m=chess.Move.from_uci(u)
+                  assert m in b.legal_moves,(b.fen(),u)
+                  assert b.piece_at(m.from_square).piece_type in (chess.BISHOP,chess.ROOK,chess.QUEEN)
+                  assert b.piece_at(m.to_square) is None
+                  assert b.gives_check(m),(b.fen(),u)
+                  checked+=1
+          print('validated_direct_checks',checked)
+          PY
+
+      - name: Derive fresh disjoint official UHO roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p fresh-openings
+          curl --fail --location --retry 3 --output fresh-openings/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  fresh-openings/uho.zip' | sha256sum --check --strict
+          python scripts/build_m6_opening_suite.py --archive fresh-openings/uho.zip --output-dir fresh-openings/derived
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('fresh-openings/derived/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          chosen=fresh[144:192]
+          assert len(chosen)==48 and len(set(chosen))==48
+          Path('fresh-openings/v15-fast-48.epd').write_text('\n'.join(chosen)+'\n')
+          PY
+          sha256sum fresh-openings/v15-fast-48.epd | tee results/openings.sha256
+
+      - name: Fixed-node throughput cost
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/worker.py <<'PY'
+          import json,sys,chess,numpy as np
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful
+          for line in sys.stdin:
+              q=json.loads(line);b=chess.Board(q['fen']);e=encode_position(b);h=np.empty(0,dtype=np.uint64)
+              o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,int(q['nodes']))
+              print(json.dumps({'nodes':int(o[3])}),flush=True)
+          PY
+          python - <<'PY'
+          import json,os,statistics,subprocess,sys,time
+          from pathlib import Path
+          roots=[x.strip() for x in Path('fresh-openings/v15-fast-48.epd').read_text().splitlines() if x.strip()][:16]
+          def start(d):
+              e=os.environ.copy();e['PYTHONPATH']=d
+              return subprocess.Popen([sys.executable,'/tmp/worker.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=e)
+          def run(p,order):
+              n=0;t=time.perf_counter()
+              for fen in order:
+                  p.stdin.write(json.dumps({'fen':fen,'nodes':25000})+'\n');p.stdin.flush();n+=json.loads(p.stdout.readline())['nodes']
+              return time.perf_counter()-t,n
+          b=start('/tmp/base');c=start('/tmp/cand');rat=[];rows=[]
+          try:
+              for p in (b,c):p.stdin.write(json.dumps({'fen':roots[0],'nodes':500})+'\n');p.stdin.flush();json.loads(p.stdout.readline())
+              for r in range(3):
+                  order=roots if r%2==0 else list(reversed(roots))
+                  if r%2==0:bt,bn=run(b,order);ct,cn=run(c,order)
+                  else:ct,cn=run(c,order);bt,bn=run(b,order)
+                  x=(cn/ct)/(bn/bt);rat.append(x);rows.append({'rep':r,'base_nps':bn/bt,'candidate_nps':cn/ct,'ratio':x})
+          finally:
+              for p in (b,c):p.terminate();p.wait()
+          out={'median_nps_ratio':statistics.median(rat),'rows':rows};Path('results/throughput.json').write_text(json.dumps(out,indent=2)+'\n');print(out)
+          PY
+
+      - name: Fresh 96-game equal-node stack test
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u tools/v14_fixed_node_arena.py /tmp/cand /tmp/base --nodes 16000 --pairs 48 --opening-offset 0 --max-plies 220 --opening-file fresh-openings/v15-fast-48.epd --json-out results/arena.json | tee results/arena.log
+          grep '^FINAL ' results/arena.log
+
+      - name: Fresh 32-game competition-API timed test
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json,math,queue,subprocess,sys,threading,time
+          from collections import Counter,deque
+          from pathlib import Path
+          import chess
+          BASE_MS=2500;INC_MS=50;MAX_PLIES=180;GRACE_MS=1200
+          openings=[x.strip() for x in Path('fresh-openings/v15-fast-48.epd').read_text().splitlines() if x.strip()][16:32]
+          class P:
+              def __init__(self,d):
+                  self.p=subprocess.Popen([sys.executable,'tools/v14_agent_runner.py',d],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,bufsize=1);self.q=queue.Queue();self.err=deque(maxlen=80)
+                  threading.Thread(target=self.ro,daemon=True).start();threading.Thread(target=self.re,daemon=True).start();assert json.loads(self.line(95)).get('ready') is True
+              def ro(self):
+                  for x in self.p.stdout:self.q.put(x.rstrip('\n'))
+                  self.q.put(None)
+              def re(self):
+                  for x in self.p.stderr:self.err.append(x.rstrip('\n'))
+              def line(self,t):
+                  try:x=self.q.get(timeout=t)
+                  except queue.Empty as e:raise RuntimeError('timeout') from e
+                  if x is None:raise RuntimeError('closed '+'\n'.join(self.err))
+                  return x
+              def reset(self):self.p.stdin.write(json.dumps({'reset':True})+'\n');self.p.stdin.flush();assert json.loads(self.line(5)).get('reset') is True
+              def move(self,b,ms):
+                  self.p.stdin.write(json.dumps({'fen':b.fen(),'time_left_ms':max(0,int(ms))})+'\n');self.p.stdin.flush();z=json.loads(self.line((max(0,ms)+GRACE_MS)/1000));m=chess.Move.from_uci(z['move']);assert m in b.legal_moves;return m
+              def stop(self):
+                  if self.p.poll() is None:self.p.kill()
+                  self.p.wait(timeout=5)
+          base=P('/tmp/base');cand=P('/tmp/cand');rows=[];pairs=[]
+          def play(fen,cw):
+              b=chess.Board(fen);cl={chess.WHITE:float(BASE_MS),chess.BLACK:float(BASE_MS)};base.reset();cand.reset();tim=[]
+              for _ in range(MAX_PLIES):
+                  o=b.outcome(claim_draw=True)
+                  if o is not None:return (0.5 if o.winner is None else float(o.winner==cw)),b.result(claim_draw=True),tim
+                  side=b.turn;use=side==cw;e=cand if use else base;t=time.monotonic()
+                  try:m=e.move(b,cl[side])
+                  except Exception as ex:return (0.0 if use else 1.0),f'engine-failure:{type(ex).__name__}',tim
+                  dt=(time.monotonic()-t)*1000;cl[side]-=dt
+                  if cl[side]<0:return (0.0 if use else 1.0),'flag',tim
+                  tim.append((use,dt));b.push(m);cl[side]+=INC_MS
+              return 0.5,'max-ply-draw',tim
+          try:
+              for i,fen in enumerate(openings):
+                  ps=0
+                  for cw in (True,False):
+                      s,r,t=play(fen,cw);ps+=s;rows.append({'opening':i,'candidate_white':cw,'score':s,'result':r,'candidate_ms':[x for c,x in t if c],'control_ms':[x for c,x in t if not c]});print(i,cw,s,r,flush=True)
+                  pairs.append(ps)
+          finally:base.stop();cand.stop()
+          score=sum(r['score'] for r in rows);n=len(rows);f=score/n;elo=400*math.log10(f/(1-f)) if 0<f<1 else None
+          ct=[x for r in rows for x in r['candidate_ms']];bt=[x for r in rows for x in r['control_ms']]
+          out={'games':n,'score':score,'score_fraction':f,'naive_elo_from_score':elo,'pair_histogram':dict(Counter(str(x) for x in pairs)),'terminations':dict(Counter(r['result'] for r in rows)),'candidate_mean_move_ms':sum(ct)/max(1,len(ct)),'control_mean_move_ms':sum(bt)/max(1,len(bt)),'details':rows};Path('results/timed.json').write_text(json.dumps(out,indent=2)+'\n');print(json.dumps({k:v for k,v in out.items() if k!='details'},indent=2))
+          PY
+
+      - name: Build candidate ZIP
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -d /tmp/cand ]; then (cd /tmp/cand && zip -q -9 -r "$GITHUB_WORKSPACE/results/Little-Gambit-V15-python-fast-direct-check.zip" .); fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-fast-direct-check-${{ github.sha }}
+          path: results/
+          retention-days: 30
