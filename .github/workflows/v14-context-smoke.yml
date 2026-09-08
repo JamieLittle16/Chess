@@ -1,0 +1,57 @@
+name: V14 contextual student smoke
+
+on:
+  push:
+    branches: [analysis/v14-context-student-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Syntax and runtime invariant smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m py_compile scripts/train_v14_context_student.py experiments/v14_context_student_runtime.py
+          python - <<'PY'
+          import importlib.util, sys, tempfile
+          # Load through a reconstructed package because runtime imports numba_core relatively.
+          PY
+          cat .analysis/v13_chunks_*.b64 | base64 -d >/tmp/v13.zip
+          rm -rf /tmp/context-smoke; mkdir /tmp/context-smoke; unzip -q /tmp/v13.zip -d /tmp/context-smoke
+          cp experiments/v14_context_student_runtime.py /tmp/context-smoke/experiments/
+          PYTHONPATH=/tmp/context-smoke python - <<'PY'
+          import chess, numpy as np
+          from experiments.numba_core import encode_position, encode_move
+          from experiments.v14_context_student_runtime import (
+              FEATURES, king_context, build_context_accumulator_into,
+              advance_context_accumulator_into,
+          )
+          H=8
+          # Deterministic synthetic weights make exact incremental/full-refresh parity easy to verify.
+          w=(np.arange(FEATURES*H,dtype=np.int64)%127-63).astype(np.int16).reshape(FEATURES,H)
+          bias=np.arange(H,dtype=np.int16)
+          b=chess.Board(); e=encode_position(b); wk=b.king(chess.WHITE); bk=b.king(chess.BLACK)
+          ctx=king_context(wk,bk); parent=np.empty(H,dtype=np.int32); build_context_accumulator_into(e.board,ctx,w,bias,parent)
+          # Includes king moves that cross centre/wing boundaries plus captures/castling-adjacent structure.
+          for uci in ('e2e4','e7e5','e1e2','e8e7','e2d3','e7d6','d3c3','d6c6'):
+              m=chess.Move.from_uci(uci); assert m in b.legal_moves,(uci,b.fen())
+              im=encode_move(m.from_square,m.to_square,m.promotion or 0,0)
+              e=encode_position(b); child=np.empty(H,dtype=np.int32)
+              next_ctx=advance_context_accumulator_into(e.board,e.side,im,wk,bk,ctx,parent,child,w,bias)
+              b.push(m); wk=b.king(chess.WHITE); bk=b.king(chess.BLACK); e2=encode_position(b)
+              expected_ctx=king_context(wk,bk); full=np.empty(H,dtype=np.int32); build_context_accumulator_into(e2.board,expected_ctx,w,bias,full)
+              assert next_ctx==expected_ctx,(uci,next_ctx,expected_ctx)
+              assert np.array_equal(child,full),(uci,np.flatnonzero(child!=full).tolist())
+              parent=child;ctx=next_ctx
+          print('context_runtime_parity_ok',ctx,parent.tolist())
+          PY
