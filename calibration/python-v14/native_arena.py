@@ -30,7 +30,12 @@ def load_openings(path: Path, indices: list[int]) -> list[tuple[int, chess.Board
     lines = [x.strip() for x in path.read_text().splitlines() if x.strip() and not x.lstrip().startswith('#')]
     out = []
     for idx in indices:
-        board, _ops = chess.Board.from_epd(lines[idx])
+        # The frozen M6 suite stores full six-field FENs, not four-field EPD records.
+        # Consume exactly the FEN fields so an accidental trailing annotation cannot alter the root.
+        fields = lines[idx].split()
+        if len(fields) < 6:
+            raise ValueError(f"opening {idx} is not a six-field FEN: {lines[idx]!r}")
+        board = chess.Board(" ".join(fields[:6]))
         out.append((idx, board))
     return out
 
