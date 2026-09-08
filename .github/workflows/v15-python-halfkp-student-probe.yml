@@ -22,18 +22,10 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: '3.12'}
       - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
-      - uses: actions/download-artifact@v4
-        with:
-          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208e8ac6f98df8515dc48aa79596
-          path: wrong-name-sentinel
-          github-token: ${{ github.token }}
-          repository: JamieLittle16/Chess
-          run-id: 34214504775
-        continue-on-error: true
       - name: Download exact packaged V14
         uses: actions/download-artifact@v4
         with:
-          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208e8ac6f98df8515dc48aa79596
           path: v14-artifact
           github-token: ${{ github.token }}
           repository: JamieLittle16/Chess
