@@ -1,0 +1,95 @@
+name: V14 root-qsearch slider checks fresh replication
+
+on:
+  push:
+    branches: [analysis/v14-qcheck-root-a-confirm-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  confirm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Derive fresh disjoint official UHO roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p fresh-openings
+          curl --fail --location --retry 3 \
+            --output fresh-openings/UHO_Lichess_4852_v1.epd.zip \
+            https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  fresh-openings/UHO_Lichess_4852_v1.epd.zip' | sha256sum --check --strict
+          python scripts/build_m6_opening_suite.py --archive fresh-openings/UHO_Lichess_4852_v1.epd.zip --output-dir fresh-openings/derived
+          echo '5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e  fresh-openings/derived/m6-uho-lichess-5000-v1.epd' | sha256sum --check --strict
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('fresh-openings/derived/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          assert len(fresh)>=4900,len(fresh)
+          # Use positions 48:96 so this confirmation is independent of the neural 1/12 confirmation subset.
+          chosen=fresh[48:96]
+          assert len(chosen)==48 and len(set(chosen))==48
+          Path('fresh-openings/qcheck-confirm-48.epd').write_text('\n'.join(chosen)+'\n')
+          print('old',len(old),'fresh',len(fresh),'chosen',len(chosen))
+          PY
+          sha256sum fresh-openings/qcheck-confirm-48.epd
+
+      - name: Reconstruct exact V13 and qcheck A
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum --check --strict
+          rm -rf /tmp/base /tmp/cand && mkdir -p /tmp/base /tmp/cand
+          unzip -q /tmp/v13.zip -d /tmp/base
+          unzip -q /tmp/v13.zip -d /tmp/cand
+          patch /tmp/base/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          patch /tmp/cand/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          for DIR in /tmp/base /tmp/cand; do
+            DIR="$DIR" python - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path(os.environ['DIR'])/'experiments/numba_search.py'; s=p.read_text()
+          old='    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          new='    correction = correction // 6\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          assert s.count(old)==1,s.count(old)
+          p.write_text(s.replace(old,new,1))
+          PY
+            python scripts/patch_v13_legality_context.py "$DIR/experiments/numba_core.py"
+            python scripts/patch_v13_qsearch_tactical.py "$DIR/experiments/numba_core.py" "$DIR/experiments/numba_search.py"
+          done
+          echo '401f6580028a72361286bd99bee1f0022c74e6c8a65da8acd47448835a1ff360  /tmp/base/experiments/numba_search.py' | sha256sum --check --strict
+          python scripts/patch_v14_qcheck_root.py /tmp/cand/experiments/numba_search.py
+          python -m py_compile /tmp/base/experiments/*.py /tmp/cand/experiments/*.py tools/v14_fixed_node_arena.py
+
+      - name: Fresh 96-game equal-node replication
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p confirm-results
+          python -u tools/v14_fixed_node_arena.py /tmp/cand /tmp/base \
+            --nodes 16000 --pairs 48 --opening-offset 0 --max-plies 220 \
+            --opening-file fresh-openings/qcheck-confirm-48.epd \
+            --json-out confirm-results/arena.json \
+            | tee confirm-results/arena.log
+          grep '^FINAL ' confirm-results/arena.log
+          cp fresh-openings/qcheck-confirm-48.epd confirm-results/
+          sha256sum fresh-openings/qcheck-confirm-48.epd > confirm-results/openings.sha256
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v14-qcheck-root-a-fresh-confirm-${{ github.sha }}
+          path: confirm-results/
+          retention-days: 30
