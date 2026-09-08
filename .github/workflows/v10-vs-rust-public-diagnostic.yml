@@ -1,4 +1,4 @@
-name: Round 61 V13 BEST Stockfish postmortem
+name: Round 61 V13 BEST depth probe
 
 on:
   push:
@@ -10,114 +10,86 @@ permissions:
   contents: read
 
 jobs:
-  analyse:
+  probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install python-chess and Stockfish
-        run: |
-          python -m pip install chess==1.11.2
-          sudo apt-get update -qq
-          sudo apt-get install -y stockfish
-      - name: Analyse exact Round 61 PGN
+      - name: Install exact runtime
+        run: python -m pip install chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Reconstruct source-exact V13 BEST
         shell: bash
         run: |
-          cat > /tmp/round61.pgn <<'PGN'
-          [Event "AI Chessathon Rated"]
-          [Site "aichessathon.com"]
-          [Date "2026.09.08"]
-          [Round "61"]
-          [White "Little Gambit"]
-          [Black "SaucyBeans"]
-          [Result "0-1"]
-          [FEN "r1bq1rk1/pp1pppbp/2n2np1/2p5/2PP4/2N2NP1/PP2PPBP/R1BQ1RK1 b - - 0 7"]
-          [SetUp "1"]
-          [Termination "checkmate"]
-
-          7... cxd4 8. Nxd4 a5 9. c5 d5 10. cxd6 Nxd4 11. dxe7 Qxe7 12. Qxd4 Rd8 13. Qh4 Be6 14. Bg5 h6 15. Bxh6 Bxh6 16. Qxh6 Rac8 17. e4 Ng4 18. Qf4 g5 19. Qc1 b5 20. h3 b4 21. hxg4 bxc3 22. bxc3 Rd3 23. f3 Qc5+ 24. Rf2 Rcd8 25. a4 Bc4 26. Qb1 Rd2 27. Qe1 Re2 28. Qxe2 Bxe2 29. Bh3 Rd2 30. Re1 Bc4 31. Re3 Qxe3 32. Kh1 Qxf2 33. f4 Qh2# 0-1
-          PGN
-          cat > /tmp/analyse.py <<'PY'
+          set -euo pipefail
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13old.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13old.zip' | sha256sum -c -
+          rm -rf /tmp/v13best && mkdir -p /tmp/v13best
+          unzip -q /tmp/v13old.zip -d /tmp/v13best
+          patch /tmp/v13best/experiments/numba_search.py < .analysis/v13best_search.patch
+          patch /tmp/v13best/experiments/numba_core.py < .analysis/v13best_core.patch
+          echo '0306e8145a453d91b9b5ac92e9980931510d9e18f8ba598a7548d08b85165c35  /tmp/v13best/experiments/numba_core.py' | sha256sum -c -
+          echo '401f6580028a72361286bd99bee1f0022c74e6c8a65da8acd47448835a1ff360  /tmp/v13best/experiments/numba_search.py' | sha256sum -c -
+      - name: Probe critical positions at actual and deeper budgets
+        shell: bash
+        run: |
+          cat > /tmp/probe.py <<'PY'
+          import json, sys, time
+          import numpy as np
           import chess
-          import chess.pgn
-          import chess.engine
-          import json
+          sys.path.insert(0, '/tmp/v13best')
+          import agent
+          from experiments.numba_core import encode_position, move_to_uci
 
-          ENGINE = "/usr/games/stockfish"
-          NODES = 250_000
-          MATE = 100_000
+          CASES = [
+            ('before_20_h3', '2rr2k1/4qp2/4b3/pp4p1/4P1n1/2N3P1/PP3PBP/R1Q2RK1 w - - 0 20', 89800, 'Qe1'),
+            ('before_23_f3', '2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23', 83800, 'Rb1'),
+            ('before_26_Qb1', '3r2k1/5p2/8/p1q3p1/P1b1P1P1/2Pr1PP1/5RB1/R1Q3K1 w - - 1 26', 76000, 'Bf1'),
+          ]
 
-          with open('/tmp/round61.pgn') as f:
-              game = chess.pgn.read_game(f)
-          board = game.board()
-          engine = chess.engine.SimpleEngine.popen_uci(ENGINE)
-          rows = []
-          try:
-              for ply, move in enumerate(game.mainline_moves(), start=1):
-                  san = board.san(move)
-                  if board.turn == chess.WHITE:
-                      before_fen = board.fen()
-                      best = engine.analyse(board, chess.engine.Limit(nodes=NODES))
-                      forced = engine.analyse(board, chess.engine.Limit(nodes=NODES), root_moves=[move])
-                      best_score = best['score'].pov(chess.WHITE).score(mate_score=MATE)
-                      actual_score = forced['score'].pov(chess.WHITE).score(mate_score=MATE)
-                      best_move = best['pv'][0] if best.get('pv') else None
-                      best_san = board.san(best_move) if best_move else None
-                      best_pv = []
-                      probe = board.copy()
-                      for pv_move in best.get('pv', [])[:8]:
-                          try:
-                              best_pv.append(probe.san(pv_move))
-                              probe.push(pv_move)
-                          except Exception:
-                              break
-                      actual_pv = []
-                      probe = board.copy()
-                      for pv_move in forced.get('pv', [])[:8]:
-                          try:
-                              actual_pv.append(probe.san(pv_move))
-                              probe.push(pv_move)
-                          except Exception:
-                              break
-                      rows.append({
-                          'white_move_number': board.fullmove_number,
-                          'move': san,
-                          'uci': move.uci(),
-                          'fen_before': before_fen,
-                          'best_move': best_san,
-                          'best_score_cp_white': best_score,
-                          'actual_score_cp_white': actual_score,
-                          'loss_cp': None if best_score is None or actual_score is None else best_score - actual_score,
-                          'best_pv': best_pv,
-                          'actual_pv': actual_pv,
-                      })
-                  board.push(move)
-          finally:
-              engine.quit()
+          def reset():
+              agent._HASH_KEYS.fill(np.uint64(0))
+              agent._HASH_MOVES.fill(np.int32(-1))
+              agent._TT_TABLE.fill(np.uint64(0))
+              agent._CLOCK_OVERHEAD_EMA_MS = 40.0
+              agent._CLOCK_FEEDBACK_SAMPLES = 0
 
-          with open('/tmp/round61-analysis.json','w') as f:
-              json.dump(rows, f, indent=2)
-          rows_sorted = sorted(rows, key=lambda r: (r['loss_cp'] if r['loss_cp'] is not None else -1), reverse=True)
-          with open('/tmp/round61-analysis.txt','w') as f:
-              f.write('Round 61 Little Gambit (V13 BEST) Stockfish 16 postmortem\n')
-              f.write(f'Nodes per best/forced analysis: {NODES}\n\n')
-              f.write('Chronological:\n')
-              for r in rows:
-                  f.write(f"{r['white_move_number']:>2}. {r['move']:<7} best={r['best_move']:<7} before={r['best_score_cp_white']:>7} afterMove={r['actual_score_cp_white']:>7} loss={r['loss_cp']:>6}  PV={' '.join(r['best_pv'])}\n")
-              f.write('\nLargest losses:\n')
-              for r in rows_sorted[:12]:
-                  f.write(f"{r['white_move_number']:>2}. {r['move']:<7} best={r['best_move']:<7} before={r['best_score_cp_white']:>7} afterMove={r['actual_score_cp_white']:>7} loss={r['loss_cp']:>6}  bestPV={' '.join(r['best_pv'])} actualPV={' '.join(r['actual_pv'])}\n")
-          print(open('/tmp/round61-analysis.txt').read())
+          def fixed(board, hard_ms):
+              reset()
+              enc = encode_position(board)
+              hist = np.empty(0, dtype=np.uint64)
+              t0 = time.perf_counter()
+              move, score, depth, nodes = agent.iterative_search_stateful_timed_cached(
+                  enc.board, enc.side, enc.castling, enc.ep_square, board.halfmove_clock,
+                  hist, 0, hard_ms, hard_ms, agent._MAX_NODE_BUDGET,
+                  agent._HASH_KEYS, agent._HASH_MOVES, agent._TT_TABLE,
+              )
+              elapsed = (time.perf_counter()-t0)*1000.0
+              return {'move': move_to_uci(int(move)), 'score': int(score), 'depth': int(depth), 'nodes': int(nodes), 'elapsed_ms': elapsed}
+
+          out=[]
+          for name, fen, clock, sfbest in CASES:
+              board=chess.Board(fen)
+              reset()
+              soft,hard=agent._search_time_budgets_ms(board, clock, list(board.legal_moves))
+              r=agent.search_position(board, clock, np.empty(0,dtype=np.uint64))
+              item={'case':name,'fen':fen,'stockfish_best':sfbest,'clock_ms':clock,
+                    'production_budget':{'soft_ms':soft,'hard_ms':hard},
+                    'production':{'move':r.move.uci(),'score':r.score,'depth':r.depth,'nodes':r.nodes,'elapsed_ms':r.elapsed_ms}}
+              item['fixed_6000ms']=fixed(board,6000)
+              item['fixed_12000ms']=fixed(board,12000)
+              out.append(item)
+              print(json.dumps(item,indent=2))
+          with open('/tmp/round61-depth-probe.json','w') as f: json.dump(out,f,indent=2)
           PY
-          python /tmp/analyse.py
-      - name: Upload postmortem
+          python /tmp/probe.py | tee /tmp/round61-depth-probe.txt
+      - name: Upload depth probe
         uses: actions/upload-artifact@v4
         with:
-          name: round61-v13best-stockfish-postmortem
+          name: round61-v13best-depth-probe
           path: |
-            /tmp/round61-analysis.json
-            /tmp/round61-analysis.txt
+            /tmp/round61-depth-probe.json
+            /tmp/round61-depth-probe.txt
           retention-days: 7
