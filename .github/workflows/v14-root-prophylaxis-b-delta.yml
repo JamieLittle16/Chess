@@ -1,0 +1,109 @@
+name: V14 root prophylaxis B delta
+
+on:
+  push:
+    branches: [analysis/v14-root-prophylaxis-b-delta-20260908]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: half
+            num: 1
+            den: 2
+          - label: full
+            num: 1
+            den: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Reconstruct exact V13 and delta candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .analysis/v13_chunks_*.b64 | base64 -d > /tmp/v13.zip
+          echo '658fd954180c2d0d39c02ba6601af36d06cdbd573bfb72c6879169861a7ad092  /tmp/v13.zip' | sha256sum --check --strict
+          rm -rf /tmp/base /tmp/cand && mkdir -p /tmp/base /tmp/cand
+          unzip -q /tmp/v13.zip -d /tmp/base; unzip -q /tmp/v13.zip -d /tmp/cand
+          patch /tmp/base/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          patch /tmp/cand/experiments/numba_search.py < .analysis/v13_jit_refactor.patch
+          for DIR in /tmp/base /tmp/cand; do
+            DIR="$DIR" python - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path(os.environ['DIR'])/'experiments/numba_search.py';s=p.read_text()
+          old='    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          new='    correction = correction // 6\n    return score + correction\n\n\n@njit(cache=False, inline="never")\ndef _advance_residual_state_into('
+          assert s.count(old)==1;p.write_text(s.replace(old,new,1))
+          PY
+            python scripts/patch_v13_legality_context.py "$DIR/experiments/numba_core.py"
+            python scripts/patch_v13_qsearch_tactical.py "$DIR/experiments/numba_core.py" "$DIR/experiments/numba_search.py"
+          done
+          echo '401f6580028a72361286bd99bee1f0022c74e6c8a65da8acd47448835a1ff360  /tmp/base/experiments/numba_search.py' | sha256sum --check --strict
+          python scripts/patch_v14_root_prophylaxis.py /tmp/cand/experiments/numba_search.py
+          python scripts/patch_v14_root_prophylaxis_delta.py /tmp/cand/experiments/numba_search.py --numerator '${{ matrix.num }}' --denominator '${{ matrix.den }}'
+          python -m py_compile /tmp/base/experiments/*.py /tmp/cand/experiments/*.py
+          mkdir -p results
+      - name: Rated f3 sentinel and broad probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/v14_regression_probe.py --engine /tmp/cand --control /tmp/base --manifest match/regressions/v14-rated-game-1.json --budgets 30000,100000,300000 --json-out results/rated.json | tee results/rated.log
+          python tools/v14_build_probe_corpus.py --openings match/openings/m3-uho-lichess-100-v1.epd --positions 48 --seed 2026090814 --json-out results/broad-manifest.json >/dev/null
+          python tools/v14_regression_probe.py --engine /tmp/cand --control /tmp/base --manifest results/broad-manifest.json --budgets 12000 --json-out results/broad.json >/dev/null
+      - name: Fixed-node throughput
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/w.py <<'PY'
+          import json,sys,chess,numpy as np
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful
+          for line in sys.stdin:
+              q=json.loads(line);b=chess.Board(q['fen']);e=encode_position(b);h=np.empty(0,dtype=np.uint64);o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,int(q['nodes']));print(json.dumps({'nodes':int(o[3])}),flush=True)
+          PY
+          python - <<'PY'
+          import json,os,statistics,subprocess,sys,time
+          from pathlib import Path
+          roots=[x.strip() for x in open('match/openings/m3-uho-lichess-100-v1.epd') if x.strip() and not x.startswith('#')][:40]
+          def st(p):
+              e=os.environ.copy();e['PYTHONPATH']=p;return subprocess.Popen([sys.executable,'/tmp/w.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=e)
+          def run(p,order):
+              n=0;t=time.perf_counter()
+              for fen in order:p.stdin.write(json.dumps({'fen':fen,'nodes':30000})+'\n');p.stdin.flush();n+=json.loads(p.stdout.readline())['nodes']
+              return time.perf_counter()-t,n
+          a=st('/tmp/base');b=st('/tmp/cand');rs=[]
+          try:
+              for p in (a,b):p.stdin.write(json.dumps({'fen':roots[0],'nodes':300})+'\n');p.stdin.flush();json.loads(p.stdout.readline())
+              for rep in range(3):
+                  order=roots if rep%2==0 else list(reversed(roots))
+                  if rep%2==0:at,an=run(a,order);bt,bn=run(b,order)
+                  else:bt,bn=run(b,order);at,an=run(a,order)
+                  rs.append((bn/bt)/(an/at));print('ratio',rep,rs[-1])
+          finally:a.terminate();b.terminate();a.wait();b.wait()
+          out={'median_nps_ratio':statistics.median(rs),'ratios':rs};Path('results/throughput.json').write_text(json.dumps(out,indent=2)+'\n');print(out)
+          PY
+      - name: Paired discovery arena
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u tools/v14_fixed_node_arena.py /tmp/cand /tmp/base --nodes 16000 --pairs 24 --opening-offset 32 --max-plies 220 --opening-file match/openings/m3-uho-lichess-100-v1.epd --json-out results/arena.json | tee results/arena.log
+          grep '^FINAL ' results/arena.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v14-root-prophylaxis-delta-${{ matrix.label }}-${{ github.sha }}
+          path: results/
+          retention-days: 30
