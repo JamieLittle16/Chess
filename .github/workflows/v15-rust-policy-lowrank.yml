@@ -1,0 +1,51 @@
+name: V15 low-rank Rust policy
+
+on:
+  push:
+    branches: [analysis/v15-rust-policy-lowrank-20260908]
+    paths:
+      - scripts/train_v15_rust_policy_lowrank.py
+      - .github/workflows/v15-rust-policy-lowrank.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  train:
+    strategy:
+      fail-fast: false
+      matrix:
+        dim: [8,16,32]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Install trainer
+        run: |
+          python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2
+          python -m pip install --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cpu
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rust-v15-policy-labels-*-bae844a67f0ffa899ab893cf5b41f5f7e4896d32
+          path: labels
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34265888488
+      - name: Train low-rank policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          cat labels/labels-*.jsonl > results/teacher.jsonl
+          python -u scripts/train_v15_rust_policy_lowrank.py --teacher results/teacher.jsonl --output results/lowrank-d${{ matrix.dim }}.npz --dim ${{ matrix.dim }} --epochs 14 | tee results/train.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-rust-policy-lowrank-d${{ matrix.dim }}-${{ github.sha }}
+          path: results/
+          retention-days: 30
