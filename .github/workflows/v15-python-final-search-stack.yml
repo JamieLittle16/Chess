@@ -7,6 +7,7 @@ on:
     paths:
       - .github/workflows/v15-python-final-search-stack.yml
       - scripts/patch_v15_python_inline_fused_h64.py
+      - scripts/patch_v15_python_scoremeta_hotloop.py
       - scripts/patch_v15_python_lmr_schedule.py
   workflow_dispatch:
 
@@ -40,6 +41,7 @@ jobs:
           rm -rf /tmp/base /tmp/cand /tmp/m6 results; mkdir -p /tmp/base /tmp/cand /tmp/m6 results
           unzip -q "$ZIP" -d /tmp/base; cp -a /tmp/base/. /tmp/cand/
           python scripts/patch_v15_python_presort_once.py /tmp/cand/experiments/numba_search.py
+          python scripts/patch_v15_python_scoremeta_hotloop.py /tmp/cand/experiments/numba_search.py
           python scripts/patch_v15_python_fused_h64_direct.py /tmp/cand/experiments/v14_student_single_runtime.py
           python scripts/patch_v15_python_inline_fused_h64.py /tmp/cand/experiments/v14_student_single_runtime.py
           python scripts/patch_v15_python_lmr_schedule.py /tmp/cand/experiments/numba_search.py 3 3 5 7 8 10
@@ -70,7 +72,7 @@ jobs:
           Path('/tmp/final-search-96.epd').write_text('\n'.join(roots)+'\n')
           PY
       - name: 192-game competition-clock qualification vs exact V14
-        run: python -u scripts/v15_competition_gate.py --candidate /tmp/cand --control /tmp/base --openings /tmp/final-search-96.epd --output results/timed-192.json --label final-runtime-lmr-lmp-vs-v14 --base-ms 2500 --inc-ms 50 --max-plies 180 | tee results/timed-192.log
+        run: python -u scripts/v15_competition_gate.py --candidate /tmp/cand --control /tmp/base --openings /tmp/final-search-96.epd --output results/timed-192.json --label final-runtime-scoremeta-lmr-lmp-vs-v14 --base-ms 2500 --inc-ms 50 --max-plies 180 | tee results/timed-192.log
       - name: Package candidate
         if: always()
         shell: bash
