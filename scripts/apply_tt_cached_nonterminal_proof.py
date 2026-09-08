@@ -65,7 +65,7 @@ def main() -> int:
     fn terminal_search_entry_never_manufactures_static_eval_certificate() {
         let mut searcher = super::Searcher::with_tt_entries(64);
         let mut position = Position::from_fen(
-            \"7k/5Q2/6K1/8/8/8/8/8 b - - 0 1\",
+            \"7k/6Q1/5K2/8/8/8/8/8 b - - 0 1\",
         )
         .expect(\"valid checkmated position\");
         let key = position.zobrist_key().raw();
