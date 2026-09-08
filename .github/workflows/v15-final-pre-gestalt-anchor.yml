@@ -1,0 +1,136 @@
+name: V15 final pre-Gestalt cumulative anchor
+
+on:
+  push:
+    branches: [calibration/v15-final-pre-gestalt-anchor-20260908]
+
+permissions:
+  contents: read
+
+jobs:
+  cumulative-anchor:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      RUSTFLAGS: -C target-cpu=native
+      PRE_GESTALT_BASE: 786cedf1dea8208e8ac6f98df8515dc48aa79596
+      FINAL_V15: 3a6a194d91c32b207397158da5a7af86c9a5404f
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Build exact generation endpoints
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/bin .qualification/v15-final-anchor
+          git worktree add --detach /tmp/chess-old "$PRE_GESTALT_BASE"
+          git worktree add --detach /tmp/chess-v15 "$FINAL_V15"
+          CARGO_TARGET_DIR=/tmp/chess-old-target cargo build --release -p chess-uci --manifest-path /tmp/chess-old/Cargo.toml
+          CARGO_TARGET_DIR=/tmp/chess-v15-target cargo build --release -p chess-uci --manifest-path /tmp/chess-v15/Cargo.toml
+          cp /tmp/chess-old-target/release/chess-uci .qualification/bin/pre-gestalt
+          cp /tmp/chess-v15-target/release/chess-uci .qualification/bin/v15
+          chmod +x .qualification/bin/*
+          sha256sum .qualification/bin/pre-gestalt .qualification/bin/v15 > .qualification/v15-final-anchor/binaries.sha256
+
+      - name: Download exact certified Gestalt network
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' \
+            --output .qualification/v15-final-anchor/gestalt-b840.nnue
+          test "$(stat -c%s .qualification/v15-final-anchor/gestalt-b840.nnue)" = '21242944'
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  .qualification/v15-final-anchor/gestalt-b840.nnue' | sha256sum --check --strict
+
+      - name: Reproduce frozen 5000-root M6 suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip' \
+            --output /tmp/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/UHO_Lichess_4852_v1.epd.zip' | sha256sum --check --strict
+          mkdir -p .qualification/m6-openings
+          python scripts/build_m6_opening_suite.py \
+            --archive /tmp/UHO_Lichess_4852_v1.epd.zip \
+            --output-dir .qualification/m6-openings
+          echo '5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e  .qualification/m6-openings/m6-uho-lichess-5000-v1.epd' | sha256sum --check --strict
+
+      - name: Build pinned Fastchess
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = 'f618e34540f94f4719ad3817950618dabe441318'
+          make -C .qualification/fastchess-src -j2
+
+      - name: Create exact endpoint launchers
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$PWD"
+          mkdir -p .qualification/launchers
+          cat > .qualification/launchers/pre-gestalt.sh <<EOF
+          #!/usr/bin/env bash
+          unset CHESS_GESTALT_NETWORK
+          exec '$ROOT/.qualification/bin/pre-gestalt'
+          EOF
+          cat > .qualification/launchers/v15.sh <<EOF
+          #!/usr/bin/env bash
+          export CHESS_GESTALT_NETWORK='$ROOT/.qualification/v15-final-anchor/gestalt-b840.nnue'
+          exec '$ROOT/.qualification/bin/v15'
+          EOF
+          chmod +x .qualification/launchers/*.sh
+
+      - name: Run direct paired 200-game equal-time final anchor
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/v15-final-anchor/equal-time
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/.qualification/launchers/v15.sh" name=v15-final option.Hash=32 \
+            -engine cmd="$PWD/.qualification/launchers/pre-gestalt.sh" name=pre-gestalt option.Hash=32 \
+            -each proto=uci tc=1+0.01 \
+            -openings file="$PWD/.qualification/m6-openings/m6-uho-lichess-5000-v1.epd" format=epd order=random \
+            -srand 20260922 -rounds 100 -repeat -concurrency 1 -maxmoves 300 -ratinginterval 20 \
+            -pgnout file=.qualification/v15-final-anchor/equal-time/games.pgn notation=uci append=false nodes=true nps=true \
+            | tee .qualification/v15-final-anchor/equal-time/stdout.log
+
+      - name: Record immutable experiment identity
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > .qualification/v15-final-anchor/evidence.txt <<EOF
+          purpose=direct cumulative final V15 versus pre-Gestalt production anchor
+          pre_gestalt_base=$PRE_GESTALT_BASE
+          final_v15=$FINAL_V15
+          network_sha256=956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6
+          opening_sha256=5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e
+          equal_time=1+0.01
+          games=200
+          hash_mib=32
+          concurrency=1
+          maxmoves=300
+          fastchess_commit=f618e34540f94f4719ad3817950618dabe441318
+          EOF
+
+      - name: Upload evidence without network bytes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v15-final-pre-gestalt-anchor-${{ github.sha }}
+          path: |
+            .qualification/v15-final-anchor/binaries.sha256
+            .qualification/v15-final-anchor/evidence.txt
+            .qualification/v15-final-anchor/equal-time/
+          retention-days: 30
