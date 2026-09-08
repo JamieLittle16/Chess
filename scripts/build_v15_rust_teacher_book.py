@@ -38,7 +38,15 @@ def load_roots(path: Path) -> list[State]:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        color, opening, fen = line.split("\t", 2)
+        # The checked-in observed-start corpus historically used escaped ``\\t``
+        # separators rather than literal tab bytes.  Accept both representations so
+        # the research tool remains robust if the corpus is normalised later.
+        parts = line.split("\t", 2)
+        if len(parts) != 3:
+            parts = line.split("\\t", 2)
+        if len(parts) != 3:
+            raise ValueError(f"bad observed-start row: {line!r}")
+        color, opening, fen = parts
         if color not in {"white", "black"}:
             raise ValueError(f"bad colour {color!r}")
         board = chess.Board(fen)
