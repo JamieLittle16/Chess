@@ -18,8 +18,9 @@ enum Stage {
 /// capture/promotion score, and untouched quiets follow in generator order. Lazy selection means a
 /// beta cutoff avoids scoring/sorting moves that are never searched.
 ///
-/// This is deliberately a substrate rather than a final ordering policy. SEE, killers, history and
-/// counter-moves can become additional stages without changing search ownership or move generation.
+/// Search v2 can opt into `next_scored` for a lazily ranked quiet stage. The ordinary `next` path is
+/// intentionally kept identical to the accepted implementation so feature-off builds pay no scan or
+/// history overhead at all.
 pub(super) struct MovePicker<'a> {
     moves: &'a mut [ChessMove],
     tt_move: Option<ChessMove>,
@@ -45,7 +46,7 @@ impl<'a> MovePicker<'a> {
         }
     }
 
-    /// Select the next move, doing only the ordering work required to produce that move.
+    /// Select the next move using the accepted generator-order policy for ordinary quiets.
     pub(super) fn next(&mut self, position: &Position) -> Option<ChessMove> {
         loop {
             match self.stage {
@@ -112,6 +113,102 @@ impl<'a> MovePicker<'a> {
                         return Some(mv);
                     }
                     self.stage = Stage::Done;
+                }
+                Stage::Done => return None,
+            }
+        }
+    }
+
+    /// Select the next move while lazily ranking only the ordinary quiets that are requested.
+    ///
+    /// TT, tactical and killer stages are identical to `next`. Equal quiet scores preserve current
+    /// move-buffer order. Only candidate Search-v2 code calls this method.
+    #[allow(dead_code)]
+    pub(super) fn next_scored<F>(
+        &mut self,
+        position: &Position,
+        mut quiet_score: F,
+    ) -> Option<ChessMove>
+    where
+        F: FnMut(ChessMove) -> i32,
+    {
+        loop {
+            match self.stage {
+                Stage::Tt => {
+                    self.stage = Stage::Tactical;
+                    if let Some(tt_move) = self.tt_move
+                        && let Some(index) = self.moves[self.cursor..]
+                            .iter()
+                            .position(|&mv| mv == tt_move)
+                            .map(|offset| self.cursor + offset)
+                    {
+                        self.moves.swap(self.cursor, index);
+                        let mv = self.moves[self.cursor];
+                        self.cursor += 1;
+                        return Some(mv);
+                    }
+                }
+                Stage::Tactical => {
+                    let mut best_index = None;
+                    let mut best_score = i32::MIN;
+                    for index in self.cursor..self.moves.len() {
+                        let mv = self.moves[index];
+                        if !is_tactical(mv) {
+                            continue;
+                        }
+                        let score = tactical_score(position, mv);
+                        if score > best_score {
+                            best_score = score;
+                            best_index = Some(index);
+                        }
+                    }
+
+                    if let Some(index) = best_index {
+                        self.moves.swap(self.cursor, index);
+                        let mv = self.moves[self.cursor];
+                        self.cursor += 1;
+                        return Some(mv);
+                    }
+                    self.stage = Stage::Killer;
+                }
+                Stage::Killer => {
+                    while self.killer_index < self.killers.len() {
+                        let killer = self.killers[self.killer_index];
+                        self.killer_index += 1;
+                        if let Some(killer) = killer
+                            && !is_tactical(killer)
+                            && let Some(index) = self.moves[self.cursor..]
+                                .iter()
+                                .position(|&mv| mv == killer)
+                                .map(|offset| self.cursor + offset)
+                        {
+                            self.moves.swap(self.cursor, index);
+                            let mv = self.moves[self.cursor];
+                            self.cursor += 1;
+                            return Some(mv);
+                        }
+                    }
+                    self.stage = Stage::Quiet;
+                }
+                Stage::Quiet => {
+                    if self.cursor >= self.moves.len() {
+                        self.stage = Stage::Done;
+                        continue;
+                    }
+
+                    let mut best_index = self.cursor;
+                    let mut best_score = quiet_score(self.moves[self.cursor]);
+                    for index in self.cursor + 1..self.moves.len() {
+                        let score = quiet_score(self.moves[index]);
+                        if score > best_score {
+                            best_score = score;
+                            best_index = index;
+                        }
+                    }
+                    self.moves.swap(self.cursor, best_index);
+                    let mv = self.moves[self.cursor];
+                    self.cursor += 1;
+                    return Some(mv);
                 }
                 Stage::Done => return None,
             }
@@ -191,6 +288,37 @@ mod tests {
         let mut picker = MovePicker::new(&mut moves, None, [Some(killer), None]);
 
         assert_eq!(picker.next(&position), Some(killer));
+    }
+
+    #[test]
+    fn scored_quiets_are_selected_lazily_after_killers() {
+        let position = Position::startpos();
+        let original = position.legal_moves();
+        let preferred = original.as_slice()[original.len() - 1];
+        let mut moves = original.clone();
+        let mut picker = MovePicker::new(&mut moves, None, [None; 2]);
+
+        let selected = picker.next_scored(&position, |mv| i32::from(mv == preferred));
+        assert_eq!(selected, Some(preferred));
+    }
+
+    #[test]
+    fn zero_quiet_scores_preserve_accepted_generator_order() {
+        let position = Position::startpos();
+        let original = position.legal_moves();
+        let mut default_moves = original.clone();
+        let mut scored_moves = original.clone();
+        let mut default_picker = MovePicker::new(&mut default_moves, None, [None; 2]);
+        let mut scored_picker = MovePicker::new(&mut scored_moves, None, [None; 2]);
+
+        loop {
+            let expected = default_picker.next(&position);
+            let actual = scored_picker.next_scored(&position, |_| 0);
+            assert_eq!(actual, expected);
+            if expected.is_none() {
+                break;
+            }
+        }
     }
 
     #[test]

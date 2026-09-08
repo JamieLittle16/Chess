@@ -1,0 +1,159 @@
+name: M6 context history equal-nodes probe
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  equal-nodes:
+    if: github.head_ref == 'm6/context-history-screen-v1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Strict semantics-neutral substrate gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+
+      - name: Build exact current-main reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/bin .qualification/context-history
+          git fetch --quiet --depth=1 origin 0b741a2d7f3977e525bff55819300ed0e2eaddcb
+          git worktree add --detach /tmp/chess-reference 0b741a2d7f3977e525bff55819300ed0e2eaddcb
+          cargo build --release -p chess-uci --manifest-path /tmp/chess-reference/Cargo.toml
+          cp /tmp/chess-reference/target/release/chess-uci .qualification/bin/reference
+          chmod +x .qualification/bin/reference
+          sha256sum .qualification/bin/reference \
+            | tee .qualification/context-history/reference.sha256
+
+      - name: Apply auditable context-history candidate patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/apply_context_history_probe.py
+          cargo fmt --all
+          git diff --check
+          git diff -- crates/chess-search/src/lib.rs crates/chess-search/src/root_analysis.rs \
+            > .qualification/context-history/search-integration.patch
+          test -s .qualification/context-history/search-integration.patch
+          sha256sum scripts/apply_context_history_probe.py \
+            > .qualification/context-history/patcher.sha256
+          sha256sum .qualification/context-history/search-integration.patch \
+            > .qualification/context-history/search-integration.sha256
+
+      - name: Strict patched candidate gate and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          # Search ordering is the experiment, so the pinned production benchmark signature is
+          # expected to move. Keep every other workspace release test, then separately require the
+          # benchmark suite itself to remain deterministic under the candidate policy.
+          cargo test --workspace --release --exclude chess-bench
+          cargo test -p chess-bench --release tests::suite_is_deterministic_within_the_same_build
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/bin/candidate
+          chmod +x .qualification/bin/candidate
+          sha256sum .qualification/bin/candidate \
+            | tee .qualification/context-history/candidate.sha256
+
+      - name: Reproduce certified 5000-root M6 opening suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip' \
+            --output /tmp/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/UHO_Lichess_4852_v1.epd.zip' \
+            | sha256sum --check --strict
+          mkdir -p .qualification/m6-openings
+          python scripts/build_m6_opening_suite.py \
+            --archive /tmp/UHO_Lichess_4852_v1.epd.zip \
+            --output-dir .qualification/m6-openings \
+            | tee .qualification/m6-openings/derivation.log
+          OPENINGS=.qualification/m6-openings/m6-uho-lichess-5000-v1.epd
+          test "$(wc -l < "$OPENINGS")" = '5000'
+          echo '5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e  .qualification/m6-openings/m6-uho-lichess-5000-v1.epd' \
+            | sha256sum --check --strict
+
+      - name: Build pinned Fastchess 1.8.2-alpha
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = 'f618e34540f94f4719ad3817950618dabe441318'
+          make -C .qualification/fastchess-src -j2
+          test -x .qualification/fastchess-src/fastchess
+
+      - name: Run paired 100-game 25k-node screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/context-history/match
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/.qualification/bin/candidate" name=context-history nodes=25000 option.Hash=32 \
+            -engine cmd="$PWD/.qualification/bin/reference" name=classical-main nodes=25000 option.Hash=32 \
+            -openings file="$PWD/.qualification/m6-openings/m6-uho-lichess-5000-v1.epd" format=epd order=random \
+            -srand 20261123 \
+            -rounds 50 -repeat -concurrency 1 -maxmoves 300 \
+            -ratinginterval 20 \
+            -pgnout file=.qualification/context-history/match/games.pgn notation=uci append=false nodes=true nps=true \
+            -log file=.qualification/context-history/match/uci.log level=info engine=true append=false \
+            | tee .qualification/context-history/match/fastchess.stdout.log
+
+      - name: Record immutable experiment identity
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/context-history
+          cat > .qualification/context-history/evidence.txt <<EOF
+          purpose=main-plus-one-ply-continuation-history equal-search-work screen
+          production_base=0b741a2d7f3977e525bff55819300ed0e2eaddcb
+          candidate=side-specific main history + one-ply continuation history
+          history_training=scout nodes only; cutoff +bonus; fail-low -bonus/2
+          history_gravity_limit=16384
+          max_update=2048
+          nodes_per_move=25000
+          paired_games=100
+          opening_suite=m6-uho-lichess-5000-v1
+          opening_sha256=5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e
+          seed=20261123
+          hash_mib=32
+          concurrency=1
+          maxmoves=300
+          fastchess_commit=f618e34540f94f4719ad3817950618dabe441318
+          EOF
+          git rev-parse HEAD > .qualification/context-history/checkout-head.txt
+
+      - name: Upload complete context-history evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m6-context-history-equal-nodes-${{ github.sha }}
+          path: |
+            .qualification/context-history/
+            .qualification/m6-openings/derivation.log
+          retention-days: 30
