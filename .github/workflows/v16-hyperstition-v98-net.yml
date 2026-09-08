@@ -1,4 +1,4 @@
-name: V16 Hyperstition v98 network
+name: V16 Hyperstition network frontier
 
 on:
   pull_request:
@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  qualify-v98:
+  qualify-frontier:
     if: github.head_ref == 'v16/hyperstition-v98-net'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -16,7 +16,6 @@ jobs:
       RUSTFLAGS: -C target-cpu=x86-64-v3
       V92_URL: https://github.com/cosmobobak/viridithas-networks/releases/download/v92/hyperstition-b400.nnue.zst
       V92_RAW_SHA256: 36bcc6b3354ecbdb88fb95a341e494558b052223143f38ff6e6387aed99ab193
-      V98_URL: https://github.com/cosmobobak/viridithas-networks/releases/download/v98/falke-b200.nnue.zst
       RAW_BYTES: '50616896'
       FASTCHESS_COMMIT: f618e34540f94f4719ad3817950618dabe441318
       OPENING_SHA256: 5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e
@@ -40,25 +39,54 @@ jobs:
           cargo clippy --workspace --all-targets --all-features -- -D warnings
           cargo test --workspace --all-features --release
 
-      - name: Fetch v92 and v98 networks and prove raw-layout compatibility
+      - name: Sweep v92-v100 raw layouts and select newest byte-compatible net
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p .qualification/v98
-          curl --fail --location --retry 5 "$V92_URL" -o .qualification/v98/v92.nnue.zst
-          curl --fail --location --retry 5 "$V98_URL" -o .qualification/v98/v98.nnue.zst
+          mkdir -p .qualification/frontier
           if ! command -v zstd >/dev/null 2>&1; then
             sudo apt-get update -qq
             sudo apt-get install -y zstd
           fi
-          zstd -d -f .qualification/v98/v92.nnue.zst -o .qualification/v98/v92.nnue
-          zstd -d -f .qualification/v98/v98.nnue.zst -o .qualification/v98/v98.nnue
-          test "$(stat -c%s .qualification/v98/v92.nnue)" = "$RAW_BYTES"
-          test "$(stat -c%s .qualification/v98/v98.nnue)" = "$RAW_BYTES"
-          echo "$V92_RAW_SHA256  .qualification/v98/v92.nnue" | sha256sum --check --strict
-          sha256sum .qualification/v98/v92.nnue.zst .qualification/v98/v92.nnue \
-            .qualification/v98/v98.nnue.zst .qualification/v98/v98.nnue \
-            | tee .qualification/v98/networks.sha256
+          cat > .qualification/frontier/assets.tsv <<'EOF'
+          v92	hyperstition-b400.nnue.zst	https://github.com/cosmobobak/viridithas-networks/releases/download/v92/hyperstition-b400.nnue.zst
+          v94	voyager-b800.nnue.zst	https://github.com/cosmobobak/viridithas-networks/releases/download/v94/voyager-b800.nnue.zst
+          v95	temperance-b200.nnue.zst	https://github.com/cosmobobak/viridithas-networks/releases/download/v95/temperance-b200.nnue.zst
+          v96	perseverance-b200.nnue.zst	https://github.com/cosmobobak/viridithas-networks/releases/download/v96/perseverance-b200.nnue.zst
+          v97	kolibri-b800.nnue.zst	https://github.com/cosmobobak/viridithas-networks/releases/download/v97/kolibri-b800.nnue.zst
+          v98	falke-b200.nnue.zst	https://github.com/cosmobobak/viridithas-networks/releases/download/v98/falke-b200.nnue.zst
+          v99	delenda-b800.nnue.zst	https://github.com/cosmobobak/viridithas-networks/releases/download/v99/delenda-b800.nnue.zst
+          v100	eleison-b800.nnue.zst	https://github.com/cosmobobak/viridithas-networks/releases/download/v100/eleison-b800.nnue.zst
+          EOF
+          : > .qualification/frontier/layouts.tsv
+          while IFS=$'\t' read -r tag asset url; do
+            curl --fail --location --retry 5 "$url" -o ".qualification/frontier/$tag.nnue.zst"
+            zstd -d -f ".qualification/frontier/$tag.nnue.zst" -o ".qualification/frontier/$tag.nnue"
+            compressed_bytes=$(stat -c%s ".qualification/frontier/$tag.nnue.zst")
+            raw_bytes=$(stat -c%s ".qualification/frontier/$tag.nnue")
+            compressed_sha=$(sha256sum ".qualification/frontier/$tag.nnue.zst" | cut -d' ' -f1)
+            raw_sha=$(sha256sum ".qualification/frontier/$tag.nnue" | cut -d' ' -f1)
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$tag" "$asset" "$compressed_bytes" "$raw_bytes" "$compressed_sha" "$raw_sha" \
+              | tee -a .qualification/frontier/layouts.tsv
+          done < .qualification/frontier/assets.tsv
+          echo "$V92_RAW_SHA256  .qualification/frontier/v92.nnue" | sha256sum --check --strict
+
+          selected=''
+          for tag in v100 v99 v98 v97 v96 v95 v94; do
+            if [ "$(stat -c%s ".qualification/frontier/$tag.nnue")" = "$RAW_BYTES" ]; then
+              selected="$tag"
+              break
+            fi
+          done
+          if [ -z "$selected" ]; then
+            echo 'No newer v92 byte-layout-compatible network found' >&2
+            exit 1
+          fi
+          echo "$selected" | tee .qualification/frontier/selected.txt
+          cp ".qualification/frontier/$selected.nnue" .qualification/frontier/selected.nnue
+          echo "selected=$selected" >> "$GITHUB_ENV"
+          echo "selected network: $selected"
+          cat .qualification/frontier/layouts.tsv
 
       - name: Loader and edge-position compatibility
         shell: bash
@@ -68,8 +96,9 @@ jobs:
           python - <<'PY'
           import subprocess
           from pathlib import Path
-          root=Path('.qualification/v98')
+          root=Path('.qualification/frontier')
           exe=Path('target/release/examples/hyperstition_eval')
+          selected=(root/'selected.txt').read_text().strip()
           fens=[
             'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
             'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1',
@@ -81,11 +110,12 @@ jobs:
           rows=[]
           for fen in fens:
               vals=[]
-              for name in ('v92','v98'):
-                  cp=subprocess.run([str(exe),str(root/f'{name}.nnue'),fen],text=True,capture_output=True,check=True)
+              for path in (root/'v92.nnue',root/'selected.nnue'):
+                  cp=subprocess.run([str(exe),str(path),fen],text=True,capture_output=True,check=True)
                   vals.append(int(cp.stdout.strip()))
               rows.append((vals[0],vals[1],fen))
           (root/'loader-smoke.tsv').write_text('\n'.join(f'{a}\t{b}\t{fen}' for a,b,fen in rows)+'\n')
+          print('selected',selected)
           print((root/'loader-smoke.tsv').read_text())
           PY
 
@@ -99,9 +129,9 @@ jobs:
           cargo clippy --workspace --all-targets --all-features -- -D warnings
           cargo test --workspace --all-features --release
           cargo build --release -p chess-uci
-          cp target/release/chess-uci .qualification/v98/engine
-          chmod +x .qualification/v98/engine
-          sha256sum .qualification/v98/engine > .qualification/v98/engine.sha256
+          cp target/release/chess-uci .qualification/frontier/engine
+          chmod +x .qualification/frontier/engine
+          sha256sum .qualification/frontier/engine > .qualification/frontier/engine.sha256
 
       - name: Reproduce certified 5000-root opening suite
         shell: bash
@@ -110,16 +140,12 @@ jobs:
           curl --fail --location --retry 5 \
             'https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip' \
             --output /tmp/UHO_Lichess_4852_v1.epd.zip
-          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/UHO_Lichess_4852_v1.epd.zip' \
-            | sha256sum --check --strict
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/UHO_Lichess_4852_v1.epd.zip' | sha256sum --check --strict
           mkdir -p .qualification/m6-openings
-          python scripts/build_m6_opening_suite.py \
-            --archive /tmp/UHO_Lichess_4852_v1.epd.zip \
-            --output-dir .qualification/m6-openings \
+          python scripts/build_m6_opening_suite.py --archive /tmp/UHO_Lichess_4852_v1.epd.zip --output-dir .qualification/m6-openings \
             | tee .qualification/m6-openings/derivation.log
           test "$(wc -l < .qualification/m6-openings/m6-uho-lichess-5000-v1.epd)" = '5000'
-          echo "$OPENING_SHA256  .qualification/m6-openings/m6-uho-lichess-5000-v1.epd" \
-            | sha256sum --check --strict
+          echo "$OPENING_SHA256  .qualification/m6-openings/m6-uho-lichess-5000-v1.epd" | sha256sum --check --strict
 
       - name: Build pinned Fastchess
         shell: bash
@@ -134,65 +160,58 @@ jobs:
         run: |
           set -euo pipefail
           ROOT="$PWD"
-          mkdir -p .qualification/v98/launchers
-          cat > .qualification/v98/launchers/v92.sh <<EOF
+          mkdir -p .qualification/frontier/launchers
+          cat > .qualification/frontier/launchers/v92.sh <<EOF
           #!/usr/bin/env bash
           unset CHESS_GESTALT_NETWORK
-          export CHESS_HYPERSTITION_NETWORK='$ROOT/.qualification/v98/v92.nnue'
-          exec '$ROOT/.qualification/v98/engine'
+          export CHESS_HYPERSTITION_NETWORK='$ROOT/.qualification/frontier/v92.nnue'
+          exec '$ROOT/.qualification/frontier/engine'
           EOF
-          cat > .qualification/v98/launchers/v98.sh <<EOF
+          cat > .qualification/frontier/launchers/newest.sh <<EOF
           #!/usr/bin/env bash
           unset CHESS_GESTALT_NETWORK
-          export CHESS_HYPERSTITION_NETWORK='$ROOT/.qualification/v98/v98.nnue'
-          exec '$ROOT/.qualification/v98/engine'
+          export CHESS_HYPERSTITION_NETWORK='$ROOT/.qualification/frontier/selected.nnue'
+          exec '$ROOT/.qualification/frontier/engine'
           EOF
-          chmod +x .qualification/v98/launchers/*.sh
+          chmod +x .qualification/frontier/launchers/*.sh
 
       - name: UCI smoke both networks
         shell: bash
         run: |
           set -euo pipefail
-          for NAME in v92 v98; do
-            {
-              printf 'uci\n'
-              printf 'isready\n'
-              printf 'position startpos\n'
-              printf 'go nodes 1000\n'
-              printf 'quit\n'
-            } | ".qualification/v98/launchers/$NAME.sh" | tee ".qualification/v98/$NAME-smoke.txt"
-            grep -q '^bestmove ' ".qualification/v98/$NAME-smoke.txt"
+          for NAME in v92 newest; do
+            { printf 'uci\n'; printf 'isready\n'; printf 'position startpos\n'; printf 'go nodes 1000\n'; printf 'quit\n'; } \
+              | ".qualification/frontier/launchers/$NAME.sh" | tee ".qualification/frontier/$NAME-smoke.txt"
+            grep -q '^bestmove ' ".qualification/frontier/$NAME-smoke.txt"
           done
 
-      - name: Run paired 100-game 25k-node v98-v92 screen
+      - name: Run paired 100-game 25k-node newest-v92 screen
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p .qualification/v98/equal-nodes
+          mkdir -p .qualification/frontier/equal-nodes
           .qualification/fastchess-src/fastchess \
-            -engine cmd="$PWD/.qualification/v98/launchers/v98.sh" name=falke-v98 nodes=25000 option.Hash=32 \
-            -engine cmd="$PWD/.qualification/v98/launchers/v92.sh" name=hyperstition-v92 nodes=25000 option.Hash=32 \
+            -engine cmd="$PWD/.qualification/frontier/launchers/newest.sh" name="$selected" nodes=25000 option.Hash=32 \
+            -engine cmd="$PWD/.qualification/frontier/launchers/v92.sh" name=hyperstition-v92 nodes=25000 option.Hash=32 \
             -openings file="$PWD/.qualification/m6-openings/m6-uho-lichess-5000-v1.epd" format=epd order=random \
-            -srand 20260909 \
-            -rounds 50 -repeat -concurrency 1 -maxmoves 300 -ratinginterval 20 \
-            -pgnout file=.qualification/v98/equal-nodes/games.pgn notation=uci append=false nodes=true nps=true \
-            -log file=.qualification/v98/equal-nodes/uci.log level=info engine=true append=false \
-            | tee .qualification/v98/equal-nodes/fastchess.stdout.log
+            -srand 20260909 -rounds 50 -repeat -concurrency 1 -maxmoves 300 -ratinginterval 20 \
+            -pgnout file=.qualification/frontier/equal-nodes/games.pgn notation=uci append=false nodes=true nps=true \
+            -log file=.qualification/frontier/equal-nodes/uci.log level=info engine=true append=false \
+            | tee .qualification/frontier/equal-nodes/fastchess.stdout.log
 
-      - name: Run paired 100-game 1+0.01 v98-v92 screen
+      - name: Run paired 100-game 1+0.01 newest-v92 screen
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p .qualification/v98/equal-time
+          mkdir -p .qualification/frontier/equal-time
           .qualification/fastchess-src/fastchess \
-            -engine cmd="$PWD/.qualification/v98/launchers/v98.sh" name=falke-v98 tc=1+0.01 option.Hash=32 \
-            -engine cmd="$PWD/.qualification/v98/launchers/v92.sh" name=hyperstition-v92 tc=1+0.01 option.Hash=32 \
+            -engine cmd="$PWD/.qualification/frontier/launchers/newest.sh" name="$selected" tc=1+0.01 option.Hash=32 \
+            -engine cmd="$PWD/.qualification/frontier/launchers/v92.sh" name=hyperstition-v92 tc=1+0.01 option.Hash=32 \
             -openings file="$PWD/.qualification/m6-openings/m6-uho-lichess-5000-v1.epd" format=epd order=random \
-            -srand 20260910 \
-            -rounds 50 -repeat -concurrency 1 -maxmoves 300 -ratinginterval 20 \
-            -pgnout file=.qualification/v98/equal-time/games.pgn notation=uci append=false nodes=true nps=true \
-            -log file=.qualification/v98/equal-time/uci.log level=info engine=true append=false \
-            | tee .qualification/v98/equal-time/fastchess.stdout.log
+            -srand 20260910 -rounds 50 -repeat -concurrency 1 -maxmoves 300 -ratinginterval 20 \
+            -pgnout file=.qualification/frontier/equal-time/games.pgn notation=uci append=false nodes=true nps=true \
+            -log file=.qualification/frontier/equal-time/uci.log level=info engine=true append=false \
+            | tee .qualification/frontier/equal-time/fastchess.stdout.log
 
       - name: Record immutable identity
         if: always()
@@ -203,27 +222,28 @@ jobs:
             echo "head=$(git rev-parse HEAD)"
             echo "compile_target=x86-64-v3"
             echo "architecture=Little Gambit materialized Hyperstition runtime"
-            echo "v92=$V92_URL"
-            echo "v98=$V98_URL"
             echo "raw_bytes_expected=$RAW_BYTES"
+            echo "selected=${selected:-none}"
             echo "search_semantics=identical binary; network bytes only"
             echo "nodes_seed=20260909"
             echo "time_seed=20260910"
             echo "fastchess_commit=$FASTCHESS_COMMIT"
-          } > .qualification/v98/evidence.txt
+          } > .qualification/frontier/evidence.txt
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: v16-hyperstition-v98-${{ github.sha }}
+          name: v16-hyperstition-frontier-${{ github.sha }}
           path: |
-            .qualification/v98/networks.sha256
-            .qualification/v98/loader-smoke.tsv
-            .qualification/v98/engine.sha256
-            .qualification/v98/*-smoke.txt
-            .qualification/v98/evidence.txt
-            .qualification/v98/equal-nodes/
-            .qualification/v98/equal-time/
+            .qualification/frontier/assets.tsv
+            .qualification/frontier/layouts.tsv
+            .qualification/frontier/selected.txt
+            .qualification/frontier/loader-smoke.tsv
+            .qualification/frontier/engine.sha256
+            .qualification/frontier/*-smoke.txt
+            .qualification/frontier/evidence.txt
+            .qualification/frontier/equal-nodes/
+            .qualification/frontier/equal-time/
             .qualification/m6-openings/derivation.log
           if-no-files-found: warn
           retention-days: 30
