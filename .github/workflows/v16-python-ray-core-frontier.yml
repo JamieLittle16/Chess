@@ -1,0 +1,160 @@
+name: V16 Python slider-ray core frontier
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v16/python-ray-core-frontier]
+    paths:
+      - '.github/workflows/v16-python-ray-core-frontier.yml'
+      - 'scripts/patch_v16_python_ray_core.py'
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  qualify:
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [attack, movegen, all]
+    name: ray-${{ matrix.variant }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Download exact final V15
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V15-FINAL-725be3e8595d1e54b1f12e11f2b9d92f1e415ebc
+          path: final-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34298586524
+
+      - name: Materialize ray variant
+        shell: bash
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          ZIP=$(find final-artifact -type f -name Little-Gambit-V15.zip -print -quit); test -n "$ZIP"
+          echo '81e22344bf9a6b41f16e32f29f93c0b6074afe63e4fd51002a537e6a091f2852  '"$ZIP" | sha256sum --check --strict
+          rm -rf /tmp/control /tmp/candidate results && mkdir /tmp/control /tmp/candidate results
+          unzip -q "$ZIP" -d /tmp/control
+          cp -a /tmp/control/. /tmp/candidate/
+          python scripts/patch_v16_python_ray_core.py /tmp/candidate/experiments/numba_core.py "$VARIANT" | tee results/patch.txt
+          python -m py_compile /tmp/control/agent.py /tmp/control/experiments/*.py /tmp/candidate/agent.py /tmp/candidate/experiments/*.py
+          grep -q 'SLIDER_RAYS' /tmp/candidate/experiments/numba_core.py
+
+      - name: Build deterministic legal-position corpus
+        run: |
+          python - <<'PY'
+          import chess, random
+          rng=random.Random(0x16A7)
+          out=[]
+          for game in range(28):
+              b=chess.Board()
+              for ply in range(55):
+                  if b.is_game_over(claim_draw=False): break
+                  legal=list(b.legal_moves)
+                  if not legal: break
+                  b.push(legal[rng.randrange(len(legal))])
+                  if ply >= 4 and (ply % 4 == 0 or rng.random() < 0.18):
+                      out.append(b.fen())
+          # Add geometry-heavy and special-rule positions.
+          out += [
+              chess.STARTING_FEN,
+              'r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1',
+              '8/8/8/3pP3/8/8/8/4K2k w - d6 0 1',
+              '4k3/P7/8/8/8/8/7p/4K3 w - - 0 1',
+          ]
+          assert len(out) >= 300, len(out)
+          open('/tmp/ray-fens.txt','w').write('\n'.join(out)+'\n')
+          print('POSITIONS',len(out))
+          PY
+
+      - name: Exact legal-move order parity on random positions
+        shell: bash
+        run: |
+          set -euo pipefail
+          check() {
+            local root="$1" out="$2"
+            (cd "$root" && timeout 180s python - <<'PY' > "$out")
+          import chess, numpy as np
+          from experiments.numba_core import encode_position, generate_legal_moves_into, MAX_MOVES
+          for idx,fen in enumerate(open('/tmp/ray-fens.txt')):
+              b=chess.Board(fen.strip()); e=encode_position(b)
+              pseudo=np.empty(MAX_MOVES,dtype=np.int32); legal=np.empty(MAX_MOVES,dtype=np.int32)
+              n=generate_legal_moves_into(e.board,e.side,e.castling,e.ep_square,pseudo,legal)
+              ours=','.join(str(int(x)) for x in legal[:n])
+              # Independent set check against python-chess as well as baseline-order comparison.
+              def uci(code):
+                  fr=code & 63; to=(code>>6)&63; pr=(code>>12)&7
+                  promo='' if pr==0 else {2:'n',3:'b',4:'r',5:'q'}[pr]
+                  return chess.square_name(fr)+chess.square_name(to)+promo
+              ours_set={uci(int(x)) for x in legal[:n]}
+              ref={m.uci() for m in b.legal_moves}
+              if ours_set != ref:
+                  print('LEGALITY_MISMATCH',idx,fen.strip(),sorted(ours_set-ref),sorted(ref-ours_set))
+                  raise SystemExit(2)
+              print(idx,ours)
+          PY
+          }
+          check /tmp/control /tmp/control-moves.txt
+          check /tmp/candidate /tmp/candidate-moves.txt
+          diff -u /tmp/control-moves.txt /tmp/candidate-moves.txt | tee results/move-order.diff
+          echo 'MOVE_ORDER_PARITY true' | tee results/move-order.txt
+
+      - name: Exact fixed-node search identity and throughput
+        shell: bash
+        run: |
+          set -euo pipefail
+          bench() {
+            local root="$1" out="$2"
+            (cd "$root" && timeout 240s env PYTHONPATH="$root" python - <<'PY' > "$out" 2>&1)
+          import statistics,time,chess,numpy as np
+          import agent
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful_timed_cached
+          fens=[
+            chess.STARTING_FEN,
+            'r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1',
+            'r2q1rk1/pp2bppp/2n1pn2/2pp4/8/1PN1PN2/PBPP1PPP/R2QKB1R w KQ - 2 9',
+            '2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23',
+          ]
+          rows=[]
+          for fen in fens:
+              b=chess.Board(fen); e=encode_position(b)
+              agent._HASH_KEYS.fill(np.uint64(0)); agent._HASH_MOVES.fill(np.int32(-1)); agent._TT_TABLE.fill(np.uint64(0)); h=np.empty(0,dtype=np.uint64)
+              t=time.perf_counter(); r=iterative_search_stateful_timed_cached(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,60000,60000,180000,agent._HASH_KEYS,agent._HASH_MOVES,agent._TT_TABLE); dt=time.perf_counter()-t
+              sig=tuple(map(int,r)); rate=int(r[3])/dt; rows.append((sig,rate)); print('CASE',sig,dt,rate)
+          print('SIGNATURES',repr([x[0] for x in rows])); print('MEDIAN_NPS',statistics.median(x[1] for x in rows))
+          PY
+          }
+          bench /tmp/control "$GITHUB_WORKSPACE/results/control-search.txt"
+          bench /tmp/candidate "$GITHUB_WORKSPACE/results/candidate-search.txt"
+          cd "$GITHUB_WORKSPACE"
+          python - <<'PY' | tee results/search-summary.txt
+          import ast,re
+          from pathlib import Path
+          a=Path('results/control-search.txt').read_text(); b=Path('results/candidate-search.txt').read_text()
+          sig=lambda x:ast.literal_eval(re.search(r'^SIGNATURES (.*)$',x,re.M).group(1))
+          n=lambda x:float(re.search(r'^MEDIAN_NPS ([0-9.eE+-]+)$',x,re.M).group(1))
+          na,nb=n(a),n(b)
+          print('FIXED_NODE_SIGNATURE_EQUAL',sig(a)==sig(b)); print('CONTROL_NPS',na); print('CANDIDATE_NPS',nb); print('NPS_RATIO',nb/na); print('NPS_GAIN_PCT',(nb/na-1)*100)
+          assert sig(a)==sig(b)
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v16-ray-${{ matrix.variant }}-${{ github.sha }}
+          path: results/
+          retention-days: 14
