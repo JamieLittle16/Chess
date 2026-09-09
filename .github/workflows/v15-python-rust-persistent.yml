@@ -15,6 +15,7 @@ permissions:
 env:
   RUSTFLAGS: -C target-cpu=native
 
+# Calibration v2: preserve the opening root and full UCI move history for Rust.
 jobs:
   calibrate:
     runs-on: ubuntu-24.04
