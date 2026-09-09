@@ -1,0 +1,126 @@
+name: V15 Python OPT2 fixed-node comparison
+
+on:
+  push:
+    branches:
+      - hotfix/v15-python-startup-cache-20260909
+    paths:
+      - .github/workflows/v15-python-opt2-fixednode.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact final V15
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V15-FINAL-725be3e8595d1e54b1f12e11f2b9d92f1e415ebc
+          path: final-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34298586524
+      - name: Prepare exact and OPT2 source trees
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find final-artifact -type f -name Little-Gambit-V15.zip -print -quit); test -n "$ZIP"
+          rm -rf /tmp/v15-opt3 /tmp/v15-opt2 results
+          mkdir /tmp/v15-opt3 /tmp/v15-opt2 results
+          unzip -q "$ZIP" -d /tmp/v15-opt3
+          cp -a /tmp/v15-opt3/. /tmp/v15-opt2/
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/v15-opt2/agent.py'); s=p.read_text(); needle='import time\n'
+          replacement='import os\nimport time\n\n# Source-only startup hotfix: preserve chess logic while reducing LLVM compile latency.\nos.environ.setdefault("NUMBA_OPT", "2")\n'
+          assert s.count(needle)==1
+          p.write_text(s.replace(needle,replacement,1))
+          PY
+          find /tmp/v15-opt3 /tmp/v15-opt2 -type d -name __pycache__ -prune -exec rm -rf {} +
+
+      - name: Exact V15 fixed-node benchmark
+        shell: bash
+        run: |
+          cd /tmp/v15-opt3
+          timeout 180s env PYTHONPATH=/tmp/v15-opt3 python - <<'PY' | tee "$GITHUB_WORKSPACE/results/opt3.txt"
+          import statistics,time,chess,numpy as np
+          t0=time.perf_counter(); import agent
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful_timed_cached
+          print('IMPORT_SECONDS',time.perf_counter()-t0)
+          fens=[
+            chess.STARTING_FEN,
+            'r2q1rk1/pp2bppp/2n1pn2/2pp4/8/1PN1PN2/PBPP1PPP/R2QKB1R w KQ - 2 9',
+            '2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23',
+            '8/5pk1/6p1/3p4/3P4/5P2/5KP1/8 w - - 0 40',
+          ]
+          rates=[]; signatures=[]
+          for fen in fens:
+              b=chess.Board(fen); e=encode_position(b)
+              agent._HASH_KEYS.fill(np.uint64(0)); agent._HASH_MOVES.fill(np.int32(-1)); agent._TT_TABLE.fill(np.uint64(0))
+              h=np.empty(0,dtype=np.uint64)
+              t=time.perf_counter()
+              result=iterative_search_stateful_timed_cached(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,60000,60000,300000,agent._HASH_KEYS,agent._HASH_MOVES,agent._TT_TABLE)
+              elapsed=time.perf_counter()-t; nodes=int(result[3]); rate=nodes/elapsed; rates.append(rate); signatures.append(tuple(map(int,result)))
+              print('CASE',nodes,elapsed,rate,tuple(map(int,result)))
+          print('MEDIAN_NPS',statistics.median(rates)); print('SIGNATURES',signatures)
+          PY
+
+      - name: OPT2 fixed-node benchmark
+        shell: bash
+        run: |
+          cd /tmp/v15-opt2
+          timeout 180s env PYTHONPATH=/tmp/v15-opt2 python - <<'PY' | tee "$GITHUB_WORKSPACE/results/opt2.txt"
+          import statistics,time,chess,numpy as np
+          t0=time.perf_counter(); import agent
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful_timed_cached
+          print('IMPORT_SECONDS',time.perf_counter()-t0)
+          fens=[
+            chess.STARTING_FEN,
+            'r2q1rk1/pp2bppp/2n1pn2/2pp4/8/1PN1PN2/PBPP1PPP/R2QKB1R w KQ - 2 9',
+            '2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23',
+            '8/5pk1/6p1/3p4/3P4/5P2/5KP1/8 w - - 0 40',
+          ]
+          rates=[]; signatures=[]
+          for fen in fens:
+              b=chess.Board(fen); e=encode_position(b)
+              agent._HASH_KEYS.fill(np.uint64(0)); agent._HASH_MOVES.fill(np.int32(-1)); agent._TT_TABLE.fill(np.uint64(0))
+              h=np.empty(0,dtype=np.uint64)
+              t=time.perf_counter()
+              result=iterative_search_stateful_timed_cached(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,60000,60000,300000,agent._HASH_KEYS,agent._HASH_MOVES,agent._TT_TABLE)
+              elapsed=time.perf_counter()-t; nodes=int(result[3]); rate=nodes/elapsed; rates.append(rate); signatures.append(tuple(map(int,result)))
+              print('CASE',nodes,elapsed,rate,tuple(map(int,result)))
+          print('MEDIAN_NPS',statistics.median(rates)); print('SIGNATURES',signatures)
+          PY
+
+      - name: Compare
+        shell: bash
+        run: |
+          python - <<'PY' | tee results/summary.txt
+          import ast,re
+          from pathlib import Path
+          a=Path('results/opt3.txt').read_text(); b=Path('results/opt2.txt').read_text()
+          def val(text,key): return float(re.search(rf'^{key} ([0-9.eE+-]+)$',text,re.M).group(1))
+          def sig(text): return ast.literal_eval(re.search(r'^SIGNATURES (.*)$',text,re.M).group(1))
+          i3,i2=val(a,'IMPORT_SECONDS'),val(b,'IMPORT_SECONDS'); n3,n2=val(a,'MEDIAN_NPS'),val(b,'MEDIAN_NPS')
+          print('OPT3_IMPORT_SECONDS',i3); print('OPT2_IMPORT_SECONDS',i2); print('IMPORT_RATIO',i2/i3)
+          print('OPT3_MEDIAN_NPS',n3); print('OPT2_MEDIAN_NPS',n2); print('NPS_RATIO',n2/n3)
+          print('FIXED_NODE_SIGNATURE_EQUAL',sig(a)==sig(b))
+          assert sig(a)==sig(b)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v15-opt2-fixednode-${{ github.sha }}
+          path: results/
+          retention-days: 7
