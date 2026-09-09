@@ -1,0 +1,54 @@
+name: Core external chess-rule oracle
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/chess-core/**'
+      - 'scripts/core_oracle_diff.py'
+      - 'tests/requirements-core-oracle.txt'
+      - '.github/workflows/core-external-oracle.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  differential:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+
+      - name: Create isolated Python oracle environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv .qualification/core-oracle-venv
+          .qualification/core-oracle-venv/bin/python -m pip install --disable-pip-version-check \
+            -r tests/requirements-core-oracle.txt
+
+      - name: Build Rust oracle bridge
+        run: cargo build --release -p chess-core --example oracle_bridge
+
+      - name: Differentially qualify legal moves, transitions and shallow perft
+        shell: bash
+        run: |
+          set -euo pipefail
+          .qualification/core-oracle-venv/bin/python scripts/core_oracle_diff.py \
+            --bridge target/release/examples/oracle_bridge \
+            --positions 512 \
+            --transition-positions 192 \
+            --perft-positions 64 \
+            | tee .qualification/core-oracle-result.txt
+
+      - name: Upload textual evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-external-oracle-${{ github.sha }}
+          path: .qualification/core-oracle-result.txt
+          retention-days: 30
