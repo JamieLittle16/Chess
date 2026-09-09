@@ -78,6 +78,7 @@ The opponent-aware programme in `docs/OPPONENT_EXPLOITATION.md` is a separate la
 - [`docs/STATE_TRANSITIONS.md`](docs/STATE_TRANSITIONS.md) — reversible move-state design and reference-oracle strategy.
 - [`docs/POSITION_IDENTITY.md`](docs/POSITION_IDENTITY.md) — TT identity, repetition identity and deterministic incremental Zobrist hashing.
 - [`docs/PERFT.md`](docs/PERFT.md) — legal-chess reference positions and acceptance gates.
+- [`docs/TESTING.md`](docs/TESTING.md) — standing correctness, search-state, real-network and strength qualification contract.
 - [`docs/REFERENCE_ENGINE.md`](docs/REFERENCE_ENGINE.md) — evaluator, draw-aware alpha-beta, iterative deepening and TT baseline.
 - [`docs/UCI.md`](docs/UCI.md) — supported UCI surface, worker ownership, clocks and transactional history.
 - [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md) — correctness, performance and Elo methodology.
