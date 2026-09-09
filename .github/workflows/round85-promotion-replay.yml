@@ -1,0 +1,145 @@
+name: Round 85 promotion-blunder replay
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [analysis/round85-promotion-replay]
+    paths: ['.github/workflows/round85-promotion-replay.yml']
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  replay:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Download exact V15 and qTT/null-r2 comparison artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V15-FINAL-725be3e8595d1e54b1f12e11f2b9d92f1e415ebc
+          path: v15-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34298586524
+
+      - name: Download qTT/null-r2 OPT2 comparison
+        uses: actions/download-artifact@v4
+        with:
+          name: v16-qtt-null-r2-opt2-0e2a31b97067052539193773bb7e55a6cd61bc16
+          path: null-r2-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34355640348
+
+      - name: Materialize exact engines
+        shell: bash
+        run: |
+          set -euo pipefail
+          V15=$(find v15-artifact -type f -name Little-Gambit-V15.zip -print -quit); test -n "$V15"
+          echo '81e22344bf9a6b41f16e32f29f93c0b6074afe63e4fd51002a537e6a091f2852  '"$V15" | sha256sum --check --strict
+          NULLR2=$(find null-r2-artifact -type f -name 'Little-Gambit-V16-null-r2-opt2.zip' -print -quit); test -n "$NULLR2"
+          rm -rf /tmp/v15 /tmp/clean /tmp/nullr2 results
+          mkdir -p /tmp/v15 /tmp/clean /tmp/nullr2 results
+          unzip -q "$V15" -d /tmp/v15
+          cp -a /tmp/v15/. /tmp/clean/
+          unzip -q "$NULLR2" -d /tmp/nullr2
+          python scripts/patch_v16_python_v15_unified_history.py /tmp/clean/experiments/numba_search.py
+          python scripts/patch_v16_python_full_pruning_oracle.py /tmp/clean/experiments/numba_search.py
+          echo '5d8bba24dad3b9ce7c320d8aa7e813b4f8782809ecfbe095fb0c542ce9251ab8  /tmp/clean/experiments/numba_search.py' | sha256sum --check --strict
+          grep -q 'TT_QDEPTH_BASE = 64' /tmp/nullr2/experiments/numba_search.py
+          sha256sum /tmp/v15/agent.py /tmp/v15/experiments/numba_search.py /tmp/clean/agent.py /tmp/clean/experiments/numba_search.py /tmp/nullr2/agent.py /tmp/nullr2/experiments/numba_search.py | tee results/build-hashes.txt
+
+      - name: Fetch exact Stockfish 19
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz \
+            -o /tmp/stockfish.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  /tmp/stockfish.tar.gz' | sha256sum --check --strict
+          mkdir /tmp/sf && tar -xzf /tmp/stockfish.tar.gz -C /tmp/sf
+          SF=$(find /tmp/sf -type f -name 'stockfish*' -perm -111 -print -quit); test -n "$SF"
+          echo "STOCKFISH=$SF" >> "$GITHUB_ENV"
+
+      - name: Stockfish quantify the two critical decisions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' | tee results/stockfish.txt
+          import chess, chess.engine, json, os
+          sf=chess.engine.SimpleEngine.popen_uci(os.environ['STOCKFISH'])
+          positions=[
+            ('before_33_Re1','2r5/5k2/pB5p/6p1/P3b3/3p3P/1P3P1K/5R2 w - - 0 33','e1'),
+            ('before_34_Rxe4','2r5/5k2/pB5p/6p1/P3b3/7P/1P1p1P1K/4R3 w - - 0 34','e4'),
+          ]
+          played={'before_33_Re1':'f1e1','before_34_Rxe4':'e1e4'}
+          try:
+            for label,fen,_ in positions:
+              b=chess.Board(fen)
+              infos=sf.analyse(b,chess.engine.Limit(nodes=750000),multipv=min(8,b.legal_moves.count()))
+              rows=[]
+              for info in infos:
+                pv=info.get('pv',[]); score=info['score'].pov(b.turn).score(mate_score=100000)
+                rows.append({'move':pv[0].uci() if pv else None,'score_cp':score,'pv':[m.uci() for m in pv[:8]]})
+              pm=chess.Move.from_uci(played[label])
+              restricted=sf.analyse(b,chess.engine.Limit(nodes=750000),root_moves=[pm])
+              pscore=restricted['score'].pov(b.turn).score(mate_score=100000)
+              best=rows[0]['score_cp']; loss=None if best is None or pscore is None else best-pscore
+              print(json.dumps({'position':label,'fen':fen,'top':rows,'played_move':pm.uci(),'played_score_cp':pscore,'played_loss_cp':loss},sort_keys=True))
+          finally:
+            sf.quit()
+          PY
+
+      - name: Replay critical FENs through V15, clean V16, and qTT/null-r2
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' | tee results/python-replay.txt
+          import json,queue,subprocess,sys,threading,time
+          FENS=[
+            ('before_33_Re1','2r5/5k2/pB5p/6p1/P3b3/3p3P/1P3P1K/5R2 w - - 0 33',53400),
+            ('before_34_Rxe4','2r5/5k2/pB5p/6p1/P3b3/7P/1P1p1P1K/4R3 w - - 0 34',49500),
+          ]
+          def run(root,label):
+            p=subprocess.Popen([sys.executable,'tools/v14_agent_runner.py',root],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,bufsize=1)
+            q=queue.Queue(); err=[]
+            def out():
+              for line in p.stdout:q.put(line.rstrip())
+              q.put(None)
+            def er():
+              for line in p.stderr:err.append(line.rstrip())
+            threading.Thread(target=out,daemon=True).start(); threading.Thread(target=er,daemon=True).start()
+            t=time.perf_counter()
+            try: ready=q.get(timeout=95)
+            except queue.Empty:
+              p.kill(); p.wait(); return {'engine':label,'startup':'timeout','stderr':err[-10:]}
+            startup=time.perf_counter()-t
+            rows=[]
+            for name,fen,ms in FENS:
+              p.stdin.write(json.dumps({'reset':True})+'\n');p.stdin.flush(); q.get(timeout=5)
+              t0=time.perf_counter(); p.stdin.write(json.dumps({'fen':fen,'time_left_ms':ms})+'\n');p.stdin.flush()
+              try: response=q.get(timeout=20)
+              except queue.Empty: response=json.dumps({'error':'move-timeout'})
+              dt=time.perf_counter()-t0
+              rows.append({'position':name,'time_left_ms':ms,'elapsed_s':dt,'response':json.loads(response)})
+            p.kill();p.wait(timeout=5)
+            return {'engine':label,'startup_s':startup,'rows':rows,'stderr_tail':err[-10:]}
+          for root,label in [('/tmp/v15','V15'),('/tmp/clean','V16_clean_history_pruning'),('/tmp/nullr2','V16_qTT_null_r2_OPT2')]:
+            print(json.dumps(run(root,label),sort_keys=True))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: round85-promotion-replay-${{ github.sha }}
+          path: results/
+          retention-days: 30
