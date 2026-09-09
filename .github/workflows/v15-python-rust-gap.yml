@@ -1,0 +1,129 @@
+name: V15 Python direct Rust gap probe
+
+on:
+  push:
+    branches:
+      - analysis/v15-python-rust-gap-20260909
+    paths:
+      - scripts/v15_python_rust_gap_gate.py
+      - .github/workflows/v15-python-rust-gap.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  gap:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: full
+            runtime_den: 1
+          - name: half
+            runtime_den: 2
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Download exact packaged Python V14 and H16 student
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - uses: actions/download-artifact@v4
+        with:
+          name: v15-leaf-gestalt-topology-h16-70736f6f056d42aa8ceee37e0b282e4f02d34556
+          path: h16-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34277063353
+
+      - name: Materialize Python H16 plus t2048 candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
+          MODEL=$(find h16-artifact -type f -name gestalt-topology-h16.npz -print -quit); test -n "$MODEL"
+          rm -rf /tmp/python-v15 results; mkdir -p /tmp/python-v15 results
+          unzip -q "$ZIP" -d /tmp/python-v15
+          python scripts/patch_v15_python_presort_once.py /tmp/python-v15/experiments/numba_search.py
+          python scripts/patch_v15_python_scoremeta_hotloop.py /tmp/python-v15/experiments/numba_search.py
+          cp "$MODEL" /tmp/python-v15/experiments/v15_gestalt_h16.npz
+          python scripts/patch_v15_python_leaf_h16_gestalt.py /tmp/python-v15/experiments/numba_search.py --runtime-den ${{ matrix.runtime_den }}
+          python scripts/patch_v15_python_lean_lmr_history_h16.py /tmp/python-v15/experiments/numba_search.py 2048
+          python -m py_compile /tmp/python-v15/agent.py /tmp/python-v15/experiments/*.py scripts/v15_python_rust_gap_gate.py
+
+      - name: Build exact final Rust V15 endpoint
+        shell: bash
+        env:
+          RUSTFLAGS: -C target-cpu=native
+        run: |
+          set -euo pipefail
+          git worktree add --detach /tmp/rust-v15-src 3a6a194d91c32b207397158da5a7af86c9a5404f
+          CARGO_TARGET_DIR=/tmp/rust-v15-target cargo build --release -p chess-uci --manifest-path /tmp/rust-v15-src/Cargo.toml
+          cp /tmp/rust-v15-target/release/chess-uci /tmp/rust-v15
+          chmod +x /tmp/rust-v15
+          /tmp/rust-v15 </dev/null >/dev/null 2>&1 || true
+
+      - name: Download exact certified Rust Gestalt network
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' \
+            --output /tmp/gestalt-b840.nnue
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  /tmp/gestalt-b840.nnue' | sha256sum --check --strict
+
+      - name: Build fresh mirrored opening set
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6; mkdir -p /tmp/m6
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          roots=fresh[3800:3806]
+          assert len(roots)==6
+          Path('/tmp/rust-gap.epd').write_text('\n'.join(roots)+'\n')
+          PY
+
+      - name: Direct 12-game Python versus final Rust probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u scripts/v15_python_rust_gap_gate.py \
+            --python /tmp/python-v15 \
+            --rust /tmp/rust-v15 \
+            --network /tmp/gestalt-b840.nnue \
+            --openings /tmp/rust-gap.epd \
+            --output results/rust-gap.json \
+            --label python-h16-${{ matrix.name }}-lmr2048 \
+            --base-ms 20000 --inc-ms 500 --max-plies 180 \
+            | tee results/rust-gap.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-rust-gap-${{ matrix.name }}-${{ github.sha }}
+          path: results/
+          retention-days: 30
