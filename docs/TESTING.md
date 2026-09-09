@@ -44,6 +44,20 @@ Deterministic multi-root playouts exercise ordinary moves, checks, pins, castlin
 
 The optimized reversible transition therefore does not validate itself.
 
+### External chess-rules oracle
+
+Core changes additionally run a path-triggered differential against pinned `python-chess==1.999` in an isolated virtual environment. `scripts/core_oracle_diff.py` drives the test-only `oracle_bridge` example and compares two independent rules implementations.
+
+The standing qualification uses 512 deterministic positions drawn from curated edge cases and seeded legal playouts. It compares:
+
+- the complete sorted legal-move set on all 512 positions;
+- the exact resulting FEN after every legal move on the first 192 positions, including side to move, castling rights, en-passant target and move clocks;
+- depth-two perft on the first 64 positions.
+
+The first certified execution covered 5,624 cross-implementation queries: 512 move sets, 5,048 legal child transitions and 64 perft roots. The external dependency remains test-only and does not enter the Rust workspace dependency graph or production binaries.
+
+This layer exists because an optimized implementation and an in-repository reference implementation can theoretically share the same misunderstanding of a chess rule. Agreement with a separately maintained rules engine substantially reduces that common-mode risk.
+
 ## 3. Search-state qualification
 
 `crates/chess-search/tests/search_state_qualification.rs` tests invariants that should remain true across search redesigns rather than pinning fragile move-order details.
@@ -52,6 +66,7 @@ Standing cases include:
 
 - interruption at many recursive node boundaries restores the root exactly;
 - a `Searcher` remains reusable after an interrupted search;
+- forced one-entry TT collisions cannot reuse foreign-position data;
 - TT entries cannot override 50-move draw context even though the halfmove clock is excluded from TT identity;
 - repetition identity correctly normalizes irrelevant en-passant metadata;
 - the second occurrence is live while the third occurrence is a draw;
@@ -92,7 +107,7 @@ Changes to chess-core or the incremental Gestalt implementation run the real-net
 
 ### Gestalt search-state certification
 
-Changes to search or evaluation run root-analysis parity plus the search-state qualification suite with `CHESS_GESTALT_NETWORK` enabled. This specifically guards against stale accumulator state after pruning, interruption, root changes or `Searcher` reuse.
+Changes to search, engine orchestration or evaluation run root-analysis parity plus the search-state and engine-orchestration qualification suites with `CHESS_GESTALT_NETWORK` enabled. This specifically guards against stale accumulator state after pruning, interruption, root changes or `Searcher` reuse.
 
 The downloaded network is checksum-pinned and is not retained in repository artifacts.
 
