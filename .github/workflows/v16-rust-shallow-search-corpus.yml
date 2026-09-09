@@ -1,0 +1,84 @@
+name: V16 Rust shallow-search teacher corpus
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [analysis/v16-shallow-search-distill]
+    paths:
+      - '.github/workflows/v16-rust-shallow-search-corpus.yml'
+      - 'tools/label_rust_shallow_search.py'
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  GESTALT_URL: https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue
+  GESTALT_SHA256: 956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6
+
+jobs:
+  label:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download frozen search-decision corpus
+        uses: actions/download-artifact@v4
+        with:
+          name: v16-search-decision-corpus-7fb379ea54f45374469a88b1e2c01f84b3f20f8b
+          path: decision-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34293287037
+      - name: Build exact Rust teacher
+        env:
+          RUSTFLAGS: -C target-cpu=x86-64-v3
+        run: cargo build --release -p chess-uci
+      - name: Download exact Gestalt v85
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/net results
+          curl --fail --location --retry 5 "$GESTALT_URL" -o /tmp/net/gestalt-b840.nnue
+          test "$(stat -c%s /tmp/net/gestalt-b840.nnue)" = '21242944'
+          echo "$GESTALT_SHA256  /tmp/net/gestalt-b840.nnue" | sha256sum --check --strict
+      - name: Label deterministic search-distribution sample
+        shell: bash
+        run: |
+          set -euo pipefail
+          CORPUS=$(find decision-artifact -type f -name decision.jsonl -print -quit); test -n "$CORPUS"
+          python -u tools/label_rust_shallow_search.py \
+            --input "$CORPUS" \
+            --rust-bin "$PWD/target/release/chess-uci" \
+            --gestalt /tmp/net/gestalt-b840.nnue \
+            --output results/rust-shallow-search.jsonl \
+            --nodes 2000 --max-records 12000 \
+            | tee results/label.log
+          test -s results/rust-shallow-search.jsonl
+          sha256sum results/rust-shallow-search.jsonl | tee results/corpus.sha256
+          python - <<'PY'
+          import json
+          from collections import Counter
+          from pathlib import Path
+          rows=[json.loads(x) for x in Path('results/rust-shallow-search.jsonl').read_text().splitlines() if x.strip()]
+          assert len(rows) >= 10000, len(rows)
+          summary={
+              'records':len(rows),
+              'splits':dict(Counter(r.get('split','train') for r in rows)),
+              'kinds':dict(Counter(r.get('kind','unknown') for r in rows)),
+              'node_budget':2000,
+          }
+          Path('results/summary.json').write_text(json.dumps(summary,indent=2,sort_keys=True)+'\n')
+          print(summary)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v16-rust-shallow-search-corpus-${{ github.sha }}
+          path: results/
+          retention-days: 30
