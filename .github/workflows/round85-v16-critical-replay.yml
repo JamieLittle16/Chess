@@ -1,0 +1,130 @@
+name: Round 85 V16 critical replay
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [diagnostic/round85-v16-replay]
+    paths: ['.github/workflows/round85-v16-critical-replay.yml']
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  replay:
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [preclean, clean]
+    name: ${{ matrix.variant }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Download exact tested package
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/art /tmp/engine results
+          mkdir -p /tmp/art /tmp/engine results
+          if [ "$VARIANT" = preclean ]; then
+            gh run download 34359639522 -n v16-python-qTT-full-pruning-8ca7e7ccaba29acff86409b218364411d7e037ef -D /tmp/art
+            ZIP=$(find /tmp/art -type f -name 'Little-Gambit-V16-qTT-pruning.zip' -print -quit)
+            test -n "$ZIP"
+            echo 'e6841b309fa142f2b89465c43ec319e6e050c7ec405ee4415ab74ebcd4e93204  '"$ZIP" | sha256sum --check --strict
+            unzip -q "$ZIP" -d /tmp/engine
+            echo 'dfb39d432659259803c09dbdc70631f46a1fade5bca9569c027c56d1c5ba15f5  /tmp/engine/experiments/numba_search.py' | sha256sum --check --strict
+            grep -q 'TT_QDEPTH_BASE = 64' /tmp/engine/experiments/numba_search.py
+          else
+            gh run download 34368646382 -n v16-python-clean-history-pruning-0dac1ed7543371ae0bdcd354bec9698bd892f87e -D /tmp/art
+            ZIP=$(find /tmp/art -type f -name 'Little-Gambit-V16-CLEAN-history-pruning.zip' -print -quit)
+            test -n "$ZIP"
+            unzip -q "$ZIP" -d /tmp/engine
+            echo '5d8bba24dad3b9ce7c320d8aa7e813b4f8782809ecfbe095fb0c542ce9251ab8  /tmp/engine/experiments/numba_search.py' | sha256sum --check --strict
+            ! grep -q 'TT_QDEPTH_BASE' /tmp/engine/experiments/numba_search.py
+          fi
+          sha256sum /tmp/engine/agent.py /tmp/engine/experiments/numba_search.py | tee results/identity.txt
+
+      - name: Fixed-node replay of the two losing decisions
+        shell: bash
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          python - <<'PY' | tee results/replay.log
+          import json, subprocess, sys
+          from pathlib import Path
+          import chess
+
+          script = Path('tools/v14_fixed_node_arena.py').resolve()
+          engine = Path('/tmp/engine').resolve()
+          proc = subprocess.Popen(
+              [sys.executable, str(script), '--worker', str(engine)],
+              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+              text=True, bufsize=1,
+          )
+          assert proc.stdin and proc.stdout
+
+          positions = [
+              ('before_33_Re1', '2r5/5k2/pB5p/6p1/P3b3/3p3P/1P3P1K/5R2 w - - 0 33'),
+              ('after_33_Re1_d2', '2r5/5k2/pB5p/6p1/P3b3/7P/1P1p1P1K/4R3 w - - 0 34'),
+          ]
+          budgets = (2_000, 10_000, 50_000, 200_000, 1_000_000)
+          rows=[]
+          for label, fen in positions:
+              board=chess.Board(fen)
+              for nodes in budgets:
+                  proc.stdin.write(json.dumps({'fen':fen,'prior':[],'nodes':nodes})+'\n')
+                  proc.stdin.flush()
+                  line=proc.stdout.readline()
+                  if not line:
+                      err=proc.stderr.read()
+                      raise SystemExit(f'worker died rc={proc.poll()} stderr={err}')
+                  out=json.loads(line)
+                  move=chess.Move.from_uci(out['uci'])
+                  assert move in board.legal_moves, (label, out)
+                  row={'variant': '${{ matrix.variant }}','position':label,'nodes_budget':nodes,**out}
+                  rows.append(row)
+                  print(json.dumps(row, sort_keys=True), flush=True)
+          proc.terminate(); proc.wait(timeout=5)
+          Path('results/replay.json').write_text(json.dumps(rows,indent=2,sort_keys=True)+'\n')
+          PY
+
+      - name: Tournament-clock replay on isolated critical roots
+        shell: bash
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          timeout 240s env PYTHONPATH=/tmp/engine OMP_NUM_THREADS=1 python - <<'PY' | tee results/timed.log
+          import json, sys
+          import chess, numpy as np
+          sys.path.insert(0,'/tmp/engine')
+          import agent
+
+          tests=[
+            ('before_33_Re1','2r5/5k2/pB5p/6p1/P3b3/3p3P/1P3P1K/5R2 w - - 0 33',53405),
+            ('after_33_Re1_d2','2r5/5k2/pB5p/6p1/P3b3/7P/1P1p1P1K/4R3 w - - 0 34',46511),
+          ]
+          for label,fen,clock in tests:
+              agent._HASH_KEYS.fill(np.uint64(0)); agent._HASH_MOVES.fill(np.int32(-1)); agent._TT_TABLE.fill(np.uint64(0))
+              b=chess.Board(fen)
+              r=agent.search_position(b,clock,np.empty(0,dtype=np.uint64))
+              print(json.dumps({'variant':'${{ matrix.variant }}','position':label,'clock_ms':clock,'move':r.move.uci(),'score':r.score,'depth':r.depth,'nodes':r.nodes,'elapsed_ms':r.elapsed_ms},sort_keys=True),flush=True)
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: round85-v16-${{ matrix.variant }}-${{ github.sha }}
+          path: results/
+          retention-days: 30
