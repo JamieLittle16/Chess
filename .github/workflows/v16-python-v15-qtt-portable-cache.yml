@@ -1,0 +1,142 @@
+name: V16 Python qTT portable-cache startup gate
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v16/python-v15-qtt-portable-cache]
+    paths:
+      - '.github/workflows/v16-python-v15-qtt-portable-cache.yml'
+      - 'scripts/patch_v16_python_v15_qsearch_tt.py'
+      - 'scripts/patch_v16_python_portable_numba_cache.py'
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Download exact final V15
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V15-FINAL-725be3e8595d1e54b1f12e11f2b9d92f1e415ebc
+          path: v15-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34298586524
+
+      - name: Build qTT portable-cache source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          V15=$(find v15-artifact -type f -name Little-Gambit-V15.zip -print -quit); test -n "$V15"
+          echo '81e22344bf9a6b41f16e32f29f93c0b6074afe63e4fd51002a537e6a091f2852  '"$V15" | sha256sum --check --strict
+          rm -rf /tmp/build /tmp/fresh results && mkdir -p /tmp/build results
+          unzip -q "$V15" -d /tmp/build
+          python scripts/patch_v16_python_v15_qsearch_tt.py /tmp/build/experiments/numba_search.py
+          python scripts/patch_v16_python_portable_numba_cache.py /tmp/build
+          python -m py_compile /tmp/build/agent.py /tmp/build/experiments/*.py
+          grep -q 'NUMBA_CPU_NAME.*generic' /tmp/build/agent.py
+          test "$(grep -Roh 'cache=False' /tmp/build/experiments/*.py | wc -l)" = 0
+          # Numba cache validity is timestamp+size based.  Zip stores whole-second mtimes, so freeze
+          # every source to a deterministic even second before compiling and preserve it in the zip.
+          touch -t 202609090900.00 /tmp/build/agent.py /tmp/build/experiments/*.py
+          find /tmp/build -type d -name __pycache__ -prune -exec rm -rf {} +
+
+      - name: Precompile exact production qTT search once
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/bin/time -f 'BUILD_WALL_SECONDS %e\nBUILD_CPU_SECONDS %U' -o results/build-time.txt \
+            env PYTHONPATH=/tmp/build HOME=/tmp/build-home OMP_NUM_THREADS=1 \
+            python tools/v14_agent_runner.py /tmp/build </dev/null > results/build-ready.txt
+          cat results/build-time.txt results/build-ready.txt
+          find /tmp/build/experiments -type f \( -name '*.nbi' -o -name '*.nbc' \) -printf '%P %s\n' \
+            | sort > results/cache-files.txt
+          test -s results/cache-files.txt
+          echo CACHE_BYTES $(find /tmp/build/experiments -type f \( -name '*.nbi' -o -name '*.nbc' \) -printf '%s\n' | awk '{s+=$1} END{print s+0}') \
+            | tee results/cache-size.txt
+          (cd /tmp/build && zip -q -9 -r "$GITHUB_WORKSPACE/results/Little-Gambit-V16-qTT-CACHED.zip" .)
+
+      - name: Fresh-unpack startup gate using shipped cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir /tmp/fresh
+          unzip -q results/Little-Gambit-V16-qTT-CACHED.zip -d /tmp/fresh
+          find /tmp/fresh/experiments -type f \( -name '*.nbi' -o -name '*.nbc' \) | grep -q .
+          /usr/bin/time -f 'FRESH_WALL_SECONDS %e\nFRESH_CPU_SECONDS %U' -o results/fresh-process.txt \
+            timeout 30s env PYTHONPATH=/tmp/fresh HOME=/tmp/fresh-home OMP_NUM_THREADS=1 \
+            python - <<'PY' > results/fresh-ready.txt 2>&1
+          import importlib,sys,time
+          sys.path.insert(0,'/tmp/fresh')
+          t=time.perf_counter(); importlib.import_module('agent'); dt=time.perf_counter()-t
+          print('READY_SECONDS',dt)
+          assert dt < 30.0
+          PY
+          cat results/fresh-process.txt results/fresh-ready.txt
+
+      - name: Fresh cached qTT fixed-node throughput
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/fresh
+          env PYTHONPATH=/tmp/fresh OMP_NUM_THREADS=1 python - <<'PY' > "$GITHUB_WORKSPACE/results/cached-nps.txt"
+          import statistics,time,chess,numpy as np
+          import agent
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful_timed_cached
+          fens=[chess.STARTING_FEN,'r2q1rk1/pp2bppp/2n1pn2/2pp4/8/1PN1PN2/PBPP1PPP/R2QKB1R w KQ - 2 9','2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23']
+          rates=[]
+          for fen in fens:
+              b=chess.Board(fen); e=encode_position(b); h=np.empty(0,dtype=np.uint64)
+              agent._HASH_KEYS.fill(0); agent._HASH_MOVES.fill(-1); agent._TT_TABLE.fill(0)
+              t=time.perf_counter(); r=iterative_search_stateful_timed_cached(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,60000,60000,300000,agent._HASH_KEYS,agent._HASH_MOVES,agent._TT_TABLE); dt=time.perf_counter()-t
+              rate=int(r[3])/dt; rates.append(rate); print('CASE',tuple(map(int,r)),dt,rate)
+          print('MEDIAN_NPS',statistics.median(rates))
+          PY
+          cat "$GITHUB_WORKSPACE/results/cached-nps.txt"
+
+      - name: 32-game cached qTT timed smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/control
+          V15=$(find v15-artifact -type f -name Little-Gambit-V15.zip -print -quit)
+          unzip -q "$V15" -d /tmp/control
+          curl --fail --location --retry 3 -o /tmp/uho.zip \
+            https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6; mkdir /tmp/m6
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6 >/dev/null
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          roots=fresh[4552:4568]; assert len(roots)==16
+          Path('/tmp/qtt-cache-smoke.epd').write_text('\n'.join(roots)+'\n')
+          PY
+          python -u scripts/v15_competition_gate.py \
+            --control /tmp/control --candidate /tmp/fresh \
+            --openings /tmp/qtt-cache-smoke.epd \
+            --output results/timed-smoke.json \
+            --label 'cached qTT vs exact V15' \
+            --base-ms 2500 --inc-ms 50 --max-plies 180 --grace-ms 1500 \
+            | tee results/timed-smoke.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v16-python-qtt-portable-cache-${{ github.sha }}
+          path: results/
+          retention-days: 30
