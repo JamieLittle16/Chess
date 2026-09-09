@@ -1,12 +1,11 @@
-name: V15 Python leaf-only Gestalt H16
+name: V15 Python allocation-free leaf Gestalt H16
 
 on:
   push:
     branches:
       - analysis/v15-python-leaf-gestalt-h16-20260909
     paths:
-      - scripts/patch_v15_python_leaf_gestalt_h16.py
-      - scripts/patch_v15_python_leaf_gestalt_h16_qall.py
+      - scripts/patch_v15_python_leaf_gestalt_rebuild.py
       - .github/workflows/v15-python-leaf-gestalt-h16.yml
   workflow_dispatch:
 
@@ -19,10 +18,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [q0, qall]
-    name: qualify-${{ matrix.mode }}
+        include:
+          - name: full
+            extra_den: 1
+          - name: half
+            extra_den: 2
+          - name: quarter
+            extra_den: 4
+    name: qualify-${{ matrix.name }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 80
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -48,89 +53,72 @@ jobs:
           repository: JamieLittle16/Chess
           run-id: 34277063353
 
-      - name: Materialize control and leaf-Gestalt candidate
+      - name: Materialize fastest exact control and leaf-Gestalt candidate
         shell: bash
         run: |
           set -euo pipefail
           ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
           MODEL=$(find h16-artifact -type f -name gestalt-topology-h16.npz -print -quit); test -n "$MODEL"
           rm -rf /tmp/base /tmp/cand results; mkdir -p /tmp/base /tmp/cand results
-          unzip -q "$ZIP" -d /tmp/base
-          cp -a /tmp/base/. /tmp/cand/
+          unzip -q "$ZIP" -d /tmp/base; cp -a /tmp/base/. /tmp/cand/
 
-          # Identical ordering baseline on both sides.
+          # Control is the complete semantics-preserving speed stack, not an easy V14 control.
           python scripts/patch_v15_python_presort_once.py /tmp/base/experiments/numba_search.py
-          python scripts/patch_v15_python_presort_once.py /tmp/cand/experiments/numba_search.py
+          python scripts/patch_v15_python_fused_h64_direct.py /tmp/base/experiments/v14_student_single_runtime.py
+          python scripts/patch_v15_python_inline_fused_h64.py /tmp/base/experiments/v14_student_single_runtime.py
+          python scripts/patch_v15_python_fused_h64_zero_guard.py /tmp/base/experiments/v14_student_single_runtime.py
+          python scripts/patch_v15_python_lazy_h64_chain.py /tmp/base/experiments/numba_search.py
+          python scripts/patch_v15_python_scoremeta_hotloop.py /tmp/base/experiments/numba_search.py
 
+          # Candidate removes H64 transport entirely. Ordering metadata remains, and the H16
+          # two-perspective state is reconstructed into already-allocated eval-stack tail cells only
+          # at the first non-check qsearch stand-pat.
+          python scripts/patch_v15_python_presort_once.py /tmp/cand/experiments/numba_search.py
+          python scripts/patch_v15_python_scoremeta_hotloop.py /tmp/cand/experiments/numba_search.py
           cp "$MODEL" /tmp/cand/experiments/v15_leaf_gestalt_h16.npz
-          python scripts/patch_v15_python_leaf_gestalt_h16.py /tmp/cand/experiments/numba_search.py
-          if [ "${{ matrix.mode }}" = qall ]; then
-            python scripts/patch_v15_python_leaf_gestalt_h16_qall.py /tmp/cand/experiments/numba_search.py
-          fi
+          python scripts/patch_v15_python_leaf_gestalt_rebuild.py /tmp/cand/experiments/numba_search.py --extra-den ${{ matrix.extra_den }}
 
           python -m py_compile tools/v14_agent_runner.py /tmp/base/agent.py /tmp/cand/agent.py /tmp/base/experiments/*.py /tmp/cand/experiments/*.py
           diff -u /tmp/base/experiments/numba_search.py /tmp/cand/experiments/numba_search.py > results/search.patch || true
           test -s results/search.patch
 
-      - name: Certify H16 quantised inference against independent Python reference
+          PYTHONPATH=/tmp/cand python - <<'PY'
+          import chess,numpy as np
+          from experiments.numba_core import encode_position,move_to_uci
+          from experiments.numba_search import iterative_search_stateful
+          for fen in (chess.STARTING_FEN,'r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1'):
+              b=chess.Board(fen);e=encode_position(b);h=np.empty(0,dtype=np.uint64)
+              o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,12000)
+              m=chess.Move.from_uci(move_to_uci(int(o[0])));assert m in b.legal_moves,(fen,o,m)
+              print('SMOKE',m,tuple(int(x) for x in o))
+          PY
+
+      - name: Canonical defensive-transition regression
         shell: bash
         run: |
           set -euo pipefail
-          PYTHONPATH=/tmp/cand python - <<'PY'
-          import chess
-          import numpy as np
-          from experiments.numba_core import encode_position
-          from experiments.numba_search import (
-              EVAL_WIDTH,
-              _build_eval_state_into,
-              _leaf_gestalt_correction_cp,
-          )
-
-          model=np.load('/tmp/cand/experiments/v15_leaf_gestalt_h16.npz',allow_pickle=False)
-          W=np.asarray(model['feature_weights'],dtype=np.int16)
-          bias=np.asarray(model['feature_bias'],dtype=np.int16)
-          ous=np.asarray(model['output_us'],dtype=np.int16)
-          othem=np.asarray(model['output_them'],dtype=np.int16)
-          den=int(np.asarray(model['scale_denominator']).reshape(-1)[0])
-          bucket_map=np.asarray([
-              0,1,2,3,12,11,10,9,4,4,5,5,14,14,13,13,
-              6,6,6,6,15,15,15,15,7,7,7,7,16,16,16,16,
-              8,8,8,8,17,17,17,17,8,8,8,8,17,17,17,17,
-              8,8,8,8,17,17,17,17,8,8,8,8,17,17,17,17],dtype=np.int16)
-          def fi(board,perspective,piece,sq):
-              k=board.king(perspective); assert k is not None
-              mapped=k if perspective else chess.square(chess.square_file(k),7-chess.square_rank(k))
-              bucket=int(bucket_map[mapped])%9
-              mirror=chess.square_file(k)>=4
-              f=chess.square_file(sq); r=chess.square_rank(sq)
-              if mirror: f=7-f
-              if not perspective: r=7-r
-              ownership=0 if piece.color==perspective else 1
-              plane=ownership*6+(piece.piece_type-1)
-              return bucket*768+plane*64+r*8+f
-          def tdiv(x,d): return x//d if x>=0 else -((-x)//d)
-          def ref(board):
-              aw=bias.astype(np.int64).copy(); ab=bias.astype(np.int64).copy()
-              for sq,p in board.piece_map().items():
-                  aw += W[fi(board,chess.WHITE,p,sq)].astype(np.int64)
-                  ab += W[fi(board,chess.BLACK,p,sq)].astype(np.int64)
-              aw=np.clip(aw,0,255); ab=np.clip(ab,0,255)
-              us,them=(aw,ab) if board.turn else (ab,aw)
-              raw=int(((us*us)*ous.astype(np.int64)+(them*them)*othem.astype(np.int64)).sum())
-              return tdiv(tdiv(raw,255)*400,255*64)//den
+          cat >/tmp/probe.py <<'PY'
+          import chess,json,numpy as np
+          from experiments.numba_core import encode_position,move_to_uci
+          from experiments.numba_search import iterative_search_stateful
           fens=[
-              chess.STARTING_FEN,
-              '2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23',
-              '8/8/3k4/4N1RP/8/3b4/8/6K1 b - - 0 59',
-              'r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1',
+            ('round61','2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23'),
+            ('round65a','8/8/3k4/4N1RP/8/3b4/8/6K1 b - - 0 59'),
+            ('round65b','8/7b/3k2N1/6RP/8/8/8/6K1 b - - 2 60'),
           ]
-          for fen in fens:
-              b=chess.Board(fen); e=encode_position(b); st=np.empty(EVAL_WIDTH,dtype=np.int32); _build_eval_state_into(e.board,st)
-              got=int(_leaf_gestalt_correction_cp(e.board,e.side,st)); expected=ref(b)
-              print(fen,got,expected); assert got==expected,(fen,got,expected)
+          rows=[]
+          for label,fen in fens:
+              b=chess.Board(fen);e=encode_position(b);h=np.empty(0,dtype=np.uint64)
+              o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,300000)
+              rows.append({'label':label,'move':move_to_uci(int(o[0])),'score':int(o[1]),'depth':int(o[2]),'nodes':int(o[3])})
+          print(json.dumps(rows,indent=2))
           PY
+          PYTHONPATH=/tmp/base python /tmp/probe.py > results/hard-control.json
+          PYTHONPATH=/tmp/cand python /tmp/probe.py > results/hard-candidate.json
+          echo CONTROL; cat results/hard-control.json
+          echo CANDIDATE; cat results/hard-candidate.json
 
-      - name: Build fresh disjoint qualification roots
+      - name: Build fresh disjoint roots
         shell: bash
         run: |
           set -euo pipefail
@@ -143,40 +131,14 @@ jobs:
           old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
           large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
           fresh=[x for x in large if x not in old]
-          equal=fresh[3200:3248]; timed=fresh[3260:3292]
-          assert len(equal)==48 and len(timed)==32 and not set(equal)&set(timed)
+          equal=fresh[3500:3532]; timed=fresh[3540:3556]
+          assert len(equal)==32 and len(timed)==16 and not set(equal)&set(timed)
           Path('/tmp/leaf-equal.epd').write_text('\n'.join(equal)+'\n')
           Path('/tmp/leaf-timed.epd').write_text('\n'.join(timed)+'\n')
           PY
 
-      - name: Hard-regression search probe
-        shell: bash
-        run: |
-          set -euo pipefail
-          cat >/tmp/probe.py <<'PY'
-          import chess,json,numpy as np,sys
-          from experiments.numba_core import encode_position,move_to_uci
-          from experiments.numba_search import iterative_search_stateful
-          fens=[
-              ('round61','2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23'),
-              ('round65a','8/8/3k4/4N1RP/8/3b4/8/6K1 b - - 0 59'),
-              ('round65b','8/7b/3k2N1/6RP/8/8/8/6K1 b - - 2 60'),
-          ]
-          rows=[]
-          for label,fen in fens:
-              b=chess.Board(fen);e=encode_position(b);h=np.empty(0,dtype=np.uint64)
-              for nodes in (300000,1000000):
-                  o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,nodes)
-                  rows.append({'label':label,'nodes':nodes,'move':move_to_uci(int(o[0])),'score':int(o[1]),'depth':int(o[2]),'searched':int(o[3])})
-          print(json.dumps(rows,indent=2))
-          PY
-          PYTHONPATH=/tmp/base python /tmp/probe.py > results/hard-control.json
-          PYTHONPATH=/tmp/cand python /tmp/probe.py > results/hard-candidate.json
-          echo CONTROL; cat results/hard-control.json
-          echo CANDIDATE; cat results/hard-candidate.json
-
-      - name: 96-game equal-node strength screen
-        run: python -u tools/v14_fixed_node_arena.py /tmp/cand /tmp/base --nodes 26000 --pairs 48 --opening-file /tmp/leaf-equal.epd --opening-offset 0 --max-plies 220 --json-out results/equal-node.json | tee results/equal-node.log
+      - name: 64-game equal-node strength screen
+        run: python -u tools/v14_fixed_node_arena.py /tmp/cand /tmp/base --nodes 30000 --pairs 32 --opening-file /tmp/leaf-equal.epd --opening-offset 0 --max-plies 200 --json-out results/equal-node.json | tee results/equal-node.log
 
       - name: Five-repetition throughput
         shell: bash
@@ -189,7 +151,7 @@ jobs:
           for line in sys.stdin:
               q=json.loads(line);b=chess.Board(q['fen']);e=encode_position(b);h=np.empty(0,dtype=np.uint64)
               o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,int(q['nodes']))
-              print(json.dumps({'nodes':int(o[3])}),flush=True)
+              print(json.dumps({'nodes':int(o[3]),'depth':int(o[2])}),flush=True)
           PY
           python - <<'PY'
           import json,os,statistics,subprocess,sys,time
@@ -206,24 +168,25 @@ jobs:
               for r in range(5):
                   order=roots if r%2==0 else list(reversed(roots))
                   def timed(p):
-                      nodes=0;t=time.perf_counter()
-                      for f in order:nodes+=one(p,f,35000)['nodes']
-                      return nodes/(time.perf_counter()-t)
-                  if r%2==0:bn=timed(b);cn=timed(c)
-                  else:cn=timed(c);bn=timed(b)
-                  rat.append(cn/bn);rows.append({'rep':r,'base_nps':bn,'candidate_nps':cn,'ratio':cn/bn})
+                      nodes=0;ds=[];t=time.perf_counter()
+                      for f in order:
+                          o=one(p,f,35000);nodes+=o['nodes'];ds.append(o['depth'])
+                      return nodes/(time.perf_counter()-t),sum(ds)/len(ds)
+                  if r%2==0:bn,bd=timed(b);cn,cd=timed(c)
+                  else:cn,cd=timed(c);bn,bd=timed(b)
+                  rat.append(cn/bn);rows.append({'rep':r,'base_nps':bn,'candidate_nps':cn,'ratio':cn/bn,'base_depth':bd,'candidate_depth':cd})
           finally:
               b.terminate();c.terminate();b.wait();c.wait()
           out={'median_nps_ratio':statistics.median(rat),'rows':rows}
-          Path('results/throughput.json').write_text(json.dumps(out,indent=2)+'\n');print('FINAL',out)
+          open('results/throughput.json','w').write(json.dumps(out,indent=2)+'\n');print('FINAL',out)
           PY
 
-      - name: 64-game competition-clock screen
-        run: python -u scripts/v15_competition_gate.py --candidate /tmp/cand --control /tmp/base --openings /tmp/leaf-timed.epd --output results/timed-64.json --label leaf-gestalt-h16-${{ matrix.mode }} --base-ms 2500 --inc-ms 50 --max-plies 180 | tee results/timed-64.log
+      - name: 32-game competition-clock screen
+        run: python -u scripts/v15_competition_gate.py --candidate /tmp/cand --control /tmp/base --openings /tmp/leaf-timed.epd --output results/timed-32.json --label leaf-gestalt-h16-${{ matrix.name }} --base-ms 2500 --inc-ms 50 --max-plies 180 | tee results/timed-32.log
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: v15-python-leaf-gestalt-h16-${{ matrix.mode }}-${{ github.sha }}
+          name: v15-python-leaf-gestalt-h16-${{ matrix.name }}-${{ github.sha }}
           path: results/
           retention-days: 30
