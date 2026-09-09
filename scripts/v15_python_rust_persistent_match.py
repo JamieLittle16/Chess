@@ -190,10 +190,9 @@ def main() -> int:
                     })
 
                     if clocks[side_idx] < 0:
-                        python_lost = is_python
+                        # The side to move is the side that just consumed the
+                        # measured time, so that side loses on a flag.
                         result = '0-1' if board.turn == chess.WHITE else '1-0'
-                        if not python_lost:
-                            result = '1-0' if board.turn == chess.WHITE else '0-1'
                         reason = actor + '-flag'
                         break
 
