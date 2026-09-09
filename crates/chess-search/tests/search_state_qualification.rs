@@ -303,7 +303,9 @@ fn irrelevant_en_passant_metadata_is_search_neutral() {
 
     assert_ne!(plain.zobrist_key(), irrelevant_ep.zobrist_key());
     assert_eq!(plain.repetition_key(), irrelevant_ep.repetition_key());
-    assert_eq!(plain.legal_moves(), irrelevant_ep.legal_moves());
+    let plain_moves = plain.legal_moves();
+    let ep_moves = irrelevant_ep.legal_moves();
+    assert_eq!(plain_moves.as_slice(), ep_moves.as_slice());
 
     for depth in 1..=3 {
         let mut plain_working = plain.clone();
