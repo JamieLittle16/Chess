@@ -1,9 +1,9 @@
-name: V16 Python V15 qsearch TT
+name: V16 Python qsearch TT startup-safe
 
 on:
   workflow_dispatch:
   push:
-    branches: [v16/python-v15-qsearch-tt]
+    branches: [v16/python-v15-qsearch-tt-startup]
     paths:
       - '.github/workflows/v16-python-v15-qsearch-tt.yml'
       - 'scripts/patch_v16_python_v15_qsearch_tt.py'
@@ -15,7 +15,7 @@ permissions:
 jobs:
   qualify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 55
+    timeout-minutes: 65
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -24,7 +24,7 @@ jobs:
       - name: Install exact competition runtime
         run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
 
-      - name: Materialize exact final V15 and qTT candidate
+      - name: Materialize exact final V15 and startup-safe qTT candidate
         shell: bash
         run: |
           set -euo pipefail
@@ -36,6 +36,27 @@ jobs:
           unzip -q "$V15" -d /tmp/control
           cp -a /tmp/control/. /tmp/candidate/
           python scripts/patch_v16_python_v15_qsearch_tt.py /tmp/candidate/experiments/numba_search.py
+          python - <<'PY'
+          from pathlib import Path
+          # The exact three-boundary startup frontier: this combination reached ~44.8 s
+          # on exact V15 while preserving ~95.3% fixed-node NPS. Apply after qTT so the
+          # qsearch change gets compiled under the same bounded-IR policy.
+          remove={'_advance_eval_state_into','_child_position_key','_legal_moves_for_state'}
+          changed=[]
+          for fn in ('numba_core.py','numba_search.py','v14_student_single_runtime.py'):
+              p=Path('/tmp/candidate/experiments')/fn
+              s=p.read_text()
+              for name in sorted(remove):
+                  anchor=f'@njit(cache=False, inline="always")\ndef {name}('
+                  if anchor in s:
+                      s=s.replace(anchor,f'@njit(cache=False)\ndef {name}(',1)
+                      changed.append(name)
+              p.write_text(s)
+          missing=remove-set(changed)
+          if missing:
+              raise SystemExit(f'missing startup boundaries: {sorted(missing)}')
+          print('STARTUP_BOUNDARIES', sorted(changed))
+          PY
           python -m py_compile /tmp/control/agent.py /tmp/control/experiments/*.py /tmp/candidate/agent.py /tmp/candidate/experiments/*.py
           grep -q 'TT_QDEPTH_BASE = 64' /tmp/candidate/experiments/numba_search.py
           grep -q '_qsearch_tt_store' /tmp/candidate/experiments/numba_search.py
@@ -52,10 +73,61 @@ jobs:
               assert all(len(n.args)==argc and not n.keywords for n in calls), (name,argc,[(n.lineno,len(n.args)) for n in calls])
           print('qTT call graph coherent')
           PY
-          (cd /tmp/candidate && zip -qr /tmp/Little-Gambit-V16B-qTT.zip .)
-          sha256sum "$V15" /tmp/Little-Gambit-V16B-qTT.zip | tee results/package-hashes.txt
+          (cd /tmp/candidate && zip -qr /tmp/Little-Gambit-V16B-qTT-startup.zip .)
+          sha256sum "$V15" /tmp/Little-Gambit-V16B-qTT-startup.zip | tee results/package-hashes.txt
         env:
           GH_TOKEN: ${{ github.token }}
+
+      - name: Hard 60-second cold-start gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/cold /tmp/q-home /tmp/q-cache /tmp/q-numba
+          mkdir /tmp/cold
+          unzip -q /tmp/Little-Gambit-V16B-qTT-startup.zip -d /tmp/cold
+          /usr/bin/time -f 'PROCESS_WALL_SECONDS %e\nPROCESS_CPU_SECONDS %U' -o results/cold-process.txt \
+            timeout 60s env PYTHONPATH=/tmp/cold HOME=/tmp/q-home XDG_CACHE_HOME=/tmp/q-cache NUMBA_CACHE_DIR=/tmp/q-numba OMP_NUM_THREADS=1 \
+            python - <<'PY' > results/cold.txt 2>&1
+          import json,sys,time
+          from importlib import import_module
+          t=time.perf_counter(); sys.path.insert(0,'/tmp/cold'); import_module('agent'); ready=time.perf_counter()-t
+          print('READY_SECONDS',ready)
+          print(json.dumps({'ready':True}))
+          PY
+          cat results/cold-process.txt results/cold.txt
+
+      - name: Fixed-node throughput sanity
+        shell: bash
+        run: |
+          set -euo pipefail
+          bench() {
+            local root="$1" out="$2"; cd "$root"
+            timeout 180s env PYTHONPATH="$root" python - <<'PY' > "$out" 2>&1
+          import statistics,time,chess,numpy as np
+          import agent
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful_timed_cached
+          fens=[chess.STARTING_FEN,'r2q1rk1/pp2bppp/2n1pn2/2pp4/8/1PN1PN2/PBPP1PPP/R2QKB1R w KQ - 2 9','2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23']
+          rates=[]
+          for fen in fens:
+              b=chess.Board(fen); e=encode_position(b)
+              agent._HASH_KEYS.fill(np.uint64(0)); agent._HASH_MOVES.fill(np.int32(-1)); agent._TT_TABLE.fill(np.uint64(0)); h=np.empty(0,dtype=np.uint64)
+              t=time.perf_counter(); r=iterative_search_stateful_timed_cached(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,60000,60000,150000,agent._HASH_KEYS,agent._HASH_MOVES,agent._TT_TABLE); dt=time.perf_counter()-t
+              rates.append(int(r[3])/dt); print('CASE',tuple(map(int,r)),dt,rates[-1])
+          print('MEDIAN_NPS',statistics.median(rates))
+          PY
+          }
+          bench /tmp/control "$GITHUB_WORKSPACE/results/control-throughput.txt"
+          bench /tmp/candidate "$GITHUB_WORKSPACE/results/candidate-throughput.txt"
+          cd "$GITHUB_WORKSPACE"
+          python - <<'PY' | tee results/throughput-summary.txt
+          import re
+          from pathlib import Path
+          def n(p):
+              s=Path(p).read_text(); return float(re.search(r'^MEDIAN_NPS ([0-9.eE+-]+)$',s,re.M).group(1))
+          a=n('results/control-throughput.txt'); b=n('results/candidate-throughput.txt')
+          print('CONTROL_NPS',a); print('CANDIDATE_NPS',b); print('NPS_RATIO',b/a)
+          PY
 
       - name: Build fresh disjoint UHO roots
         shell: bash
@@ -77,20 +149,18 @@ jobs:
           PY
 
       - name: 96-game equal-node qTT screen
-        run: |
-          python -u tools/v14_fixed_node_arena.py /tmp/candidate /tmp/control --nodes 20000 --pairs 48 --opening-file /tmp/v16b-node.epd --max-plies 220 --json-out results/equal-node.json | tee results/equal-node.log
+        run: python -u tools/v14_fixed_node_arena.py /tmp/candidate /tmp/control --nodes 20000 --pairs 48 --opening-file /tmp/v16b-node.epd --max-plies 220 --json-out results/equal-node.json | tee results/equal-node.log
 
       - name: 64-game short-clock qTT screen
-        run: |
-          python -u scripts/v15_competition_gate.py --control /tmp/control --candidate /tmp/candidate --openings /tmp/v16b-clock.epd --output results/timed.json --label 'V16B exact-V15 qsearch TT' --base-ms 2500 --inc-ms 50 --max-plies 180 --grace-ms 1500 | tee results/timed.log
+        run: python -u scripts/v15_competition_gate.py --control /tmp/control --candidate /tmp/candidate --openings /tmp/v16b-clock.epd --output results/timed.json --label 'V16B startup-safe qsearch TT' --base-ms 2500 --inc-ms 50 --max-plies 180 --grace-ms 1500 | tee results/timed.log
 
       - name: Preserve candidate package
         if: always()
-        run: cp /tmp/Little-Gambit-V16B-qTT.zip results/ 2>/dev/null || true
+        run: cp /tmp/Little-Gambit-V16B-qTT-startup.zip results/ 2>/dev/null || true
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: v16-python-v15-qsearch-tt-${{ github.sha }}
+          name: v16-python-v15-qsearch-tt-startup-${{ github.sha }}
           path: results/
           retention-days: 30
