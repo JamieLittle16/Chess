@@ -1,0 +1,43 @@
+name: V16 core mutation audit
+
+on:
+  push:
+    branches: [test/v16-mutation-audit]
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Install pinned cargo-mutants
+        run: cargo install --locked cargo-mutants --version 27.1.0
+      - name: Inventory correctness-critical core mutants
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/mutants
+          cargo mutants \
+            --package chess-core \
+            --test-workspace=true \
+            --file crates/chess-core/src/movegen.rs \
+            --file crates/chess-core/src/reversible.rs \
+            --file crates/chess-core/src/draw.rs \
+            --file crates/chess-core/src/zobrist.rs \
+            --file crates/chess-core/src/fen.rs \
+            --list \
+            | tee .qualification/mutants/inventory.txt
+          printf 'mutant_count=' | tee .qualification/mutants/count.txt
+          grep -cve '^$' .qualification/mutants/inventory.txt | tee -a .qualification/mutants/count.txt
+      - name: Upload mutation inventory
+        uses: actions/upload-artifact@v4
+        with:
+          name: v16-core-mutation-inventory-${{ github.sha }}
+          path: .qualification/mutants/
+          retention-days: 30
