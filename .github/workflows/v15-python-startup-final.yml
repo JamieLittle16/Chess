@@ -1,0 +1,208 @@
+name: V15 Python source-only startup final
+
+on:
+  push:
+    branches:
+      - hotfix/v15-python-startup-cache-20260909
+    paths:
+      - .github/workflows/v15-python-startup-final.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Download exact final V15
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V15-FINAL-725be3e8595d1e54b1f12e11f2b9d92f1e415ebc
+          path: final-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34298586524
+
+      - name: Build source-only startup hotfix from exact final V15
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find final-artifact -type f -name Little-Gambit-V15.zip -print -quit); test -n "$ZIP"
+          rm -rf /tmp/control /tmp/release release-results
+          mkdir -p /tmp/control /tmp/release release-results
+          unzip -q "$ZIP" -d /tmp/control
+          cp -a /tmp/control/. /tmp/release/
+          python - <<'PY'
+          from pathlib import Path
+
+          # OPT=2 is set before importing experiments/Numba.  This changes LLVM compile effort only,
+          # not the engine's chess/search policy.
+          agent = Path('/tmp/release/agent.py')
+          text = agent.read_text()
+          anchor = 'import time\n'
+          replacement = (
+              'import os\n'
+              'import time\n\n'
+              '# Competition startup hotfix: reduce LLVM JIT optimization latency while keeping\n'
+              '# the exact V15 search/evaluation policy. Must be set before Numba is imported.\n'
+              'os.environ.setdefault("NUMBA_OPT", "2")\n'
+          )
+          if text.count(anchor) != 1:
+              raise SystemExit(f'agent import anchor count={text.count(anchor)}')
+          agent.write_text(text.replace(anchor, replacement, 1))
+
+          # Forced inlining made the recursive Numba IR enormous and dominated startup compilation.
+          # Removing only the explicit force lets Numba/LLVM make its normal optimization decision.
+          changed = 0
+          for name in ('numba_core.py', 'numba_search.py', 'v14_student_single_runtime.py'):
+              path = Path('/tmp/release/experiments') / name
+              source = path.read_text()
+              count = source.count(', inline="always"')
+              changed += count
+              path.write_text(source.replace(', inline="always"', ''))
+          if changed != 49:
+              raise SystemExit(f'expected 49 forced-inline sites, found {changed}')
+          print('FORCED_INLINE_SITES_REMOVED', changed)
+          PY
+
+          # Submission must remain source/data only. No precompiled Numba/native cache is shipped.
+          find /tmp/release -type d -name __pycache__ -prune -exec rm -rf {} +
+          find /tmp/release -type f \( -name '*.nbc' -o -name '*.nbi' -o -name '*.pyc' -o -name '*.so' \) -delete
+          python -m py_compile /tmp/release/agent.py /tmp/release/experiments/*.py
+          find /tmp/release -type d -name __pycache__ -prune -exec rm -rf {} +
+
+          (cd /tmp/release && zip -q -9 -r "$GITHUB_WORKSPACE/release-results/Little-Gambit-V15-STARTUP-FIX.zip" .)
+          sha256sum release-results/Little-Gambit-V15-STARTUP-FIX.zip | tee release-results/SHA256.txt
+          unzip -l release-results/Little-Gambit-V15-STARTUP-FIX.zip | tee release-results/contents.txt
+          python - <<'PY' | tee release-results/package-audit.txt
+          import zipfile
+          from pathlib import Path
+          z=Path('release-results/Little-Gambit-V15-STARTUP-FIX.zip')
+          forbidden=('.so','.pyc','.nbc','.nbi')
+          with zipfile.ZipFile(z) as f:
+              names=f.namelist()
+              bad=[n for n in names if n.endswith(forbidden) or '/__pycache__/' in n or n.startswith('__pycache__/')]
+              unpacked=sum(i.file_size for i in f.infolist())
+          print('ZIP_BYTES',z.stat().st_size)
+          print('UNPACKED_BYTES',unpacked)
+          print('FORBIDDEN_ENTRIES',bad)
+          assert not bad
+          assert 'agent.py' in names
+          assert unpacked < 50_000_000
+          PY
+
+      - name: Exact platform-protocol cold init gate - trial 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/cold1 && mkdir /tmp/cold1
+          unzip -q release-results/Little-Gambit-V15-STARTUP-FIX.zip -d /tmp/cold1
+          /usr/bin/time -f 'PROCESS_WALL_SECONDS %e\nPROCESS_CPU_SECONDS %U' -o release-results/cold1-process.txt \
+            timeout 60s env PYTHONPATH=/tmp/cold1 HOME=/tmp/lg-home-1 TMPDIR=/tmp XDG_CACHE_HOME=/tmp/lg-cache-1 NUMBA_CACHE_DIR=/tmp/lg-numba-1 OMP_NUM_THREADS=1 \
+            python - <<'PY' > release-results/cold1.txt 2>&1
+          import json, os, sys, time
+          from importlib import import_module
+          t0=time.perf_counter()
+          sys.path.insert(0,'/tmp/cold1')
+          agent=import_module('agent')
+          ready=time.perf_counter()-t0
+          print(json.dumps({'ready':True}))
+          print('READY_SECONDS',ready,file=sys.stderr)
+          import chess
+          t1=time.perf_counter(); move=agent.get_move(chess.STARTING_FEN,120000); first=time.perf_counter()-t1
+          assert chess.Move.from_uci(move) in chess.Board().legal_moves
+          print('FIRST_MOVE',move,file=sys.stderr)
+          print('FIRST_MOVE_SECONDS',first,file=sys.stderr)
+          print('TOTAL_SECONDS',time.perf_counter()-t0,file=sys.stderr)
+          PY
+          cat release-results/cold1-process.txt release-results/cold1.txt
+
+      - name: Exact platform-protocol cold init gate - trial 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/cold2 && mkdir /tmp/cold2
+          unzip -q release-results/Little-Gambit-V15-STARTUP-FIX.zip -d /tmp/cold2
+          /usr/bin/time -f 'PROCESS_WALL_SECONDS %e\nPROCESS_CPU_SECONDS %U' -o release-results/cold2-process.txt \
+            timeout 60s env PYTHONPATH=/tmp/cold2 HOME=/tmp/lg-home-2 TMPDIR=/tmp XDG_CACHE_HOME=/tmp/lg-cache-2 NUMBA_CACHE_DIR=/tmp/lg-numba-2 OMP_NUM_THREADS=1 \
+            python - <<'PY' > release-results/cold2.txt 2>&1
+          import json, sys, time
+          from importlib import import_module
+          t0=time.perf_counter(); sys.path.insert(0,'/tmp/cold2'); agent=import_module('agent')
+          ready=time.perf_counter()-t0
+          print(json.dumps({'ready':True}))
+          print('READY_SECONDS',ready,file=sys.stderr)
+          import chess
+          t1=time.perf_counter(); move=agent.get_move(chess.STARTING_FEN,120000); first=time.perf_counter()-t1
+          assert chess.Move.from_uci(move) in chess.Board().legal_moves
+          print('FIRST_MOVE',move,file=sys.stderr)
+          print('FIRST_MOVE_SECONDS',first,file=sys.stderr)
+          print('TOTAL_SECONDS',time.perf_counter()-t0,file=sys.stderr)
+          PY
+          cat release-results/cold2-process.txt release-results/cold2.txt
+
+      - name: Fixed-node semantic parity and speed
+        shell: bash
+        run: |
+          set -euo pipefail
+          benchmark() {
+            local ROOT="$1" OUT="$2"
+            cd "$ROOT"
+            env PYTHONPATH="$ROOT" python - <<'PY' > "$OUT" 2>&1
+          import statistics,time,chess,numpy as np
+          import agent
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful_timed_cached
+          fens=[
+            chess.STARTING_FEN,
+            'r2q1rk1/pp2bppp/2n1pn2/2pp4/8/1PN1PN2/PBPP1PPP/R2QKB1R w KQ - 2 9',
+            '2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23',
+            '8/5pk1/6p1/3p4/3P4/5P2/5KP1/8 w - - 0 40',
+          ]
+          rows=[]
+          for fen in fens:
+              b=chess.Board(fen); e=encode_position(b)
+              agent._HASH_KEYS.fill(np.uint64(0)); agent._HASH_MOVES.fill(np.int32(-1)); agent._TT_TABLE.fill(np.uint64(0))
+              h=np.empty(0,dtype=np.uint64)
+              t=time.perf_counter()
+              r=iterative_search_stateful_timed_cached(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,60000,60000,250000,agent._HASH_KEYS,agent._HASH_MOVES,agent._TT_TABLE)
+              dt=time.perf_counter()-t
+              sig=tuple(map(int,r)); nodes=int(r[3]); nps=nodes/dt
+              rows.append((sig,nps))
+              print('CASE',repr(fen),sig,dt,nps)
+          print('SIGNATURES',repr([x[0] for x in rows]))
+          print('MEDIAN_NPS',statistics.median(x[1] for x in rows))
+          PY
+          }
+          benchmark /tmp/control "$GITHUB_WORKSPACE/release-results/control-fixednode.txt"
+          benchmark /tmp/release "$GITHUB_WORKSPACE/release-results/release-fixednode.txt"
+          cd "$GITHUB_WORKSPACE"
+          python - <<'PY' | tee release-results/fixednode-summary.txt
+          import ast,re
+          from pathlib import Path
+          a=Path('release-results/control-fixednode.txt').read_text(); b=Path('release-results/release-fixednode.txt').read_text()
+          sig=lambda x: ast.literal_eval(re.search(r'^SIGNATURES (.*)$',x,re.M).group(1))
+          nps=lambda x: float(re.search(r'^MEDIAN_NPS ([0-9.eE+-]+)$',x,re.M).group(1))
+          sa,sb=sig(a),sig(b); na,nb=nps(a),nps(b)
+          print('FIXED_NODE_SIGNATURE_EQUAL',sa==sb)
+          print('CONTROL_MEDIAN_NPS',na)
+          print('RELEASE_MEDIAN_NPS',nb)
+          print('NPS_RATIO',nb/na)
+          assert sa==sb
+          PY
+
+      - name: Upload emergency submission
+        uses: actions/upload-artifact@v4
+        with:
+          name: Little-Gambit-V15-STARTUP-FIX-${{ github.sha }}
+          path: release-results/
+          retention-days: 30
