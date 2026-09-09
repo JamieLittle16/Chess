@@ -43,10 +43,8 @@ fn insufficient_material_counts_minor_pieces_symmetrically() {
 
 #[test]
 fn ghost_en_passant_target_never_creates_a_legal_capture_or_repetition_distinction() {
-    let ghost =
-        Position::from_fen("7k/8/8/4P3/8/8/8/K7 w - d6 0 1").expect("valid ghost-EP FEN");
-    let plain =
-        Position::from_fen("7k/8/8/4P3/8/8/8/K7 w - - 0 1").expect("valid control FEN");
+    let ghost = Position::from_fen("7k/8/8/4P3/8/8/8/K7 w - d6 0 1").expect("valid ghost-EP FEN");
+    let plain = Position::from_fen("7k/8/8/4P3/8/8/8/K7 w - - 0 1").expect("valid control FEN");
 
     assert!(
         ghost
@@ -65,8 +63,8 @@ fn ghost_en_passant_target_never_creates_a_legal_capture_or_repetition_distincti
 #[test]
 fn exact_castling_rights_have_distinct_transposition_identities() {
     let rights = [
-        "-", "K", "Q", "KQ", "k", "Kk", "Qk", "KQk", "q", "Kq", "Qq", "KQq", "kq",
-        "Kkq", "Qkq", "KQkq",
+        "-", "K", "Q", "KQ", "k", "Kk", "Qk", "KQk", "q", "Kq", "Qq", "KQq", "kq", "Kkq", "Qkq",
+        "KQkq",
     ];
     let mut keys = HashSet::new();
 
