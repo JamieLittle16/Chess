@@ -1,0 +1,103 @@
+name: V15 Python bounded H32 root guardian
+
+on:
+  push:
+    branches:
+      - analysis/v15-python-root-h32-capped-20260909
+    paths:
+      - .github/workflows/v15-python-root-h32-capped.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  qualify:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: cap64
+            delta_cap: 256
+          - name: cap96
+            delta_cap: 384
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - uses: actions/download-artifact@v4
+        with:
+          name: v15-leaf-gestalt-topology-h32-70736f6f056d42aa8ceee37e0b282e4f02d34556
+          path: guardian-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34277063353
+      - name: Materialize fast base and bounded q25 guardian
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); MODEL=$(find guardian-artifact -type f -name gestalt-topology-h32.npz -print -quit); test -n "$ZIP"; test -n "$MODEL"
+          rm -rf /tmp/base /tmp/cand results; mkdir -p /tmp/base /tmp/cand results
+          unzip -q "$ZIP" -d /tmp/base; cp -a /tmp/base/. /tmp/cand/
+          for D in /tmp/base /tmp/cand; do
+            python scripts/patch_v15_python_presort_once.py "$D/experiments/numba_search.py"
+            python scripts/patch_v15_python_fused_h64_direct.py "$D/experiments/v14_student_single_runtime.py"
+            python scripts/patch_v15_python_inline_fused_h64.py "$D/experiments/v14_student_single_runtime.py"
+            python scripts/patch_v15_python_fused_h64_zero_guard.py "$D/experiments/v14_student_single_runtime.py"
+            python scripts/patch_v15_python_lazy_h64_chain.py "$D/experiments/numba_search.py"
+            python scripts/patch_v15_python_scoremeta_hotloop.py "$D/experiments/numba_search.py"
+          done
+          cp "$MODEL" /tmp/cand/experiments/guardian_h32.npz
+          python scripts/patch_v15_python_root_h32_guardian.py /tmp/cand/experiments/numba_search.py --blend-num 1 --blend-den 4
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/cand/experiments/numba_search.py');s=p.read_text();old='GUARDIAN_DELTA_CLAMP = 1200';new='GUARDIAN_DELTA_CLAMP = ${{ matrix.delta_cap }}';assert s.count(old)==1;s=s.replace(old,new,1);p.write_text(s)
+          PY
+          python -m py_compile /tmp/base/agent.py /tmp/cand/agent.py /tmp/base/experiments/*.py /tmp/cand/experiments/*.py
+      - name: Round-61 bounded-authority diagnostic
+        shell: bash
+        run: |
+          FEN='2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23'
+          cat >/tmp/d.py <<'PY'
+          import chess,numpy as np,sys
+          from experiments.numba_core import encode_position,move_to_uci
+          from experiments.numba_search import iterative_search_stateful
+          b=chess.Board(sys.argv[1]);e=encode_position(b);h=np.empty(0,dtype=np.uint64)
+          for n in (30000,100000,300000):
+              o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,n);print(n,move_to_uci(int(o[0])),int(o[1]),int(o[2]))
+          PY
+          echo BASE | tee results/round61.log; PYTHONPATH=/tmp/base python /tmp/d.py "$FEN" | tee -a results/round61.log
+          echo CANDIDATE | tee -a results/round61.log; PYTHONPATH=/tmp/cand python /tmp/d.py "$FEN" | tee -a results/round61.log
+      - name: Build fresh roots
+        shell: bash
+        run: |
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6;mkdir /tmp/m6;python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')};large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()];fresh=[x for x in large if x not in old]
+          Path('/tmp/e.epd').write_text('\n'.join(fresh[4550:4582])+'\n');Path('/tmp/t.epd').write_text('\n'.join(fresh[4585:4601])+'\n')
+          PY
+      - name: 64-game equal-node screen
+        run: python -u tools/v14_fixed_node_arena.py /tmp/cand /tmp/base --nodes 30000 --pairs 32 --opening-file /tmp/e.epd --max-plies 200 --json-out results/equal.json | tee results/equal.log
+      - name: 32-game competition-clock screen
+        run: python -u scripts/v15_competition_gate.py --candidate /tmp/cand --control /tmp/base --openings /tmp/t.epd --output results/timed.json --label h32-q25-${{ matrix.name }} --base-ms 2500 --inc-ms 50 --max-plies 180 | tee results/timed.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-root-h32-${{ matrix.name }}-${{ github.sha }}
+          path: results/
+          retention-days: 30
