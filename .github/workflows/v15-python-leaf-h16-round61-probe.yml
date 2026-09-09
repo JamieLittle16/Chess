@@ -1,0 +1,85 @@
+name: V15 Python leaf-H16 Round61 probe
+
+on:
+  push:
+    branches:
+      - analysis/v15-python-leaf-h16-gestalt-20260909
+    paths:
+      - .github/workflows/v15-python-leaf-h16-round61-probe.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Download H16 search-leaf Gestalt student
+        uses: actions/download-artifact@v4
+        with:
+          name: v15-leaf-gestalt-topology-h16-70736f6f056d42aa8ceee37e0b282e4f02d34556
+          path: h16-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34277063353
+      - name: Materialize control, full and half H16
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
+          MODEL=$(find h16-artifact -type f -name gestalt-topology-h16.npz -print -quit); test -n "$MODEL"
+          rm -rf /tmp/control /tmp/full /tmp/half results; mkdir -p /tmp/control /tmp/full /tmp/half results
+          unzip -q "$ZIP" -d /tmp/control; cp -a /tmp/control/. /tmp/full/; cp -a /tmp/control/. /tmp/half/
+          python scripts/patch_v15_python_presort_once.py /tmp/control/experiments/numba_search.py
+          python scripts/patch_v15_python_fused_h64_direct.py /tmp/control/experiments/v14_student_single_runtime.py
+          python scripts/patch_v15_python_inline_fused_h64.py /tmp/control/experiments/v14_student_single_runtime.py
+          python scripts/patch_v15_python_fused_h64_zero_guard.py /tmp/control/experiments/v14_student_single_runtime.py
+          python scripts/patch_v15_python_lazy_h64_chain.py /tmp/control/experiments/numba_search.py
+          python scripts/patch_v15_python_scoremeta_hotloop.py /tmp/control/experiments/numba_search.py
+          for D in /tmp/full /tmp/half; do
+            python scripts/patch_v15_python_presort_once.py "$D/experiments/numba_search.py"
+            python scripts/patch_v15_python_scoremeta_hotloop.py "$D/experiments/numba_search.py"
+            cp "$MODEL" "$D/experiments/v15_gestalt_h16.npz"
+          done
+          python scripts/patch_v15_python_leaf_h16_gestalt.py /tmp/full/experiments/numba_search.py --runtime-den 1
+          python scripts/patch_v15_python_leaf_h16_gestalt.py /tmp/half/experiments/numba_search.py --runtime-den 2
+      - name: Probe canonical defensive failure at 300k and 1m nodes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/probe.py <<'PY'
+          import json,sys,chess,numpy as np
+          from experiments.numba_core import encode_position,move_to_uci
+          from experiments.numba_search import iterative_search_stateful
+          fen='2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23'
+          b=chess.Board(fen); e=encode_position(b); h=np.empty(0,dtype=np.uint64)
+          for nodes in (300000,1000000):
+              o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,nodes)
+              print(json.dumps({'nodes_budget':nodes,'move':move_to_uci(int(o[0])),'score':int(o[1]),'depth':int(o[2]),'nodes':int(o[3])}),flush=True)
+          PY
+          for NAME in control full half; do
+            echo "=== $NAME ==="
+            PYTHONPATH="/tmp/$NAME" python /tmp/probe.py | tee "results/$NAME.jsonl"
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-leaf-h16-round61-${{ github.sha }}
+          path: results/
+          retention-days: 30
