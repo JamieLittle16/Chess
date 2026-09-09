@@ -1,0 +1,113 @@
+name: V15 Python reproducible candidate package
+
+on:
+  push:
+    branches:
+      - release/v15-python-candidate-20260909
+    paths:
+      - .github/workflows/v15-python-package-candidate.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Download exact accepted inputs
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - uses: actions/download-artifact@v4
+        with:
+          name: v15-python-searchleaf-h64-b050-94ef8e11b956050aaa057863010ce555d76733af
+          path: b050-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34290665543
+
+      - name: Reconstruct accepted V15 candidate from exact V14
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
+          MODEL=$(find b050-artifact -type f -path '*/model/v14_student_h64.npz' -print -quit); test -n "$MODEL"
+          rm -rf /tmp/v15 package-results; mkdir -p /tmp/v15 package-results
+          unzip -q "$ZIP" -d /tmp/v15
+
+          python scripts/patch_v15_python_presort_once.py /tmp/v15/experiments/numba_search.py
+          python scripts/patch_v15_python_fused_h64_direct.py /tmp/v15/experiments/v14_student_single_runtime.py
+          python scripts/patch_v15_python_inline_fused_h64.py /tmp/v15/experiments/v14_student_single_runtime.py
+          python scripts/patch_v15_python_fused_h64_zero_guard.py /tmp/v15/experiments/v14_student_single_runtime.py
+          python scripts/patch_v15_python_lazy_h64_chain.py /tmp/v15/experiments/numba_search.py
+          python scripts/patch_v15_python_scoremeta_hotloop.py /tmp/v15/experiments/numba_search.py
+          cp "$MODEL" /tmp/v15/experiments/v14_student_h64.npz
+          python scripts/patch_v15_python_lean_lmr_history.py /tmp/v15/experiments/numba_search.py --threshold 2048
+
+          test "$(sha256sum /tmp/v15/experiments/v14_student_h64.npz | awk '{print $1}')" = e38876e2a37193639f9b8b559b02bc064d820c4cdeda44579c9f88e5bd4468b1
+          grep -q 'LEAN_LMR_HISTORY_THRESHOLD = 2048' /tmp/v15/experiments/numba_search.py
+          ! grep -q 'GESTALT_HIDDEN' /tmp/v15/experiments/numba_search.py
+          python -m py_compile /tmp/v15/agent.py /tmp/v15/experiments/*.py
+
+      - name: Real API smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import sys
+          sys.path.insert(0,'/tmp/v15')
+          import agent
+          for fen,ms in [
+              ('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',120000),
+              ('2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23',120000),
+          ]:
+              move=agent.get_move(fen,ms)
+              print('ZIP_SMOKE_OK',move)
+          PY
+
+      - name: Build clean competition ZIP and provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          (
+            cd /tmp/v15
+            find . -exec touch -t 202609090000 {} +
+            zip -X -q -r "$GITHUB_WORKSPACE/package-results/Little-Gambit-V15.zip" agent.py v14_kpk.u8 experiments
+          )
+          unzip -t package-results/Little-Gambit-V15.zip
+          sha256sum package-results/Little-Gambit-V15.zip > package-results/Little-Gambit-V15.sha256
+          cat > package-results/V15-PROVENANCE.txt <<'EOF'
+          base_package_run=34214504775
+          base_package_artifact=10051250374
+          speed_stack_run=34292434186
+          speed_stack_median_nps_ratio=1.0805
+          b050_training_run=34290665543
+          b050_confirmation_run=34292453720
+          b050_confirmation_score=98.5/192
+          b050_model_sha256=e38876e2a37193639f9b8b559b02bc064d820c4cdeda44579c9f88e5bd4468b1
+          t2048_confirmation_run=34296278077
+          t2048_confirmation_score=106/192
+          t2048_confirmation_naive_elo=+36.322965608481034
+          t2048_threshold=2048
+          rejected_universal_h16_run=34296436613
+          universal_h16_included=false
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Little-Gambit-V15-CANDIDATE-${{ github.sha }}
+          path: package-results/
+          retention-days: 30
