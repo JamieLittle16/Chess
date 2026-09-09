@@ -8,9 +8,14 @@ permissions:
   contents: read
 
 jobs:
-  inventory:
+  audit:
+    name: mutation shard ${{ matrix.shard }}/6
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -18,11 +23,13 @@ jobs:
           toolchain: 1.98.1
       - name: Install pinned cargo-mutants
         run: cargo install --locked cargo-mutants --version 27.1.0
-      - name: Inventory correctness-critical core mutants
+      - name: Execute mutation shard
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p .qualification/mutants
+          output=".qualification/mutants/shard-${{ matrix.shard }}"
+          mkdir -p "$output"
+          set +e
           cargo mutants \
             --package chess-core \
             --test-workspace=true \
@@ -31,13 +38,27 @@ jobs:
             --file crates/chess-core/src/draw.rs \
             --file crates/chess-core/src/zobrist.rs \
             --file crates/chess-core/src/fen.rs \
-            --list \
-            | tee .qualification/mutants/inventory.txt
-          printf 'mutant_count=' | tee .qualification/mutants/count.txt
-          grep -cve '^$' .qualification/mutants/inventory.txt | tee -a .qualification/mutants/count.txt
-      - name: Upload mutation inventory
+            --shard "${{ matrix.shard }}/6" \
+            --sharding round-robin \
+            --baseline=skip \
+            --timeout 45 \
+            --colors=never \
+            --output "$output"
+          status=$?
+          set -e
+          printf 'cargo_mutants_exit=%s\n' "$status" > "$output/exit.txt"
+          for kind in caught missed timeout unviable; do
+            file="$output/$kind.txt"
+            count=0
+            if [ -f "$file" ]; then
+              count=$(grep -cve '^$' "$file" || true)
+            fi
+            printf '%s=%s\n' "$kind" "$count" | tee -a "$output/summary.txt"
+          done
+      - name: Upload mutation evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: v16-core-mutation-inventory-${{ github.sha }}
-          path: .qualification/mutants/
+          name: v16-core-mutation-shard-${{ matrix.shard }}-${{ github.sha }}
+          path: .qualification/mutants/shard-${{ matrix.shard }}/
           retention-days: 30
