@@ -1,0 +1,92 @@
+name: V15 Python fallback full-history plus b050 evaluator
+
+on:
+  push:
+    branches: [analysis/v15-python-fallback-history-b050-20260909]
+    paths:
+      - .github/workflows/v15-python-fallback-history-b050.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Download replicated b050 search-leaf H64 model
+        uses: actions/download-artifact@v4
+        with:
+          name: v15-python-searchleaf-h64-b050-94ef8e11b956050aaa057863010ce555d76733af
+          path: model-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34290665543
+      - name: Materialize identical speed+history engines then add b050 model
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
+          MODEL=$(find model-artifact -type f -path '*/model/v14_student_h64.npz' -print -quit)
+          if [ -z "$MODEL" ]; then MODEL=$(find model-artifact -type f -name v14_student_h64.npz -print -quit); fi
+          test -n "$MODEL"
+          rm -rf /tmp/base /tmp/cand results; mkdir -p /tmp/base /tmp/cand results
+          unzip -q "$ZIP" -d /tmp/base; cp -a /tmp/base/. /tmp/cand/
+          for D in /tmp/base /tmp/cand; do
+            python scripts/patch_v15_python_presort_once.py "$D/experiments/numba_search.py"
+            python scripts/patch_v15_python_fused_h64_direct.py "$D/experiments/v14_student_single_runtime.py"
+            python scripts/patch_v15_python_inline_fused_h64.py "$D/experiments/v14_student_single_runtime.py"
+            python scripts/patch_v15_python_fused_h64_zero_guard.py "$D/experiments/v14_student_single_runtime.py"
+            python scripts/patch_v15_python_lazy_h64_chain.py "$D/experiments/numba_search.py"
+            python scripts/patch_v15_python_scoremeta_hotloop.py "$D/experiments/numba_search.py"
+            python scripts/patch_v15_python_rust_history_speedstack.py "$D/experiments/numba_search.py"
+          done
+          cp "$MODEL" /tmp/cand/experiments/v14_student_h64.npz
+          python -m py_compile tools/v14_agent_runner.py /tmp/base/agent.py /tmp/cand/agent.py /tmp/base/experiments/*.py /tmp/cand/experiments/*.py
+          python - <<'PY'
+          import numpy as np
+          a=np.load('/tmp/base/experiments/v14_student_h64.npz'); b=np.load('/tmp/cand/experiments/v14_student_h64.npz')
+          print({k:{'equal':bool(np.array_equal(a[k],b[k])),'max_abs_delta':int(np.max(np.abs(a[k].astype(np.int64)-b[k].astype(np.int64))))} for k in a.files})
+          PY
+      - name: Build fresh disjoint roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6; mkdir /tmp/m6
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          equal=fresh[4300:4348]; timed=fresh[4350:4398]
+          assert len(equal)==48 and len(timed)==48 and not set(equal)&set(timed)
+          Path('/tmp/equal.epd').write_text('\n'.join(equal)+'\n'); Path('/tmp/timed.epd').write_text('\n'.join(timed)+'\n')
+          PY
+      - name: 96-game equal-node evaluator interaction screen
+        run: python -u tools/v14_fixed_node_arena.py /tmp/cand /tmp/base --nodes 30000 --pairs 48 --opening-file /tmp/equal.epd --opening-offset 0 --max-plies 200 --json-out results/equal-node.json | tee results/equal-node.log
+      - name: 96-game competition-clock evaluator interaction screen
+        run: python -u scripts/v15_competition_gate.py --candidate /tmp/cand --control /tmp/base --openings /tmp/timed.epd --output results/timed-96.json --label rust-history-speed-plus-b050 --base-ms 2500 --inc-ms 50 --max-plies 180 --grace-ms 1500 | tee results/timed-96.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-fallback-history-b050-${{ github.sha }}
+          path: results/
+          retention-days: 30
