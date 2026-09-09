@@ -1,0 +1,107 @@
+name: V16 Python strengthened core vs Rust V15
+
+on:
+  push:
+    branches: [analysis/v16-python-core-rust-calibration-20260909]
+    paths:
+      - '.github/workflows/v16-python-core-rust-calibration.yml'
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  GESTALT_URL: https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue
+  GESTALT_SHA256: 956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6
+
+jobs:
+  calibrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact Python competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Materialize strengthened Python core
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
+          rm -rf /tmp/python .qualification
+          mkdir -p /tmp/python .qualification/bin .qualification/net .qualification/match
+          unzip -q "$ZIP" -d /tmp/python
+          python scripts/patch_v16_python_presort_once.py /tmp/python/experiments/numba_search.py
+          python scripts/patch_v16_python_trusted_continuity.py /tmp/python/agent.py
+          python scripts/patch_v16_python_rust_history.py /tmp/python/experiments/numba_search.py
+          python scripts/patch_v16_python_full_pruning_oracle.py /tmp/python/experiments/numba_search.py
+          python scripts/patch_v15_python_fused_h64_direct.py /tmp/python/experiments/v14_student_single_runtime.py
+          python scripts/patch_v15_python_inline_fused_h64.py /tmp/python/experiments/v14_student_single_runtime.py
+          python -m py_compile tools/v14_agent_runner.py tools/python_rust_clock_arena.py /tmp/python/agent.py /tmp/python/experiments/*.py
+      - name: Build production Rust V15
+        shell: bash
+        env:
+          RUSTFLAGS: -C target-cpu=x86-64-v3
+        run: |
+          set -euo pipefail
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/bin/rust-v15
+          chmod +x .qualification/bin/rust-v15
+          sha256sum .qualification/bin/rust-v15 | tee .qualification/match/rust-binary.sha256
+      - name: Download exact Gestalt v85
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 "$GESTALT_URL" -o .qualification/net/gestalt-b840.nnue
+          test "$(stat -c%s .qualification/net/gestalt-b840.nnue)" = '21242944'
+          echo "$GESTALT_SHA256  .qualification/net/gestalt-b840.nnue" | sha256sum --check --strict
+      - name: Build fresh 64-root calibration book
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6; mkdir /tmp/m6
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          chosen=fresh[4455:4519]
+          assert len(chosen)==64 and len(set(chosen))==64
+          Path('.qualification/match/python-rust-64.epd').write_text('\n'.join(chosen)+'\n')
+          PY
+      - name: 128-game paired wall-clock calibration
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u tools/python_rust_clock_arena.py \
+            --python-dir /tmp/python \
+            --rust-bin "$PWD/.qualification/bin/rust-v15" \
+            --gestalt "$PWD/.qualification/net/gestalt-b840.nnue" \
+            --openings .qualification/match/python-rust-64.epd \
+            --base-ms 2500 --inc-ms 50 --max-plies 220 \
+            --output .qualification/match/result.json \
+            | tee .qualification/match/arena.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v16-python-core-rust-calibration-${{ github.sha }}
+          path: .qualification/match/
+          retention-days: 30
