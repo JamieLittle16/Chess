@@ -37,7 +37,7 @@ jobs:
       - name: Materialize source-only candidate
         shell: bash
         env:
-          OPT: ${{ matrix.opt }}
+          LITTLE_GAMBIT_NUMBA_OPT: ${{ matrix.opt }}
         run: |
           set -euo pipefail
           ZIP=$(find final-artifact -type f -name Little-Gambit-V15.zip -print -quit); test -n "$ZIP"
@@ -57,9 +57,6 @@ jobs:
           PY
           find /tmp/candidate -type d -name __pycache__ -prune -exec rm -rf {} +
           find /tmp/candidate -type f \( -name '*.nbc' -o -name '*.nbi' -o -name '*.so' \) -delete
-        env:
-          OPT: ${{ matrix.opt }}
-          LITTLE_GAMBIT_NUMBA_OPT: ${{ matrix.opt }}
 
       - name: Cold import and first move
         shell: bash
@@ -86,9 +83,9 @@ jobs:
           print('TOTAL_SECONDS', time.perf_counter()-t0)
           print('MOVE', move)
           PY
-          cat results/process-time.txt results/runtime.txt
+          cat "$GITHUB_WORKSPACE/results/process-time.txt" "$GITHUB_WORKSPACE/results/runtime.txt"
 
-      - name: Fixed-node throughput after warm compile
+      - name: Warm-runtime move-cost proxy
         shell: bash
         env:
           LITTLE_GAMBIT_NUMBA_OPT: ${{ matrix.opt }}
@@ -98,9 +95,6 @@ jobs:
           timeout 120s env PYTHONPATH=/tmp/candidate LITTLE_GAMBIT_NUMBA_OPT=${{ matrix.opt }} python - <<'PY' > "$GITHUB_WORKSPACE/results/nps.txt" 2>&1
           import time, chess
           import agent
-          from experiments import numba_search as ns
-          # The import above pays JIT once. Use the public agent repeatedly and report wall time as a
-          # practical throughput proxy under identical 250ms allocations.
           fens=[
             chess.STARTING_FEN,
             'r2q1rk1/pp2bppp/2n1pn2/2pp4/8/1PN1PN2/PBPP1PPP/R2QKB1R w KQ - 2 9',
@@ -114,7 +108,7 @@ jobs:
           print('THREE_MOVE_WALL_SECONDS', elapsed)
           print('MOVES', moves)
           PY
-          cat results/nps.txt
+          cat "$GITHUB_WORKSPACE/results/nps.txt"
 
       - uses: actions/upload-artifact@v4
         if: always()
