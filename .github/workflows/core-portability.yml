@@ -1,8 +1,6 @@
 name: Core portability qualification
 
 on:
-  push:
-    branches: [test/v16-core-portability]
   pull_request:
     branches: [main]
     paths:
