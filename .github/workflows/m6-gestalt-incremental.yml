@@ -1,16 +1,20 @@
-name: M6 gestalt incremental certification
+name: Gestalt incremental certification
 
 on:
   pull_request:
-    branches:
-      - main
+    branches: [main]
+    paths:
+      - 'crates/chess-core/**'
+      - 'crates/chess-eval/src/gestalt.rs'
+      - 'crates/chess-eval/src/nnue/network/**'
+      - 'crates/chess-eval/examples/gestalt_incremental_check.rs'
+      - '.github/workflows/m6-gestalt-incremental.yml'
 
 permissions:
   contents: read
 
 jobs:
   differential:
-    if: github.head_ref == 'm6/gestalt-incremental-probe-v1'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -19,14 +23,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.98.1
-          components: rustfmt, clippy
-
-      - name: Strict Rust gate
-        run: |
-          set -euo pipefail
-          cargo fmt --all -- --check
-          cargo clippy --workspace --all-targets --all-features -- -D warnings
-          cargo test --workspace --release
 
       - name: Download exact certified CC0 gestalt network
         shell: bash
@@ -54,19 +50,18 @@ jobs:
           sha256sum .qualification/gestalt-incremental/gestalt-b840.nnue \
             > .qualification/gestalt-incremental/network.sha256
           cat > .qualification/gestalt-incremental/provenance.txt <<'EOF'
-          purpose=research-only reversible mature-network evaluator certification
+          purpose=standing reversible mature-network evaluator certification
           network=gestalt-b840.nnue
           network_sha256=956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6
           network_license=CC0-1.0
           certified_reference=Viridithas v13.0.0 raw-eval parity in PR 122
-          production_evaluator=unchanged classical
           EOF
 
       - name: Upload evidence without network bytes
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: m6-gestalt-incremental-${{ github.sha }}
+          name: gestalt-incremental-${{ github.sha }}
           path: |
             .qualification/gestalt-incremental/differential.txt
             .qualification/gestalt-incremental/network.sha256
