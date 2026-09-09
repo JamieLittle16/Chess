@@ -1,0 +1,191 @@
+name: V16 large Gestalt distillation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v16/python-large-gestalt-distill]
+    paths:
+      - .github/workflows/v16-python-large-gestalt-distill.yml
+      - scripts/train_v16_king_output_heads.py
+      - scripts/patch_v16_king_output_heads.py
+      - tools/v14_generate_selfplay_positions.py
+      - tools/v15_label_gestalt_teacher.py
+      - crates/chess-eval/examples/gestalt_stream_oracle.rs
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  corpus:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 85
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - uses: dtolnay/rust-toolchain@master
+        with: {toolchain: '1.98.1'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download accepted qTT V16 head
+        uses: actions/download-artifact@v4
+        with:
+          name: v16-python-v15-qsearch-tt-startup-f32d0bd437ca555b1bd369646f41df2bd1f64aa8
+          path: qtt-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34352476810
+      - name: Materialize qTT head and opening suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find qtt-artifact -type f -name 'Little-Gambit-V16B-qTT-startup.zip' -print -quit); test -n "$ZIP"
+          rm -rf /tmp/qhead /tmp/m6 corpus; mkdir -p /tmp/qhead /tmp/m6 corpus
+          unzip -q "$ZIP" -d /tmp/qhead
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          echo '5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e  /tmp/m6/m6-uho-lichess-5000-v1.epd' | sha256sum --check --strict
+      - name: Generate roughly 100k qTT-head self-play positions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u tools/v14_generate_selfplay_positions.py \
+            --engine /tmp/qhead \
+            --openings /tmp/m6/m6-uho-lichess-5000-v1.epd \
+            --nodes 1800 --games 2300 --opening-offset 2000 \
+            --min-ply 8 --max-ply 140 --stride 2 --max-positions 100000 \
+            --output corpus/selfplay-positions.json | tee corpus/selfplay.log
+          python - <<'PY'
+          import json
+          x=json.load(open('corpus/selfplay-positions.json'))
+          n=int(x['positions'])
+          print('CORPUS_POSITIONS',n)
+          if n < 70000: raise SystemExit(f'large corpus too small: {n}')
+          PY
+      - name: Build exact Gestalt streaming teacher
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' --output corpus/gestalt-b840.nnue
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  corpus/gestalt-b840.nnue' | sha256sum --check --strict
+          cargo build --release -p chess-eval --example gestalt_stream_oracle
+      - name: Label large corpus with exact Gestalt
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u tools/v15_label_gestalt_teacher.py \
+            --positions corpus/selfplay-positions.json \
+            --oracle target/release/examples/gestalt_stream_oracle \
+            --network corpus/gestalt-b840.nnue \
+            --split-salt Chess/v16-gestalt-large-qTT-v1 \
+            --validation-permille 100 --holdout-permille 50 \
+            --output corpus/teacher.jsonl | tee corpus/teacher.log
+          wc -l corpus/teacher.jsonl
+          sha256sum corpus/teacher.jsonl > corpus/teacher.sha256
+          rm corpus/gestalt-b840.nnue
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v16-large-gestalt-corpus-${{ github.sha }}
+          path: corpus/
+          retention-days: 30
+
+  train_and_screen:
+    needs: corpus
+    strategy:
+      fail-fast: false
+      matrix:
+        alpha: ['0.12','0.20','0.28']
+    name: large-output-alpha-${{ matrix.alpha }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 95
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: v16-large-gestalt-corpus-${{ github.sha }}
+          path: corpus
+      - name: Download accepted qTT V16 head
+        uses: actions/download-artifact@v4
+        with:
+          name: v16-python-v15-qsearch-tt-startup-f32d0bd437ca555b1bd369646f41df2bd1f64aa8
+          path: qtt-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34352476810
+      - name: Train large-data factorized king-output candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find qtt-artifact -type f -name 'Little-Gambit-V16B-qTT-startup.zip' -print -quit); test -n "$ZIP"
+          rm -rf /tmp/control /tmp/candidate model results; mkdir -p /tmp/control /tmp/candidate model results
+          unzip -q "$ZIP" -d /tmp/control; cp -a /tmp/control/. /tmp/candidate/
+          python -u scripts/train_v16_king_output_heads.py \
+            --teacher corpus/teacher.jsonl --engine-dir /tmp/control --output-dir model \
+            --alpha '${{ matrix.alpha }}' --epochs 55 --batch-size 512 \
+            --learning-rate 0.0022 --ridge 0.0018 \
+            | tee results/training.log
+          cp model/student-h64-king-output-heads.npz /tmp/candidate/experiments/v14_student_h64.npz
+          python scripts/patch_v16_king_output_heads.py /tmp/candidate
+          python -m py_compile /tmp/candidate/agent.py /tmp/candidate/experiments/*.py
+          cp model/training-metadata.json results/
+          find /tmp/candidate -type d -name __pycache__ -prune -exec rm -rf {} +
+          (cd /tmp/candidate && zip -q -9 -r "$GITHUB_WORKSPACE/results/Little-Gambit-V16-large-output-${{ matrix.alpha }}.zip" .)
+      - name: Hard cold-start gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/cold /tmp/lg-home /tmp/lg-cache /tmp/lg-numba;mkdir /tmp/cold
+          unzip -q "results/Little-Gambit-V16-large-output-${{ matrix.alpha }}.zip" -d /tmp/cold
+          /usr/bin/time -f 'PROCESS_WALL_SECONDS %e\nPROCESS_CPU_SECONDS %U' -o results/cold-process.txt timeout 82s env PYTHONPATH=/tmp/cold HOME=/tmp/lg-home XDG_CACHE_HOME=/tmp/lg-cache NUMBA_CACHE_DIR=/tmp/lg-numba OMP_NUM_THREADS=1 python - <<'PY' >results/cold.txt 2>&1
+          import sys,time
+          t=time.perf_counter();sys.path.insert(0,'/tmp/cold');import agent
+          print('READY_SECONDS',time.perf_counter()-t)
+          PY
+          cat results/cold-process.txt results/cold.txt
+      - name: Build unseen roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6;mkdir /tmp/m6;python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old];roots=fresh[4408:4472]
+          assert len(roots)==64 and len(set(roots))==64
+          Path('/tmp/lg-node.epd').write_text('\n'.join(roots[:32])+'\n');Path('/tmp/lg-clock.epd').write_text('\n'.join(roots[32:])+'\n')
+          PY
+      - name: Throughput versus qTT head
+        shell: bash
+        run: |
+          cat >/tmp/b.py <<'PY'
+          import statistics,time,chess,numpy as np,agent
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful_timed_cached
+          fs=[chess.STARTING_FEN,'r2q1rk1/pp2bppp/2n1pn2/2pp4/8/1PN1PN2/PBPP1PPP/R2QKB1R w KQ - 2 9','2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23'];v=[]
+          for fen in fs:
+           b=chess.Board(fen);e=encode_position(b);h=np.empty(0,dtype=np.uint64);agent._HASH_KEYS.fill(0);agent._HASH_MOVES.fill(-1);agent._TT_TABLE.fill(0);t=time.perf_counter();r=iterative_search_stateful_timed_cached(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,60000,60000,200000,agent._HASH_KEYS,agent._HASH_MOVES,agent._TT_TABLE);v.append(int(r[3])/(time.perf_counter()-t))
+          print('MEDIAN_NPS',statistics.median(v))
+          PY
+          (cd /tmp/control && PYTHONPATH=/tmp/control python /tmp/b.py)|tee results/control-nps.txt
+          (cd /tmp/candidate && PYTHONPATH=/tmp/candidate python /tmp/b.py)|tee results/candidate-nps.txt
+          python - <<'PY'|tee results/throughput.txt
+          import re,pathlib
+          f=lambda p:float(re.search(r'MEDIAN_NPS ([0-9.eE+-]+)',pathlib.Path(p).read_text()).group(1));a=f('results/control-nps.txt');b=f('results/candidate-nps.txt');print('NPS_RATIO',b/a)
+          PY
+      - name: 64-game equal-node versus qTT head
+        run: python -u tools/v14_fixed_node_arena.py /tmp/candidate /tmp/control --nodes 20000 --pairs 32 --opening-file /tmp/lg-node.epd --max-plies 220 --json-out results/equal-node.json | tee results/equal-node.log
+      - name: 64-game timed versus qTT head
+        run: python -u scripts/v15_competition_gate.py --control /tmp/control --candidate /tmp/candidate --openings /tmp/lg-clock.epd --output results/timed.json --label 'V16 large Gestalt output alpha=${{ matrix.alpha }} vs qTT head' --base-ms 2500 --inc-ms 50 --max-plies 180 --grace-ms 1500 | tee results/timed.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v16-large-output-${{ matrix.alpha }}-${{ github.sha }}
+          path: results/
+          retention-days: 30
