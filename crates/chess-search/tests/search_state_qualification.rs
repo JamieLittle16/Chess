@@ -70,6 +70,34 @@ fn interrupted_searcher_can_be_reused_without_transient_state_leakage() {
 }
 
 #[test]
+fn one_entry_tt_collisions_never_reuse_foreign_positions() {
+    let positions = [
+        "7k/8/8/8/8/8/6Q1/K7 w - - 0 1",
+        "7k/8/8/8/8/8/6r1/K7 w - - 0 1",
+        "7k/5Q2/6K1/8/8/8/8/8 w - - 0 1",
+        "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+    ];
+
+    let mut reused = Searcher::with_tt_entries(1);
+    for fen in positions.into_iter().cycle().take(12) {
+        let root = Position::from_fen(fen).expect("collision FEN must parse");
+        let mut reused_root = root.clone();
+        let mut fresh_root = root.clone();
+
+        let reused_result = reused.search_depth(&mut reused_root, 3);
+        let fresh_result = Searcher::with_tt_entries(1).search_depth(&mut fresh_root, 3);
+
+        assert_eq!(reused_result.score, fresh_result.score, "score mismatch: {fen}");
+        assert_eq!(
+            reused_result.best_move, fresh_result.best_move,
+            "best-move mismatch: {fen}"
+        );
+        assert_eq!(reused_root, root);
+        assert_eq!(fresh_root, root);
+    }
+}
+
+#[test]
 fn transposition_cache_cannot_override_halfmove_draw_context() {
     let live = Position::from_fen("7k/8/8/8/8/8/6Q1/K7 w - - 0 1").expect("valid live FEN");
     let drawn = Position::from_fen("7k/8/8/8/8/8/6Q1/K7 w - - 100 1").expect("valid draw FEN");
