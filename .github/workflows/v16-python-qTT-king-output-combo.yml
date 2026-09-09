@@ -1,0 +1,151 @@
+name: V16 Python qTT plus king-output
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v16/python-qTT-king-output-combo]
+    paths:
+      - '.github/workflows/v16-python-qTT-king-output-combo.yml'
+      - 'scripts/patch_v16_python_v15_qsearch_tt.py'
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Download exact V15 control
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V15-FINAL-725be3e8595d1e54b1f12e11f2b9d92f1e415ebc
+          path: v15-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34298586524
+
+      - name: Download alpha-0.20 king-output package
+        uses: actions/download-artifact@v4
+        with:
+          name: v16-python-king-output-0.20-c28801acf5cc5cdc96dce3820351ce735eb4e9b4
+          path: king-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34353390503
+
+      - name: Build combined candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          V15=$(find v15-artifact -type f -name Little-Gambit-V15.zip -print -quit); test -n "$V15"
+          KING=$(find king-artifact -type f -name 'Little-Gambit-V16-king-output-0.20.zip' -print -quit); test -n "$KING"
+          echo '81e22344bf9a6b41f16e32f29f93c0b6074afe63e4fd51002a537e6a091f2852  '"$V15" | sha256sum --check --strict
+          rm -rf /tmp/control /tmp/candidate results && mkdir /tmp/control /tmp/candidate results
+          unzip -q "$V15" -d /tmp/control
+          unzip -q "$KING" -d /tmp/candidate
+          python scripts/patch_v16_python_v15_qsearch_tt.py /tmp/candidate/experiments/numba_search.py
+          python - <<'PY' | tee results/startup-patch.txt
+          from pathlib import Path
+          p=Path('/tmp/candidate/experiments/numba_search.py'); s=p.read_text(); changed=[]
+          for name in ('_legal_moves_for_state','_advance_eval_state_into','_child_position_key'):
+              old=f'@njit(cache=False, inline="always")\ndef {name}('
+              new=f'@njit(cache=False)\ndef {name}('
+              if old not in s: raise SystemExit(f'missing forced-inline {name}')
+              s=s.replace(old,new,1); changed.append(name)
+          p.write_text(s)
+          print('DEINLINED',changed)
+          PY
+          python -m py_compile /tmp/control/agent.py /tmp/control/experiments/*.py /tmp/candidate/agent.py /tmp/candidate/experiments/*.py
+          grep -q 'TT_QDEPTH_BASE = 64' /tmp/candidate/experiments/numba_search.py
+          grep -q 'KING_OUTPUT' /tmp/candidate/experiments/numba_search.py || grep -q 'king_output' /tmp/candidate/experiments/numba_search.py
+          find /tmp/candidate -type d -name __pycache__ -prune -exec rm -rf {} +
+          (cd /tmp/candidate && zip -q -9 -r "$GITHUB_WORKSPACE/results/Little-Gambit-V16-qTT-king-output.zip" .)
+          sha256sum "$V15" "$KING" results/Little-Gambit-V16-qTT-king-output.zip | tee results/package-hashes.txt
+
+      - name: Hard 75-second cold-start gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/cold /tmp/cold-home /tmp/cold-cache /tmp/cold-numba && mkdir /tmp/cold
+          unzip -q results/Little-Gambit-V16-qTT-king-output.zip -d /tmp/cold
+          /usr/bin/time -f 'PROCESS_WALL_SECONDS %e\nPROCESS_CPU_SECONDS %U' -o results/cold-process.txt \
+            timeout 75s env PYTHONPATH=/tmp/cold HOME=/tmp/cold-home XDG_CACHE_HOME=/tmp/cold-cache NUMBA_CACHE_DIR=/tmp/cold-numba OMP_NUM_THREADS=1 \
+            python - <<'PY' > results/cold.txt 2>&1
+          import json,sys,time
+          from importlib import import_module
+          t=time.perf_counter(); sys.path.insert(0,'/tmp/cold'); import_module('agent'); ready=time.perf_counter()-t
+          print('READY_SECONDS',ready); print(json.dumps({'ready':True}))
+          PY
+          cat results/cold-process.txt results/cold.txt
+
+      - name: Throughput sanity
+        shell: bash
+        run: |
+          set -euo pipefail
+          bench() {
+            local root="$1" out="$2"; cd "$root"
+            timeout 180s env PYTHONPATH="$root" python - <<'PY' > "$out" 2>&1
+          import statistics,time,chess,numpy as np
+          import agent
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful_timed_cached
+          fens=[chess.STARTING_FEN,'r2q1rk1/pp2bppp/2n1pn2/2pp4/8/1PN1PN2/PBPP1PPP/R2QKB1R w KQ - 2 9','2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23']
+          rows=[]
+          for fen in fens:
+              b=chess.Board(fen); e=encode_position(b)
+              agent._HASH_KEYS.fill(np.uint64(0)); agent._HASH_MOVES.fill(np.int32(-1)); agent._TT_TABLE.fill(np.uint64(0)); h=np.empty(0,dtype=np.uint64)
+              t=time.perf_counter(); r=iterative_search_stateful_timed_cached(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,60000,60000,200000,agent._HASH_KEYS,agent._HASH_MOVES,agent._TT_TABLE); dt=time.perf_counter()-t
+              rows.append(int(r[3])/dt)
+          print('MEDIAN_NPS',statistics.median(rows))
+          PY
+          }
+          bench /tmp/control "$GITHUB_WORKSPACE/results/control-throughput.txt"
+          bench /tmp/candidate "$GITHUB_WORKSPACE/results/candidate-throughput.txt"
+          cd "$GITHUB_WORKSPACE"
+          python - <<'PY' | tee results/throughput-summary.txt
+          import re
+          from pathlib import Path
+          n=lambda p:float(re.search(r'MEDIAN_NPS ([0-9.eE+-]+)',Path(p).read_text()).group(1))
+          a=n('results/control-throughput.txt'); b=n('results/candidate-throughput.txt')
+          print('CONTROL_NPS',a); print('CANDIDATE_NPS',b); print('NPS_RATIO',b/a)
+          PY
+
+      - name: Build fresh disjoint UHO roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6; mkdir /tmp/m6
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          roots=fresh[4560:4640]
+          assert len(roots)==80 and len(set(roots))==80
+          Path('/tmp/combo-node.epd').write_text('\n'.join(roots[:48])+'\n')
+          Path('/tmp/combo-clock.epd').write_text('\n'.join(roots[48:80])+'\n')
+          PY
+
+      - name: 96-game equal-node combined screen
+        run: python -u tools/v14_fixed_node_arena.py /tmp/candidate /tmp/control --nodes 20000 --pairs 48 --opening-file /tmp/combo-node.epd --max-plies 220 --json-out results/equal-node.json | tee results/equal-node.log
+
+      - name: 64-game short-clock combined screen
+        run: python -u scripts/v15_competition_gate.py --control /tmp/control --candidate /tmp/candidate --openings /tmp/combo-clock.epd --output results/timed.json --label 'V16 qTT + king-output alpha0.20 vs exact V15' --base-ms 2500 --inc-ms 50 --max-plies 180 --grace-ms 1500 | tee results/timed.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v16-qTT-king-output-${{ github.sha }}
+          path: results/
+          retention-days: 30
