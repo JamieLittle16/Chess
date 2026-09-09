@@ -1,0 +1,146 @@
+name: V15 Python final direct Rust calibration
+
+on:
+  push:
+    branches:
+      - analysis/v15-python-rust-direct-20260909
+    paths:
+      - .github/workflows/v15-python-rust-final.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  direct:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      RUSTFLAGS: -C target-cpu=native
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact V14 and replicated b050
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - uses: actions/download-artifact@v4
+        with:
+          name: v15-python-searchleaf-h64-b050-94ef8e11b956050aaa057863010ce555d76733af
+          path: b050-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34290665543
+      - name: Materialize final Python V15 and UCI shim
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
+          MODEL=$(find b050-artifact -type f -path '*/model/v14_student_h64.npz' -print -quit); test -n "$MODEL"
+          rm -rf /tmp/python-v15 results; mkdir -p /tmp/python-v15 results
+          unzip -q "$ZIP" -d /tmp/python-v15
+          python scripts/patch_v15_python_presort_once.py /tmp/python-v15/experiments/numba_search.py
+          python scripts/patch_v15_python_fused_h64_direct.py /tmp/python-v15/experiments/v14_student_single_runtime.py
+          python scripts/patch_v15_python_inline_fused_h64.py /tmp/python-v15/experiments/v14_student_single_runtime.py
+          python scripts/patch_v15_python_fused_h64_zero_guard.py /tmp/python-v15/experiments/v14_student_single_runtime.py
+          python scripts/patch_v15_python_lazy_h64_chain.py /tmp/python-v15/experiments/numba_search.py
+          python scripts/patch_v15_python_scoremeta_hotloop.py /tmp/python-v15/experiments/numba_search.py
+          cp "$MODEL" /tmp/python-v15/experiments/v14_student_h64.npz
+          python scripts/patch_v15_python_lean_lmr_history.py /tmp/python-v15/experiments/numba_search.py --threshold 2048
+          python -m py_compile /tmp/python-v15/agent.py /tmp/python-v15/experiments/*.py tools/python_agent_uci.py
+          PY=$(command -v python)
+          cat >/tmp/python-v15-uci <<EOF
+          #!/usr/bin/env bash
+          exec '$PY' '$GITHUB_WORKSPACE/tools/python_agent_uci.py' /tmp/python-v15
+          EOF
+          chmod +x /tmp/python-v15-uci
+      - name: Build exact final Rust V15
+        shell: bash
+        run: |
+          set -euo pipefail
+          git worktree add --detach /tmp/rust-v15 3a6a194d91c32b207397158da5a7af86c9a5404f
+          CARGO_TARGET_DIR=/tmp/rust-v15-target cargo build --release -p chess-uci --manifest-path /tmp/rust-v15/Cargo.toml
+          cp /tmp/rust-v15-target/release/chess-uci /tmp/rust-v15-engine
+          chmod +x /tmp/rust-v15-engine
+          curl --fail --location --retry 5 'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' --output /tmp/gestalt-b840.nnue
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  /tmp/gestalt-b840.nnue' | sha256sum --check --strict
+          cat >/tmp/rust-v15-launcher <<EOF
+          #!/usr/bin/env bash
+          export CHESS_GESTALT_NETWORK=/tmp/gestalt-b840.nnue
+          exec /tmp/rust-v15-engine
+          EOF
+          chmod +x /tmp/rust-v15-launcher
+      - name: Build pinned Fastchess and fresh paired openings
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git /tmp/fastchess-src
+          git -C /tmp/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          make -C /tmp/fastchess-src -j2
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6; mkdir /tmp/m6
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          roots=fresh[3900:3932]; assert len(roots)==32
+          Path('/tmp/direct.epd').write_text('\n'.join(roots)+'\n')
+          PY
+      - name: 64-game paired Python V15 vs final Rust V15
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/fastchess-src/fastchess \
+            -startup-ms 120000 -ping-ms 120000 -ucinewgame-ms 120000 \
+            -engine name=python-v15 cmd=/tmp/python-v15-uci \
+            -engine name=rust-v15 cmd=/tmp/rust-v15-launcher option.Hash=32 \
+            -each proto=uci tc=20+0.5 \
+            -rounds 32 -games 2 -repeat -concurrency 1 -maxmoves 120 \
+            -openings file=/tmp/direct.epd format=epd order=sequential \
+            -report penta=true \
+            -pgnout file=results/games.pgn append=false \
+            -log file=results/uci.log level=info engine=true append=false \
+            | tee results/fastchess.log
+      - name: Summarize Elo gap
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json,math
+          from pathlib import Path
+          import chess.pgn
+          wins=draws=losses=games=0
+          with Path('results/games.pgn').open() as h:
+              while True:
+                  g=chess.pgn.read_game(h)
+                  if g is None: break
+                  games+=1; r=g.headers.get('Result','*'); cw=g.headers.get('White','')=='python-v15'
+                  if r=='1/2-1/2': draws+=1
+                  elif (r=='1-0' and cw) or (r=='0-1' and not cw): wins+=1
+                  else: losses+=1
+          score=wins+0.5*draws; p=score/games
+          elo=400*math.log10(p/(1-p)) if 0<p<1 else (-9999 if p==0 else 9999)
+          out={'protocol':'20+0.5, 64 paired UHO games, concurrency 1','python':'final-v15','rust':'3a6a194d91c32b207397158da5a7af86c9a5404f','games':games,'wins':wins,'draws':draws,'losses':losses,'score':score,'score_fraction':p,'python_minus_rust_naive_elo':elo,'rust_minus_python_naive_elo':-elo}
+          Path('results/summary.json').write_text(json.dumps(out,indent=2)+'\n'); print('DIRECT_SUMMARY',json.dumps(out,sort_keys=True))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-final-vs-rust-${{ github.sha }}
+          path: results/
+          retention-days: 30
