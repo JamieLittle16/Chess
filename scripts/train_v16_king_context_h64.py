@@ -9,7 +9,6 @@ piece moves do not widen or update the accumulator.
 from __future__ import annotations
 
 import argparse
-import copy
 import hashlib
 import json
 from pathlib import Path
@@ -97,12 +96,12 @@ class Adam:
 
     def step(self, arrays: list[np.ndarray], grads: list[np.ndarray]) -> None:
         self.t += 1
-        b1, b2 = 0.9, 0.999
-        c1, c2 = 1.0 - b1**self.t, 1.0 - b2**self.t
-        for i, (a, g) in enumerate(zip(arrays, grads)):
-            self.m[i] = b1 * self.m[i] + (1.0 - b1) * g
-            self.v[i] = b2 * self.v[i] + (1.0 - b2) * np.square(g)
-            a -= self.lr * (self.m[i] / c1) / (np.sqrt(self.v[i] / c2) + 1e-8)
+        beta1, beta2 = 0.9, 0.999
+        c1, c2 = 1.0 - beta1**self.t, 1.0 - beta2**self.t
+        for i, (array, grad) in enumerate(zip(arrays, grads)):
+            self.m[i] = beta1 * self.m[i] + (1.0 - beta1) * grad
+            self.v[i] = beta2 * self.v[i] + (1.0 - beta2) * np.square(grad)
+            array -= self.lr * (self.m[i] / c1) / (np.sqrt(self.v[i] / c2) + 1e-8)
 
 
 def load_engine(engine: Path):
@@ -116,7 +115,7 @@ def main() -> int:
     a = parse_args()
     if not (0.0 < a.alpha <= 1.0):
         raise SystemExit("alpha must be in (0, 1]")
-    a.output_dir.mkdir(parents=True, exist_ok=False)
+    a.output_dir.mkdir(parents=True, exist_ok=True)
 
     model_path = a.engine_dir / "experiments" / "v14_student_h64.npz"
     with np.load(model_path) as z:
@@ -131,9 +130,9 @@ def main() -> int:
     for line in a.teacher.read_text().splitlines():
         if not line.strip():
             continue
-        r = json.loads(line)
-        if r.get("teacher_mate") is None and abs(int(r["teacher_cp"])) <= 5000:
-            rows.append(r)
+        row = json.loads(line)
+        if row.get("teacher_mate") is None and abs(int(row["teacher_cp"])) <= 5000:
+            rows.append(row)
     if not rows:
         raise SystemExit("no usable teacher rows")
 
@@ -147,25 +146,25 @@ def main() -> int:
     split_map = {"train": 0, "validation": 1, "holdout": 2}
 
     old_x = np.zeros((n, PIECE_FEATURES), dtype=np.float32)
-    for i, r in enumerate(rows):
-        board = chess.Board(r["fen"])
-        for sq, piece in board.piece_map().items():
-            idx = feature_index(piece, sq)
+    for i, row in enumerate(rows):
+        board = chess.Board(row["fen"])
+        for square, piece in board.piece_map().items():
+            idx = feature_index(piece, square)
             x[i, idx] = 1.0
             old_x[i, idx] = 1.0
-        wk = board.king(chess.WHITE)
-        bk = board.king(chess.BLACK)
-        if wk is None or bk is None:
+        white_king = board.king(chess.WHITE)
+        black_king = board.king(chess.BLACK)
+        if white_king is None or black_king is None:
             raise SystemExit("teacher row missing king")
-        x[i, PIECE_FEATURES + king_bucket(wk, True)] = 1.0
-        x[i, PIECE_FEATURES + KING_BUCKETS + king_bucket(bk, False)] = 1.0
+        x[i, PIECE_FEATURES + king_bucket(white_king, True)] = 1.0
+        x[i, PIECE_FEATURES + KING_BUCKETS + king_bucket(black_king, False)] = 1.0
         enc = encode_position(board)
         state = np.empty(eval_width, dtype=np.int32)
         build_state(enc.board, state)
         v13[i] = int(v13_eval(enc.side, state))
-        teacher[i] = int(r["teacher_cp"])
+        teacher[i] = int(row["teacher_cp"])
         sign[i] = 1.0 if board.turn == chess.WHITE else -1.0
-        split[i] = split_map[str(r["split"])]
+        split[i] = split_map[str(row["split"])]
 
     old_raw_white = quant_forward_raw_cp(old_x, q_old_w0, q_old_b0, q_old_w1, q_old_b1).astype(np.float32)
     old_deployed_stm = v13 + sign * trunc_div(old_raw_white.astype(np.int64), DEPLOY_DEN).astype(np.float32)
@@ -219,7 +218,7 @@ def main() -> int:
         print(json.dumps(history[-1]), flush=True)
         if rmse < best_rmse:
             best_rmse = rmse
-            best = [z.copy() for z in arrays]
+            best = [value.copy() for value in arrays]
 
     if best is None:
         raise AssertionError("no checkpoint")
@@ -228,12 +227,12 @@ def main() -> int:
     raw_cp = quant_forward_raw_cp(x, qw0, qb0, qw1, qb1).astype(np.float32)
     deployed_stm = v13 + sign * trunc_div(raw_cp.astype(np.int64), DEPLOY_DEN).astype(np.float32)
 
-    def metrics(ii: np.ndarray) -> dict[str, float | int]:
+    def metrics(indices: np.ndarray) -> dict[str, float | int]:
         return {
-            "records": int(len(ii)),
-            "teacher_rmse_old_cp": float(np.sqrt(np.mean(np.square(teacher[ii] - old_deployed_stm[ii], dtype=np.float64)))),
-            "teacher_rmse_new_cp": float(np.sqrt(np.mean(np.square(teacher[ii] - deployed_stm[ii], dtype=np.float64)))),
-            "mean_abs_delta_from_old_cp": float(np.mean(np.abs(deployed_stm[ii] - old_deployed_stm[ii]))),
+            "records": int(len(indices)),
+            "teacher_rmse_old_cp": float(np.sqrt(np.mean(np.square(teacher[indices] - old_deployed_stm[indices], dtype=np.float64)))),
+            "teacher_rmse_new_cp": float(np.sqrt(np.mean(np.square(teacher[indices] - deployed_stm[indices], dtype=np.float64)))),
+            "mean_abs_delta_from_old_cp": float(np.mean(np.abs(deployed_stm[indices] - old_deployed_stm[indices]))),
         }
 
     metadata = {
@@ -247,9 +246,15 @@ def main() -> int:
         "metrics": {"train": metrics(train_idx), "validation": metrics(val_idx), "holdout": metrics(hold_idx)},
         "history": history,
     }
-    np.savez_compressed(a.output_dir / "student-h64-king-context.npz", feature_weights=qw0, feature_bias=qb0, output_weights=qw1, output_bias=qb1)
+    np.savez_compressed(
+        a.output_dir / "student-h64-king-context.npz",
+        feature_weights=qw0,
+        feature_bias=qb0,
+        output_weights=qw1,
+        output_bias=qb1,
+    )
     (a.output_dir / "training-metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
-    print(json.dumps({k: v for k, v in metadata.items() if k != "history"}, indent=2, sort_keys=True))
+    print(json.dumps({key: value for key, value in metadata.items() if key != "history"}, indent=2, sort_keys=True))
     return 0
 
 
