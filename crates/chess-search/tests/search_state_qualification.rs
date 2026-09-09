@@ -72,20 +72,19 @@ fn interrupted_searcher_can_be_reused_without_transient_state_leakage() {
 #[test]
 fn interrupted_same_root_then_complete_matches_fresh_searcher() {
     const BUDGETS: [u64; 6] = [2, 5, 13, 29, 61, 127];
-    let root = Position::from_fen(
-        "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
-    )
-    .expect("valid reuse root");
+    let root =
+        Position::from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1")
+            .expect("valid reuse root");
 
     for budget in BUDGETS {
         let mut reused = Searcher::with_tt_entries(1 << 15);
         let mut interrupted = root.clone();
-        let stopped = reused.iterative_deepening_controlled(
-            &mut interrupted,
-            8,
-            &StopAtNodes(budget),
+        let stopped =
+            reused.iterative_deepening_controlled(&mut interrupted, 8, &StopAtNodes(budget));
+        assert!(
+            stopped.stopped,
+            "budget {budget} should interrupt the search"
         );
-        assert!(stopped.stopped, "budget {budget} should interrupt the search");
         assert_eq!(interrupted, root, "budget {budget}");
 
         let mut reused_root = root.clone();
@@ -298,8 +297,7 @@ fn fullmove_clock_is_search_irrelevant() {
 #[test]
 fn irrelevant_en_passant_metadata_is_search_neutral() {
     let plain = Position::from_fen("7k/8/8/8/8/8/6Q1/K7 w - - 0 1").expect("valid FEN");
-    let irrelevant_ep =
-        Position::from_fen("7k/8/8/8/8/8/6Q1/K7 w - e6 0 1").expect("valid FEN");
+    let irrelevant_ep = Position::from_fen("7k/8/8/8/8/8/6Q1/K7 w - e6 0 1").expect("valid FEN");
 
     assert_ne!(plain.zobrist_key(), irrelevant_ep.zobrist_key());
     assert_eq!(plain.repetition_key(), irrelevant_ep.repetition_key());
@@ -344,8 +342,7 @@ fn mate_in_one_distance_is_stable_across_depths_and_tt_reuse() {
 
 #[test]
 fn terminal_roots_are_depth_and_hash_invariant() {
-    let checkmate =
-        Position::from_fen("7k/6Q1/5K2/8/8/8/8/8 b - - 0 1").expect("valid mate FEN");
+    let checkmate = Position::from_fen("7k/6Q1/5K2/8/8/8/8/8 b - - 0 1").expect("valid mate FEN");
     let stalemate =
         Position::from_fen("7k/5K2/6Q1/8/8/8/8/8 b - - 0 1").expect("valid stalemate FEN");
 
