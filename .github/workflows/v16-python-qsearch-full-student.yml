@@ -1,0 +1,95 @@
+name: V16 Python full-H64 quiescence qualification
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v16/python-qsearch-full-student]
+    paths:
+      - '.github/workflows/v16-python-qsearch-full-student.yml'
+      - 'scripts/patch_v16_python_qsearch_full_student.py'
+      - 'tools/v14_fixed_node_bench.py'
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Materialize accepted-history control and full-H64-qsearch candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
+          rm -rf /tmp/control /tmp/candidate results
+          mkdir -p /tmp/control /tmp/candidate results
+          unzip -q "$ZIP" -d /tmp/control
+          python scripts/patch_v16_python_presort_once.py /tmp/control/experiments/numba_search.py
+          python scripts/patch_v16_python_trusted_continuity.py /tmp/control/agent.py
+          python scripts/patch_v16_python_rust_history.py /tmp/control/experiments/numba_search.py
+          cp -a /tmp/control/. /tmp/candidate/
+          python scripts/patch_v16_python_qsearch_full_student.py /tmp/candidate/experiments/numba_search.py
+          python -m py_compile tools/v14_agent_runner.py tools/v14_fixed_node_arena.py tools/v14_fixed_node_bench.py scripts/v15_competition_gate.py /tmp/control/agent.py /tmp/control/experiments/*.py /tmp/candidate/agent.py /tmp/candidate/experiments/*.py
+          grep -q 'Keep the V14 H64 student live at every stable quiescence node' /tmp/candidate/experiments/numba_search.py
+          if grep -q 'eval_stack\[ply, :EVAL_V13_WIDTH\]' /tmp/candidate/experiments/numba_search.py; then
+            echo 'stale V13-only qsearch transport remains' >&2; exit 1
+          fi
+      - name: Build fresh qualification roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6; mkdir /tmp/m6
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          chosen=fresh[3200:3280]
+          assert len(chosen)==80 and len(set(chosen))==80
+          Path('/tmp/qfull-node.epd').write_text('\n'.join(chosen[:48])+'\n')
+          Path('/tmp/qfull-clock.epd').write_text('\n'.join(chosen[48:])+'\n')
+          PY
+      - name: Alternating fixed-node throughput
+        run: |
+          python -u tools/v14_fixed_node_bench.py /tmp/candidate /tmp/control \
+            --openings /tmp/qfull-node.epd --nodes 25000 --roots 16 --reps 5 \
+            --output results/throughput.json | tee results/throughput.log
+      - name: 96-game equal-node screen
+        run: |
+          python -u tools/v14_fixed_node_arena.py /tmp/candidate /tmp/control \
+            --nodes 20000 --pairs 48 --opening-file /tmp/qfull-node.epd \
+            --max-plies 220 --json-out results/equal-node.json | tee results/equal-node.log
+      - name: 64-game competition-clock screen
+        run: |
+          python -u scripts/v15_competition_gate.py \
+            --control /tmp/control --candidate /tmp/candidate \
+            --openings /tmp/qfull-clock.epd \
+            --output results/timed.json \
+            --label 'Rust-history + full H64 through qsearch' \
+            --base-ms 2500 --inc-ms 50 --max-plies 180 --grace-ms 1500 \
+            | tee results/timed.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v16-python-qsearch-full-student-${{ github.sha }}
+          path: results/
+          retention-days: 30
