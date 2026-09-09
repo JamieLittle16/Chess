@@ -1,5 +1,6 @@
 name: V16 decision-aware H64 head qualification
 
+# Qualification rerun after materialising the accepted Python baseline/history patchers on this branch.
 on:
   workflow_dispatch:
   push:
