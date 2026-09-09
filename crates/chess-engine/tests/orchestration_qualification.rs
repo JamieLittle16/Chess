@@ -110,17 +110,21 @@ fn node_limited_search_preserves_nontrivial_game_history_for_many_budgets() {
 
     for budget in BUDGETS {
         let mut engine = Engine::new();
-        engine.set_position_with_prior_history(position.clone(), history[..history.len() - 1].to_vec());
+        engine.set_position_with_prior_history(
+            position.clone(),
+            history[..history.len() - 1].to_vec(),
+        );
         let before_position = engine.position().clone();
         let before_history = engine.repetition_history().to_vec();
 
-        let outcome = engine.search_with_limits(
-            SearchLimits::nodes(8, budget),
-            &StopToken::new(),
-        );
+        let outcome = engine.search_with_limits(SearchLimits::nodes(8, budget), &StopToken::new());
         assert!(outcome.stopped, "small node budget should interrupt search");
         assert_eq!(engine.position(), &before_position, "budget {budget}");
-        assert_eq!(engine.repetition_history(), before_history, "budget {budget}");
+        assert_eq!(
+            engine.repetition_history(),
+            before_history,
+            "budget {budget}"
+        );
     }
 }
 
