@@ -201,8 +201,7 @@ fn assert_all_legal_transitions_match_reference(position: &Position, label: &str
         assert_eq!(actual, expected, "make_move mismatch for {mv:?}: {label}");
         actual.unmake_move(mv, undo);
         assert_eq!(
-            &actual,
-            position,
+            &actual, position,
             "unmake_move mismatch for {mv:?}: {label}"
         );
     }
