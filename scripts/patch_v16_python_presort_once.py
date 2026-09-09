@@ -3,6 +3,7 @@
 
 Search semantics remain identical: the same move scores are used and equal scores retain generator
 order. The full stable descending order is materialised once, then search consumes it linearly.
+The V16 decision-head lab also uses this file as a qualification trigger after runner materialisation.
 """
 from pathlib import Path
 import sys
