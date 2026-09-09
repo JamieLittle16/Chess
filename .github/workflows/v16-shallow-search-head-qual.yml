@@ -1,0 +1,146 @@
+name: V16 shallow-search H64 head qualification
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [analysis/v16-shallow-search-distill]
+    paths:
+      - '.github/workflows/v16-shallow-search-head-qual.yml'
+      - 'scripts/train_v16_shallow_search_head.py'
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  train:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Download frozen shallow Rust-search corpus
+        uses: actions/download-artifact@v4
+        with:
+          name: v16-rust-shallow-search-corpus-c3b93af4f7c225bc63b505531d76d78e3794aecb
+          path: search-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34297746584
+      - name: Train anchored correction heads
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
+          CORPUS=$(find search-artifact -type f -name rust-shallow-search.jsonl -print -quit); test -n "$CORPUS"
+          rm -rf /tmp/v14 results; mkdir -p /tmp/v14 results
+          unzip -q "$ZIP" -d /tmp/v14
+          python -u scripts/train_v16_shallow_search_head.py \
+            --corpus "$CORPUS" --engine-dir /tmp/v14 --output-dir results/models \
+            | tee results/train.log
+          for n in c025b1 c050b2 c100b2; do test -f "results/models/shallow-search-head-${n}.npz"; done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v16-shallow-search-head-models-${{ github.sha }}
+          path: results/
+          retention-days: 30
+
+  qualify:
+    needs: train
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [c025b1, c050b2, c100b2]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Download trained heads
+        uses: actions/download-artifact@v4
+        with:
+          name: v16-shallow-search-head-models-${{ github.sha }}
+          path: model-artifact
+      - name: Materialize accepted-history control and candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
+          MODEL=$(find model-artifact -type f -name 'shallow-search-head-${{ matrix.model }}.npz' -print -quit); test -n "$MODEL"
+          rm -rf /tmp/control /tmp/candidate results; mkdir -p /tmp/control /tmp/candidate results
+          unzip -q "$ZIP" -d /tmp/control
+          python scripts/patch_v16_python_presort_once.py /tmp/control/experiments/numba_search.py
+          python scripts/patch_v16_python_trusted_continuity.py /tmp/control/agent.py
+          python scripts/patch_v16_python_rust_history.py /tmp/control/experiments/numba_search.py
+          cp -a /tmp/control/. /tmp/candidate/
+          cp "$MODEL" /tmp/candidate/experiments/v14_student_h64.npz
+          python -m py_compile tools/v14_agent_runner.py tools/v14_fixed_node_arena.py scripts/v15_competition_gate.py /tmp/control/agent.py /tmp/control/experiments/*.py /tmp/candidate/agent.py /tmp/candidate/experiments/*.py
+          python - <<'PY'
+          import numpy as np
+          c=np.load('/tmp/control/experiments/v14_student_h64.npz',allow_pickle=False)
+          n=np.load('/tmp/candidate/experiments/v14_student_h64.npz',allow_pickle=False)
+          assert np.array_equal(c['feature_weights'],n['feature_weights'])
+          assert np.array_equal(c['feature_bias'],n['feature_bias'])
+          d=n['output_weights'].astype(int)-c['output_weights'].astype(int)
+          assert np.any(d != 0)
+          print({'changed_lanes':int(np.count_nonzero(d)),'max_abs_step':int(np.max(np.abs(d))),'delta':d.tolist()})
+          PY
+      - name: Build fresh qualification roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6; mkdir /tmp/m6
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          chosen=fresh[2700:2780]
+          assert len(chosen)==80 and len(set(chosen))==80
+          Path('/tmp/search-head-node.epd').write_text('\n'.join(chosen[:48])+'\n')
+          Path('/tmp/search-head-clock.epd').write_text('\n'.join(chosen[48:])+'\n')
+          PY
+      - name: 96-game equal-node screen
+        run: |
+          python -u tools/v14_fixed_node_arena.py /tmp/candidate /tmp/control \
+            --nodes 20000 --pairs 48 --opening-file /tmp/search-head-node.epd \
+            --max-plies 220 --json-out results/equal-node-${{ matrix.model }}.json \
+            | tee results/equal-node-${{ matrix.model }}.log
+      - name: 64-game competition-clock screen
+        run: |
+          python -u scripts/v15_competition_gate.py \
+            --control /tmp/control --candidate /tmp/candidate \
+            --openings /tmp/search-head-clock.epd \
+            --output results/timed-${{ matrix.model }}.json \
+            --label 'Rust-history + shallow-search H64 ${{ matrix.model }}' \
+            --base-ms 2500 --inc-ms 50 --max-plies 180 --grace-ms 1500 \
+            | tee results/timed-${{ matrix.model }}.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v16-shallow-search-head-${{ matrix.model }}-${{ github.sha }}
+          path: results/
+          retention-days: 30
