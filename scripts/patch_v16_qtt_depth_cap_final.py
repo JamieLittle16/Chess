@@ -23,9 +23,14 @@ one(
     """    tt_index = _tt_index(current_key, current_tt_context)\n    old_meta = tt_table[TT_META_OFFSET + tt_index]\n""",
     """    if q_depth < TT_QDEPTH_BASE + max(0, MAX_QPLY - QTT_ACTIVE_MAX_QPLY):\n        return\n    tt_index = _tt_index(current_key, current_tt_context)\n    old_meta = tt_table[TT_META_OFFSET + tt_index]\n""",
 )
-one(
-    """    tt_match = (\n        tt_table[TT_KEYS_OFFSET + tt_index] == current_key\n        and tt_table[TT_CONTEXTS_OFFSET + tt_index] == current_tt_context\n        and tt_table[TT_META_OFFSET + tt_index] != np.uint64(0)\n    )\n""",
-    """    tt_match = (\n        qply <= QTT_ACTIVE_MAX_QPLY\n        and tt_table[TT_KEYS_OFFSET + tt_index] == current_key\n        and tt_table[TT_CONTEXTS_OFFSET + tt_index] == current_tt_context\n        and tt_table[TT_META_OFFSET + tt_index] != np.uint64(0)\n    )\n""",
-)
+qstart = s.index("def _quiescence(")
+qend = s.index("\n\n@njit(cache=False, inline=\"never\")\ndef _is_elementary_dead_material", qstart)
+q = s[qstart:qend]
+old = """    tt_match = (\n        tt_table[TT_KEYS_OFFSET + tt_index] == current_key\n        and tt_table[TT_CONTEXTS_OFFSET + tt_index] == current_tt_context\n        and tt_table[TT_META_OFFSET + tt_index] != np.uint64(0)\n    )\n"""
+new = """    tt_match = (\n        qply <= QTT_ACTIVE_MAX_QPLY\n        and tt_table[TT_KEYS_OFFSET + tt_index] == current_key\n        and tt_table[TT_CONTEXTS_OFFSET + tt_index] == current_tt_context\n        and tt_table[TT_META_OFFSET + tt_index] != np.uint64(0)\n    )\n"""
+if q.count(old) != 1:
+    raise SystemExit(f"qsearch lookup anchor count {q.count(old)}")
+q = q.replace(old, new, 1)
+s = s[:qstart] + q + s[qend:]
 p.write_text(s)
 print(f"patched qTT active max qply = {cap}")
