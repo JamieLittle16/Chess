@@ -1,0 +1,103 @@
+name: V15 Python safe b050 speed stack
+
+on:
+  push:
+    branches: [analysis/v15-python-safe-b050-stack-20260909]
+    paths:
+      - .github/workflows/v15-python-safe-b050-stack.yml
+  workflow_dispatch:
+
+permissions: {contents: read, actions: read}
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+
+      - name: Download replicated b050 search-leaf H64 model
+        uses: actions/download-artifact@v4
+        with:
+          name: v15-python-searchleaf-h64-b050-94ef8e11b956050aaa057863010ce555d76733af
+          path: model-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34290665543
+
+      - name: Materialize V14 baseline, b050 semantic control, and final safe candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
+          MODEL=$(find model-artifact -type f -name v14_student_h64.npz -print -quit); test -n "$MODEL"
+          rm -rf /tmp/base /tmp/sem /tmp/cand results; mkdir -p /tmp/base /tmp/sem /tmp/cand results
+          unzip -q "$ZIP" -d /tmp/base; cp -a /tmp/base/. /tmp/sem/; cp -a /tmp/base/. /tmp/cand/
+
+          # Competition baseline: exact V14 plus accepted one-pass presort.
+          python scripts/patch_v15_python_presort_once.py /tmp/base/experiments/numba_search.py
+
+          # Semantic control: same b050 evaluator, no exact-speed transport changes.
+          python scripts/patch_v15_python_presort_once.py /tmp/sem/experiments/numba_search.py
+          cp "$MODEL" /tmp/sem/experiments/v14_student_h64.npz
+
+          # Candidate: b050 evaluator plus the fully qualified exact-speed stack.
+          python scripts/patch_v15_python_presort_once.py /tmp/cand/experiments/numba_search.py
+          cp "$MODEL" /tmp/cand/experiments/v14_student_h64.npz
+          python scripts/patch_v15_python_fused_h64_direct.py /tmp/cand/experiments/v14_student_single_runtime.py
+          python scripts/patch_v15_python_inline_fused_h64.py /tmp/cand/experiments/v14_student_single_runtime.py
+          python scripts/patch_v15_python_fused_h64_zero_guard.py /tmp/cand/experiments/v14_student_single_runtime.py
+          python scripts/patch_v15_python_lazy_h64_chain.py /tmp/cand/experiments/numba_search.py
+          python scripts/patch_v15_python_scoremeta_hotloop.py /tmp/cand/experiments/numba_search.py
+
+          python -m py_compile tools/v14_agent_runner.py /tmp/base/agent.py /tmp/sem/agent.py /tmp/cand/agent.py /tmp/base/experiments/*.py /tmp/sem/experiments/*.py /tmp/cand/experiments/*.py
+
+      - name: Build fresh qualification roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6; mkdir /tmp/m6
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          parity=fresh[3900:3924]; equal=fresh[3925:3973]; timed=fresh[3975:4071]
+          assert len(parity)==24 and len(equal)==48 and len(timed)==96
+          assert not set(parity)&set(equal) and not set(parity)&set(timed) and not set(equal)&set(timed)
+          Path('/tmp/parity.epd').write_text('\n'.join(parity)+'\n')
+          Path('/tmp/equal.epd').write_text('\n'.join(equal)+'\n')
+          Path('/tmp/timed.epd').write_text('\n'.join(timed)+'\n')
+          PY
+
+      - name: Exact fixed-node parity versus b050 semantic control
+        run: python -u tools/v14_fixed_node_arena.py /tmp/cand /tmp/sem --nodes 26000 --pairs 24 --opening-file /tmp/parity.epd --opening-offset 0 --max-plies 200 --json-out results/parity.json | tee results/parity.log
+
+      - name: 96-game equal-node combined strength
+        run: python -u tools/v14_fixed_node_arena.py /tmp/cand /tmp/base --nodes 30000 --pairs 48 --opening-file /tmp/equal.epd --opening-offset 0 --max-plies 200 --json-out results/equal-node.json | tee results/equal-node.log
+
+      - name: 192-game competition-clock combined confirmation
+        run: python -u scripts/v15_competition_gate.py --candidate /tmp/cand --control /tmp/base --openings /tmp/timed.epd --output results/timed-192.json --label safe-b050-speed-stack --base-ms 2500 --inc-ms 50 --max-plies 180 | tee results/timed-192.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-safe-b050-stack-${{ github.sha }}
+          path: results/
+          retention-days: 30
