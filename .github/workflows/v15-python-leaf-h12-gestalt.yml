@@ -6,6 +6,7 @@ on:
       - analysis/v15-python-leaf-h12-gestalt-20260909
     paths:
       - .github/workflows/v15-python-leaf-h12-gestalt.yml
+      - scripts/train_v15_gestalt_topology_student.py
   workflow_dispatch:
 
 permissions:
