@@ -70,6 +70,40 @@ fn interrupted_searcher_can_be_reused_without_transient_state_leakage() {
 }
 
 #[test]
+fn interrupted_same_root_then_complete_matches_fresh_searcher() {
+    const BUDGETS: [u64; 6] = [2, 5, 13, 29, 61, 127];
+    let root = Position::from_fen(
+        "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+    )
+    .expect("valid reuse root");
+
+    for budget in BUDGETS {
+        let mut reused = Searcher::with_tt_entries(1 << 15);
+        let mut interrupted = root.clone();
+        let stopped = reused.iterative_deepening_controlled(
+            &mut interrupted,
+            8,
+            &StopAtNodes(budget),
+        );
+        assert!(stopped.stopped, "budget {budget} should interrupt the search");
+        assert_eq!(interrupted, root, "budget {budget}");
+
+        let mut reused_root = root.clone();
+        let mut fresh_root = root.clone();
+        let reused_result = reused.search_depth(&mut reused_root, 3);
+        let fresh_result = Searcher::with_tt_entries(1 << 15).search_depth(&mut fresh_root, 3);
+
+        assert_eq!(reused_result.score, fresh_result.score, "budget {budget}");
+        assert_eq!(
+            reused_result.best_move, fresh_result.best_move,
+            "budget {budget}"
+        );
+        assert_eq!(reused_root, root, "budget {budget}");
+        assert_eq!(fresh_root, root, "budget {budget}");
+    }
+}
+
+#[test]
 fn one_entry_tt_collisions_never_reuse_foreign_positions() {
     let positions = [
         "7k/8/8/8/8/8/6Q1/K7 w - - 0 1",
@@ -140,6 +174,29 @@ fn transposition_cache_cannot_override_halfmove_draw_context() {
 }
 
 #[test]
+fn draw_context_search_cannot_poison_a_later_live_search() {
+    let live = Position::from_fen("7k/8/8/8/8/8/6Q1/K7 w - - 0 1").expect("valid live FEN");
+    let drawn = Position::from_fen("7k/8/8/8/8/8/6Q1/K7 w - - 100 1").expect("valid draw FEN");
+    let mut reused = Searcher::with_tt_entries(1 << 12);
+
+    let mut draw_root = drawn.clone();
+    let draw = reused.search_depth(&mut draw_root, 3);
+    assert_eq!(draw.score, 0);
+    assert_eq!(draw_root, drawn);
+
+    let mut reused_live = live.clone();
+    let mut fresh_live = live.clone();
+    let reused_result = reused.search_depth(&mut reused_live, 3);
+    let fresh_result = Searcher::with_tt_entries(1 << 12).search_depth(&mut fresh_live, 3);
+
+    assert_eq!(reused_result.score, fresh_result.score);
+    assert_eq!(reused_result.best_move, fresh_result.best_move);
+    assert!(reused_result.score > 0);
+    assert_eq!(reused_live, live);
+    assert_eq!(fresh_live, live);
+}
+
+#[test]
 fn repetition_threshold_and_normalized_identity_survive_tt_reuse() {
     let without_ep = Position::from_fen("7k/8/8/8/8/8/6Q1/K7 w - - 0 1").expect("valid FEN");
     let with_irrelevant_ep =
@@ -175,6 +232,137 @@ fn repetition_threshold_and_normalized_identity_survive_tt_reuse() {
     );
     assert!(third.best_move.is_some());
     assert_eq!(third_occurrence, with_irrelevant_ep);
+}
+
+#[test]
+fn repetition_draw_context_cannot_poison_a_later_live_search() {
+    let root = Position::from_fen("7k/8/8/8/8/8/6Q1/K7 w - - 0 1").expect("valid FEN");
+    let key = root.repetition_key().raw();
+    let mut reused = Searcher::with_tt_entries(1 << 12);
+
+    let mut drawn_root = root.clone();
+    let draw = reused.search_depth_with_history(&mut drawn_root, &[key, key], 3);
+    assert_eq!(draw.score, 0);
+    assert_eq!(drawn_root, root);
+
+    let mut reused_live = root.clone();
+    let mut fresh_live = root.clone();
+    let reused_result = reused.search_depth(&mut reused_live, 3);
+    let fresh_result = Searcher::with_tt_entries(1 << 12).search_depth(&mut fresh_live, 3);
+
+    assert_eq!(reused_result.score, fresh_result.score);
+    assert_eq!(reused_result.best_move, fresh_result.best_move);
+    assert!(reused_result.score > 0);
+    assert_eq!(reused_live, root);
+    assert_eq!(fresh_live, root);
+}
+
+#[test]
+fn fullmove_clock_is_search_irrelevant() {
+    let roots = [
+        (
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 73",
+        ),
+        (
+            "7k/8/8/8/8/8/6Q1/K7 w - - 0 1",
+            "7k/8/8/8/8/8/6Q1/K7 w - - 0 99",
+        ),
+    ];
+
+    for (early_fen, late_fen) in roots {
+        let early = Position::from_fen(early_fen).expect("valid early FEN");
+        let late = Position::from_fen(late_fen).expect("valid late FEN");
+        assert_eq!(early.zobrist_key(), late.zobrist_key());
+        assert_eq!(early.repetition_key(), late.repetition_key());
+
+        for depth in 1..=3 {
+            let mut early_working = early.clone();
+            let mut late_working = late.clone();
+            let early_result =
+                Searcher::with_tt_entries(1 << 12).search_depth(&mut early_working, depth);
+            let late_result =
+                Searcher::with_tt_entries(1 << 12).search_depth(&mut late_working, depth);
+
+            assert_eq!(early_result.score, late_result.score, "depth {depth}");
+            assert_eq!(
+                early_result.best_move, late_result.best_move,
+                "depth {depth}"
+            );
+            assert_eq!(early_working, early);
+            assert_eq!(late_working, late);
+        }
+    }
+}
+
+#[test]
+fn irrelevant_en_passant_metadata_is_search_neutral() {
+    let plain = Position::from_fen("7k/8/8/8/8/8/6Q1/K7 w - - 0 1").expect("valid FEN");
+    let irrelevant_ep =
+        Position::from_fen("7k/8/8/8/8/8/6Q1/K7 w - e6 0 1").expect("valid FEN");
+
+    assert_ne!(plain.zobrist_key(), irrelevant_ep.zobrist_key());
+    assert_eq!(plain.repetition_key(), irrelevant_ep.repetition_key());
+    assert_eq!(plain.legal_moves(), irrelevant_ep.legal_moves());
+
+    for depth in 1..=3 {
+        let mut plain_working = plain.clone();
+        let mut ep_working = irrelevant_ep.clone();
+        let plain_result =
+            Searcher::with_tt_entries(1 << 12).search_depth(&mut plain_working, depth);
+        let ep_result = Searcher::with_tt_entries(1 << 12).search_depth(&mut ep_working, depth);
+
+        assert_eq!(plain_result.score, ep_result.score, "depth {depth}");
+        assert_eq!(plain_result.best_move, ep_result.best_move, "depth {depth}");
+        assert_eq!(plain_working, plain);
+        assert_eq!(ep_working, irrelevant_ep);
+    }
+}
+
+#[test]
+fn mate_in_one_distance_is_stable_across_depths_and_tt_reuse() {
+    let root = Position::from_fen("7k/5Q2/6K1/8/8/8/8/8 w - - 0 1").expect("valid mate FEN");
+    let legal = root.legal_moves();
+    let mut reused = Searcher::with_tt_entries(1 << 12);
+
+    for depth in 1..=5 {
+        let mut working = root.clone();
+        let result = reused.search_depth(&mut working, depth);
+        assert_eq!(result.score, MATE_SCORE - 1, "depth {depth}");
+        let mv = result.best_move.expect("mate in one has a best move");
+        assert!(legal.as_slice().contains(&mv));
+
+        let mut child = root.clone();
+        let _undo = child.make_move(mv);
+        assert!(child.is_in_check(child.side_to_move()));
+        assert!(child.legal_moves().is_empty());
+        assert_eq!(working, root);
+    }
+}
+
+#[test]
+fn terminal_roots_are_depth_and_hash_invariant() {
+    let checkmate =
+        Position::from_fen("7k/6Q1/5K2/8/8/8/8/8 b - - 0 1").expect("valid mate FEN");
+    let stalemate =
+        Position::from_fen("7k/5K2/6Q1/8/8/8/8/8 b - - 0 1").expect("valid stalemate FEN");
+
+    for entries in [0, 1, 17, 1 << 12] {
+        let mut searcher = Searcher::with_tt_entries(entries);
+        for depth in 0..=4 {
+            let mut mate_working = checkmate.clone();
+            let mate = searcher.search_depth(&mut mate_working, depth);
+            assert_eq!(mate.best_move, None);
+            assert_eq!(mate.score, -MATE_SCORE);
+            assert_eq!(mate_working, checkmate);
+
+            let mut stale_working = stalemate.clone();
+            let stale = searcher.search_depth(&mut stale_working, depth);
+            assert_eq!(stale.best_move, None);
+            assert_eq!(stale.score, 0);
+            assert_eq!(stale_working, stalemate);
+        }
+    }
 }
 
 #[test]
