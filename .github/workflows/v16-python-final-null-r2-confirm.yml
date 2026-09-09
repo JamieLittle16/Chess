@@ -1,0 +1,88 @@
+name: V16 final null-r2 direct confirmation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v16/python-final-null-r2-confirm]
+    paths: ['.github/workflows/v16-python-final-null-r2-confirm.yml']
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  confirm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Materialize exact V15 and qTT null-r2 endpoint
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/v15-art /tmp/null-art /tmp/control /tmp/candidate results
+          mkdir -p /tmp/control /tmp/candidate results
+          gh run download 34298586524 -n Little-Gambit-V15-FINAL-725be3e8595d1e54b1f12e11f2b9d92f1e415ebc -D /tmp/v15-art
+          V15=$(find /tmp/v15-art -type f -name Little-Gambit-V15.zip -print -quit); test -n "$V15"
+          echo '81e22344bf9a6b41f16e32f29f93c0b6074afe63e4fd51002a537e6a091f2852  '"$V15" | sha256sum --check --strict
+          unzip -q "$V15" -d /tmp/control
+          gh run download 34355640348 -n v16-qtt-null-r2-opt2-0e2a31b97067052539193773bb7e55a6cd61bc16 -D /tmp/null-art
+          CAND=$(find /tmp/null-art -type f -name 'Little-Gambit-V16-null-r2-opt2.zip' -print -quit); test -n "$CAND"
+          unzip -q "$CAND" -d /tmp/candidate
+          cp "$CAND" results/Little-Gambit-V16-null-r2-opt2.zip
+          sha256sum "$V15" "$CAND" | tee results/package-hashes.txt
+          python -m py_compile /tmp/control/agent.py /tmp/control/experiments/*.py /tmp/candidate/agent.py /tmp/candidate/experiments/*.py
+          grep -q 'TT_QDEPTH_BASE = 64' /tmp/candidate/experiments/numba_search.py
+          grep -q 'NULL_MIN_DEPTH = 5' /tmp/candidate/experiments/numba_search.py
+          grep -q 'NUMBA_OPT' /tmp/candidate/agent.py
+
+      - name: Hard 82-second cold-start reconfirmation
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/cold /tmp/home /tmp/cache /tmp/numba; mkdir /tmp/cold
+          unzip -q results/Little-Gambit-V16-null-r2-opt2.zip -d /tmp/cold
+          /usr/bin/time -f 'PROCESS_WALL_SECONDS %e\nPROCESS_CPU_SECONDS %U' -o results/cold-process.txt \
+            timeout 82s env PYTHONPATH=/tmp/cold HOME=/tmp/home XDG_CACHE_HOME=/tmp/cache NUMBA_CACHE_DIR=/tmp/numba OMP_NUM_THREADS=1 \
+            python - <<'PY' > results/cold.txt 2>&1
+          import sys,time
+          from importlib import import_module
+          t=time.perf_counter(); sys.path.insert(0,'/tmp/cold'); import_module('agent'); print('READY_SECONDS',time.perf_counter()-t)
+          PY
+          cat results/cold-process.txt results/cold.txt
+
+      - name: Build 64 fresh paired UHO roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6; mkdir /tmp/m6
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          roots=fresh[4728:4792]
+          assert len(roots)==64 and len(set(roots))==64
+          Path('/tmp/final-null.epd').write_text('\n'.join(roots)+'\n')
+          PY
+
+      - name: 128-game direct real-clock V16 endpoint versus exact V15
+        run: python -u scripts/v15_competition_gate.py --control /tmp/control --candidate /tmp/candidate --openings /tmp/final-null.epd --output results/timed-128.json --label 'V16 qTT null-r2 OPT2 direct vs exact V15' --base-ms 2500 --inc-ms 50 --max-plies 180 --grace-ms 1500 | tee results/timed-128.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v16-final-null-r2-direct-${{ github.sha }}
+          path: results/
+          retention-days: 30
