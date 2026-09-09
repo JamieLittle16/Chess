@@ -20,10 +20,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.98.1
-      - name: Build exact Rust V15 UCI and Gestalt teacher
+      - name: Build exact Rust V15 UCI and Gestalt oracle
         run: |
           cargo build --release -p chess-uci
-          cargo build --release -p chess-eval --example gestalt_teacher
+          cargo build --release -p chess-eval --example gestalt_runtime_oracle
       - name: Download exact production Gestalt
         shell: bash
         run: |
@@ -33,15 +33,16 @@ jobs:
           echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  /tmp/gestalt/gestalt-b840.nnue' | sha256sum --check --strict
       - name: Compare exact Gestalt child evaluations
         shell: bash
-        env:
-          CHESS_GESTALT_NETWORK: /tmp/gestalt/gestalt-b840.nnue
         run: |
           set -euo pipefail
-          cat >/tmp/children.fen <<'EOF'
-          2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr1PP1/P5B1/R1Q2RK1 b - - 0 23
-          2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/1RQ2RK1 b - - 2 23
-          EOF
-          target/release/examples/gestalt_teacher < /tmp/children.fen | tee /tmp/gestalt-children.tsv
+          F3='2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr1PP1/P5B1/R1Q2RK1 b - - 0 23'
+          RB1='2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/1RQ2RK1 b - - 2 23'
+          {
+            printf 'f3\t'
+            target/release/examples/gestalt_runtime_oracle /tmp/gestalt/gestalt-b840.nnue "$F3"
+            printf 'Rb1\t'
+            target/release/examples/gestalt_runtime_oracle /tmp/gestalt/gestalt-b840.nnue "$RB1"
+          } | tee /tmp/gestalt-children.tsv
       - name: Probe Rust V15 search on canonical Round-61 root
         shell: bash
         env:
@@ -57,7 +58,7 @@ jobs:
               echo isready
               echo "position fen $FEN"
               echo "go nodes $N"
-              sleep 2
+              sleep 3
               echo quit
             } | target/release/chess-uci 2>&1 | tee -a /tmp/rust-search.txt
           done
