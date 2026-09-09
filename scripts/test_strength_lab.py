@@ -2,12 +2,14 @@
 """Hermetic tests for the offline strength-laboratory substrate."""
 from __future__ import annotations
 
+import argparse
 import tempfile
 import unittest
 from pathlib import Path
 
 import chess
 
+from engine_error_replay import classify_depth_response, parse_node_budgets
 from generate_nnue_teacher_data import deterministic_split, epd_positions, pgn_positions
 from stockfish_lab import loss_bucket, move_kind, phase_label, sha256_file
 
@@ -117,6 +119,23 @@ class StrengthLabTests(unittest.TestCase):
         self.assertEqual(loss_bucket(80), "mistake")
         self.assertEqual(loss_bucket(150), "blunder")
         self.assertEqual(loss_bucket(300), "severe_blunder")
+
+    def test_error_replay_node_budget_parser_is_strict(self) -> None:
+        self.assertEqual(parse_node_budgets("2000, 10000,50000"), (2000, 10000, 50000))
+        for invalid in ("", "0,100", "100,-2", "100,100", "500,100", "abc"):
+            with self.assertRaises(argparse.ArgumentTypeError, msg=invalid):
+                parse_node_budgets(invalid)
+
+    def test_error_replay_classification_only_claims_observed_search_response(self) -> None:
+        self.assertEqual(classify_depth_response([120, 70, 20]), "resolved_by_search")
+        self.assertEqual(classify_depth_response([180, 145, 110]), "improves_with_search")
+        self.assertEqual(classify_depth_response([80, 100, 145]), "worsens_with_search")
+        self.assertEqual(
+            classify_depth_response([120, 105, 95]),
+            "persistent_at_tested_budget",
+        )
+        with self.assertRaises(ValueError):
+            classify_depth_response([])
 
 
 if __name__ == "__main__":
