@@ -1,0 +1,73 @@
+name: V15 Round61 Stockfish19 scoring
+
+on:
+  push:
+    branches: [analysis/v15-python-leaf-h16-round61-20260909]
+    paths:
+      - .github/workflows/v15-python-round61-stockfish19.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyse:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2
+      - name: Download pinned Stockfish 19
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/sf19.tar.gz https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  /tmp/sf19.tar.gz' | sha256sum --check --strict
+          mkdir -p /tmp/sf19
+          tar -xzf /tmp/sf19.tar.gz -C /tmp/sf19
+          SF=$(find /tmp/sf19 -type f -name 'stockfish*' -perm -111 -print -quit)
+          test -n "$SF"
+          echo "SF=$SF" >> "$GITHUB_ENV"
+          "$SF" bench 1 1 5 default depth >/dev/null
+      - name: Score canonical alternatives
+        shell: bash
+        run: |
+          mkdir -p results
+          python - <<'PY' | tee results/stockfish19-round61.json
+          import json
+          import chess
+          import chess.engine
+          import os
+
+          fen='2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23'
+          board=chess.Board(fen)
+          moves=['f2f3','a1b1','c3c4','c1c2','c1b1','a2a4']
+          eng=chess.engine.SimpleEngine.popen_uci(os.environ['SF'])
+          eng.configure({'Threads':1,'Hash':256})
+          def score_obj(s):
+              p=s.pov(board.turn)
+              if p.is_mate():
+                  return {'mate':p.mate(),'cp':None}
+              return {'mate':None,'cp':p.score(mate_score=100000)}
+          try:
+              constrained=[]
+              for u in moves:
+                  m=chess.Move.from_uci(u)
+                  info=eng.analyse(board,chess.engine.Limit(nodes=750000),root_moves=[m])
+                  constrained.append({'move':u,'score':score_obj(info['score']),'depth':info.get('depth'),'seldepth':info.get('seldepth'),'nodes':info.get('nodes'),'pv':[x.uci() for x in info.get('pv',[])[:12]]})
+              infos=eng.analyse(board,chess.engine.Limit(nodes=2500000),multipv=10)
+              top=[]
+              for info in infos:
+                  top.append({'move':info['pv'][0].uci(),'score':score_obj(info['score']),'depth':info.get('depth'),'seldepth':info.get('seldepth'),'nodes':info.get('nodes'),'pv':[x.uci() for x in info.get('pv',[])[:12]]})
+              print(json.dumps({'fen':fen,'stockfish':'19','constrained':constrained,'multipv10':top},indent=2))
+          finally:
+              eng.quit()
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v15-round61-stockfish19-${{ github.sha }}
+          path: results/
+          retention-days: 30
