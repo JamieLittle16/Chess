@@ -1,0 +1,64 @@
+name: V15 Python final init-cap validation
+
+on:
+  push:
+    branches:
+      - analysis/v15-python-release-candidate-20260909
+    paths:
+      - .github/workflows/v15-python-final-init-validation.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  validate:
+    strategy:
+      fail-fast: false
+      matrix:
+        replica: [1, 2, 3]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact final V15 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V15-FINAL-725be3e8595d1e54b1f12e11f2b9d92f1e415ebc
+          path: final-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34298586524
+      - name: Enforce hard 90-second cold-start validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find final-artifact -type f -name Little-Gambit-V15.zip -print -quit); test -n "$ZIP"
+          rm -rf /tmp/v15; mkdir /tmp/v15
+          unzip -q "$ZIP" -d /tmp/v15
+          START=$(date +%s%N)
+          /usr/bin/time -f 'validation_wall_s=%e validation_maxrss_kb=%M' -o validation-time.txt \
+            timeout 90s python tools/v9_agent_runner.py /tmp/v15 <<'EOF' | tee validation-output.json
+          {"fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1","time_left_ms":80000}
+          EOF
+          END=$(date +%s%N)
+          cat validation-time.txt
+          grep -q '"ready": true' validation-output.json
+          grep -q '"move":' validation-output.json
+          python - <<PY
+          start=$START; end=$END
+          print('replica=${{ matrix.replica }} elapsed_wall_s=',(end-start)/1e9)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-final-init-replica-${{ matrix.replica }}-${{ github.sha }}
+          path: |
+            validation-time.txt
+            validation-output.json
+          retention-days: 30
