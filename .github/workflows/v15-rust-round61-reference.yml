@@ -1,0 +1,71 @@
+name: V15 Rust Round-61 reference probe
+
+on:
+  push:
+    branches:
+      - analysis/v15-rust-round61-reference-20260909
+    paths:
+      - .github/workflows/v15-rust-round61-reference.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Build exact Rust V15 UCI and Gestalt teacher
+        run: |
+          cargo build --release -p chess-uci
+          cargo build --release -p chess-eval --example gestalt_teacher
+      - name: Download exact production Gestalt
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/gestalt
+          curl --fail --location --retry 5 'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' -o /tmp/gestalt/gestalt-b840.nnue
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  /tmp/gestalt/gestalt-b840.nnue' | sha256sum --check --strict
+      - name: Compare exact Gestalt child evaluations
+        shell: bash
+        env:
+          CHESS_GESTALT_NETWORK: /tmp/gestalt/gestalt-b840.nnue
+        run: |
+          set -euo pipefail
+          cat >/tmp/children.fen <<'EOF'
+          2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr1PP1/P5B1/R1Q2RK1 b - - 0 23
+          2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/1RQ2RK1 b - - 2 23
+          EOF
+          target/release/examples/gestalt_teacher < /tmp/children.fen | tee /tmp/gestalt-children.tsv
+      - name: Probe Rust V15 search on canonical Round-61 root
+        shell: bash
+        env:
+          CHESS_GESTALT_NETWORK: /tmp/gestalt/gestalt-b840.nnue
+        run: |
+          set -euo pipefail
+          FEN='2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23'
+          : >/tmp/rust-search.txt
+          for N in 30000 100000 300000; do
+            echo "=== nodes=$N ===" | tee -a /tmp/rust-search.txt
+            {
+              echo uci
+              echo isready
+              echo "position fen $FEN"
+              echo "go nodes $N"
+              sleep 2
+              echo quit
+            } | target/release/chess-uci 2>&1 | tee -a /tmp/rust-search.txt
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-rust-round61-reference-${{ github.sha }}
+          path: |
+            /tmp/gestalt-children.tsv
+            /tmp/rust-search.txt
+          retention-days: 30
