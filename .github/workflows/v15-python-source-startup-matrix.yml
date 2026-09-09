@@ -1,0 +1,124 @@
+name: V15 Python source-only startup matrix
+
+on:
+  push:
+    branches:
+      - hotfix/v15-python-startup-cache-20260909
+    paths:
+      - .github/workflows/v15-python-source-startup-matrix.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        opt: ['0', '1', '2', '3']
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact final V15
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V15-FINAL-725be3e8595d1e54b1f12e11f2b9d92f1e415ebc
+          path: final-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34298586524
+      - name: Materialize source-only candidate
+        shell: bash
+        env:
+          OPT: ${{ matrix.opt }}
+        run: |
+          set -euo pipefail
+          ZIP=$(find final-artifact -type f -name Little-Gambit-V15.zip -print -quit); test -n "$ZIP"
+          rm -rf /tmp/candidate results
+          mkdir -p /tmp/candidate results
+          unzip -q "$ZIP" -d /tmp/candidate
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path('/tmp/candidate/agent.py')
+          s=p.read_text()
+          needle='import time\n'
+          repl='import os\nimport time\n\n# Source-only competition startup hotfix: reduce LLVM optimization work during Numba JIT.\nos.environ.setdefault("NUMBA_OPT", os.environ["LITTLE_GAMBIT_NUMBA_OPT"])\n'
+          if s.count(needle) != 1:
+              raise SystemExit(f'import-time patch anchor count={s.count(needle)}')
+          p.write_text(s.replace(needle,repl,1))
+          PY
+          find /tmp/candidate -type d -name __pycache__ -prune -exec rm -rf {} +
+          find /tmp/candidate -type f \( -name '*.nbc' -o -name '*.nbi' -o -name '*.so' \) -delete
+        env:
+          OPT: ${{ matrix.opt }}
+          LITTLE_GAMBIT_NUMBA_OPT: ${{ matrix.opt }}
+
+      - name: Cold import and first move
+        shell: bash
+        env:
+          LITTLE_GAMBIT_NUMBA_OPT: ${{ matrix.opt }}
+        run: |
+          set -euo pipefail
+          cd /tmp/candidate
+          /usr/bin/time -f 'PROCESS_WALL_SECONDS %e\nPROCESS_CPU_SECONDS %U' -o "$GITHUB_WORKSPACE/results/process-time.txt" \
+            timeout 120s env PYTHONPATH=/tmp/candidate LITTLE_GAMBIT_NUMBA_OPT=${{ matrix.opt }} python - <<'PY' > "$GITHUB_WORKSPACE/results/runtime.txt" 2>&1
+          import time
+          t0=time.perf_counter()
+          import agent
+          import chess
+          imported=time.perf_counter()-t0
+          print('OPT', '${{ matrix.opt }}')
+          print('IMPORT_SECONDS', imported)
+          fen=chess.STARTING_FEN
+          t1=time.perf_counter()
+          move=agent.get_move(fen,120000)
+          move_seconds=time.perf_counter()-t1
+          b=chess.Board(fen); m=chess.Move.from_uci(move); assert m in b.legal_moves
+          print('FIRST_MOVE_SECONDS', move_seconds)
+          print('TOTAL_SECONDS', time.perf_counter()-t0)
+          print('MOVE', move)
+          PY
+          cat results/process-time.txt results/runtime.txt
+
+      - name: Fixed-node throughput after warm compile
+        shell: bash
+        env:
+          LITTLE_GAMBIT_NUMBA_OPT: ${{ matrix.opt }}
+        run: |
+          set -euo pipefail
+          cd /tmp/candidate
+          timeout 120s env PYTHONPATH=/tmp/candidate LITTLE_GAMBIT_NUMBA_OPT=${{ matrix.opt }} python - <<'PY' > "$GITHUB_WORKSPACE/results/nps.txt" 2>&1
+          import time, chess
+          import agent
+          from experiments import numba_search as ns
+          # The import above pays JIT once. Use the public agent repeatedly and report wall time as a
+          # practical throughput proxy under identical 250ms allocations.
+          fens=[
+            chess.STARTING_FEN,
+            'r2q1rk1/pp2bppp/2n1pn2/2pp4/8/1PN1PN2/PBPP1PPP/R2QKB1R w KQ - 2 9',
+            '2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23',
+          ]
+          t0=time.perf_counter(); moves=[]
+          for fen in fens:
+              moves.append(agent.get_move(fen,80000))
+          elapsed=time.perf_counter()-t0
+          print('OPT', '${{ matrix.opt }}')
+          print('THREE_MOVE_WALL_SECONDS', elapsed)
+          print('MOVES', moves)
+          PY
+          cat results/nps.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-source-startup-opt-${{ matrix.opt }}-${{ github.sha }}
+          path: results/
+          retention-days: 7
