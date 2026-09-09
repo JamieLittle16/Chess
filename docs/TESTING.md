@@ -58,6 +58,12 @@ The first certified execution covered 5,624 cross-implementation queries: 512 mo
 
 This layer exists because an optimized implementation and an in-repository reference implementation can theoretically share the same misunderstanding of a chess rule. Agreement with a separately maintained rules engine substantially reduces that common-mode risk.
 
+### Portability qualification
+
+Core changes also run on native Windows and macOS runners in both debug and release profiles. A separate Linux job cross-checks that the library compiles for `wasm32-unknown-unknown`, the browser-facing target anticipated by the architecture.
+
+Linux native behaviour remains covered by the ordinary workspace gate. The portability matrix is deliberately scoped to `chess-core` so platform confidence does not turn every search experiment into a multi-OS build.
+
 ## 3. Search-state qualification
 
 `crates/chess-search/tests/search_state_qualification.rs` tests invariants that should remain true across search redesigns rather than pinning fragile move-order details.
