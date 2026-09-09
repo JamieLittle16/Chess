@@ -1,0 +1,154 @@
+name: V16 qTT + king-output alpha20 combination
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v16/python-qtt-king-output-combo]
+    paths:
+      - .github/workflows/v16-python-qtt-king-output-combo.yml
+      - scripts/patch_v16_python_v15_qsearch_tt.py
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Download accepted qTT head
+        uses: actions/download-artifact@v4
+        with:
+          name: v16-python-v15-qsearch-tt-startup-f32d0bd437ca555b1bd369646f41df2bd1f64aa8
+          path: qtt-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34352476810
+
+      - name: Download king-output alpha20 candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: v16-python-king-output-0.20-c28801acf5cc5cdc96dce3820351ce735eb4e9b4
+          path: king-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34353390503
+
+      - name: Materialize exact qTT control and combined candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          QTT=$(find qtt-artifact -type f -name 'Little-Gambit-V16B-qTT-startup.zip' -print -quit); test -n "$QTT"
+          KING=$(find king-artifact -type f -name 'Little-Gambit-V16-king-output-0.20.zip' -print -quit); test -n "$KING"
+          rm -rf /tmp/control /tmp/candidate results && mkdir -p /tmp/control /tmp/candidate results
+          unzip -q "$QTT" -d /tmp/control
+          unzip -q "$KING" -d /tmp/candidate
+          python scripts/patch_v16_python_v15_qsearch_tt.py /tmp/candidate/experiments/numba_search.py
+          python - <<'PY' | tee results/boundaries.txt
+          from pathlib import Path
+          names={'_legal_moves_for_state','_advance_eval_state_into','_child_position_key'}
+          changed=[]
+          for fn in ('numba_core.py','numba_search.py','v14_student_single_runtime.py'):
+              p=Path('/tmp/candidate/experiments')/fn
+              s=p.read_text()
+              for name in sorted(names):
+                  anchor=f'@njit(cache=False, inline="always")\ndef {name}('
+                  if anchor in s:
+                      s=s.replace(anchor,f'@njit(cache=False)\ndef {name}(',1)
+                      changed.append(name)
+              p.write_text(s)
+          missing=names-set(changed)
+          if missing:
+              raise SystemExit(f'missing boundaries: {sorted(missing)}')
+          print('DEINLINED',sorted(changed))
+          PY
+          python -m py_compile /tmp/candidate/agent.py /tmp/candidate/experiments/*.py
+          grep -q 'TT_QDEPTH_BASE = 64' /tmp/candidate/experiments/numba_search.py
+          grep -q '_qsearch_tt_store' /tmp/candidate/experiments/numba_search.py
+          grep -q 'KING_OUTPUT' /tmp/candidate/experiments/v14_student_single_runtime.py || grep -qi 'king.*output' /tmp/candidate/experiments/v14_student_single_runtime.py
+          find /tmp/candidate -type d -name __pycache__ -prune -exec rm -rf {} +
+          (cd /tmp/candidate && zip -q -9 -r "$GITHUB_WORKSPACE/results/Little-Gambit-V16-qTT-king-output-a20.zip" .)
+
+      - name: Hard cold-start gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/cold /tmp/combo-home /tmp/combo-cache /tmp/combo-numba && mkdir /tmp/cold
+          unzip -q results/Little-Gambit-V16-qTT-king-output-a20.zip -d /tmp/cold
+          /usr/bin/time -f 'PROCESS_WALL_SECONDS %e\nPROCESS_CPU_SECONDS %U' -o results/cold-process.txt \
+            timeout 82s env PYTHONPATH=/tmp/cold HOME=/tmp/combo-home XDG_CACHE_HOME=/tmp/combo-cache NUMBA_CACHE_DIR=/tmp/combo-numba OMP_NUM_THREADS=1 \
+            python - <<'PY' > results/cold.txt 2>&1
+          import sys,time
+          from importlib import import_module
+          t=time.perf_counter(); sys.path.insert(0,'/tmp/cold'); import_module('agent')
+          print('READY_SECONDS',time.perf_counter()-t)
+          PY
+          cat results/cold-process.txt results/cold.txt
+
+      - name: Build fresh disjoint UHO roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6; mkdir /tmp/m6
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          roots=fresh[4720:4800]
+          assert len(roots)==80 and len(set(roots))==80
+          Path('/tmp/combo-node.epd').write_text('\n'.join(roots[:48])+'\n')
+          Path('/tmp/combo-clock.epd').write_text('\n'.join(roots[48:])+'\n')
+          PY
+
+      - name: Fixed-node throughput versus qTT head
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/bench.py <<'PY'
+          import statistics,time,chess,numpy as np
+          import agent
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful_timed_cached
+          fens=[chess.STARTING_FEN,'r2q1rk1/pp2bppp/2n1pn2/2pp4/8/1PN1PN2/PBPP1PPP/R2QKB1R w KQ - 2 9','2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23']
+          vals=[]
+          for fen in fens:
+              b=chess.Board(fen);e=encode_position(b);h=np.empty(0,dtype=np.uint64)
+              agent._HASH_KEYS.fill(0);agent._HASH_MOVES.fill(-1);agent._TT_TABLE.fill(0)
+              t=time.perf_counter();r=iterative_search_stateful_timed_cached(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,60000,60000,200000,agent._HASH_KEYS,agent._HASH_MOVES,agent._TT_TABLE);dt=time.perf_counter()-t
+              vals.append(int(r[3])/dt);print('CASE',tuple(map(int,r)),dt,vals[-1])
+          print('MEDIAN_NPS',statistics.median(vals))
+          PY
+          (cd /tmp/control && PYTHONPATH=/tmp/control python /tmp/bench.py) | tee results/control-throughput.txt
+          (cd /tmp/candidate && PYTHONPATH=/tmp/candidate python /tmp/bench.py) | tee results/candidate-throughput.txt
+          python - <<'PY' | tee results/throughput-summary.txt
+          import re
+          from pathlib import Path
+          n=lambda p:float(re.search(r'MEDIAN_NPS ([0-9.eE+-]+)',Path(p).read_text()).group(1))
+          a=n('results/control-throughput.txt'); b=n('results/candidate-throughput.txt')
+          print('CONTROL_NPS',a); print('CANDIDATE_NPS',b); print('NPS_RATIO',b/a)
+          PY
+
+      - name: 96-game equal-node screen versus qTT head
+        run: python -u tools/v14_fixed_node_arena.py /tmp/candidate /tmp/control --nodes 20000 --pairs 48 --opening-file /tmp/combo-node.epd --max-plies 220 --json-out results/equal-node.json | tee results/equal-node.log
+
+      - name: 64-game short-clock screen versus qTT head
+        run: python -u scripts/v15_competition_gate.py --control /tmp/control --candidate /tmp/candidate --openings /tmp/combo-clock.epd --output results/timed.json --label 'V16 qTT + king-output a20 vs qTT head' --base-ms 2500 --inc-ms 50 --max-plies 180 --grace-ms 1500 | tee results/timed.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v16-qtt-king-output-a20-${{ github.sha }}
+          path: results/
+          retention-days: 30
