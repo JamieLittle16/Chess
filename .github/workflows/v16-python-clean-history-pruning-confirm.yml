@@ -1,0 +1,127 @@
+name: V16 Python clean history+pruning confirmation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v16/python-clean-history-pruning-confirm]
+    paths:
+      - '.github/workflows/v16-python-clean-history-pruning-confirm.yml'
+      - 'scripts/patch_v16_python_v15_unified_history.py'
+      - 'scripts/patch_v16_python_full_pruning_oracle.py'
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Download exact final V15
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V15-FINAL-725be3e8595d1e54b1f12e11f2b9d92f1e415ebc
+          path: v15-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34298586524
+
+      - name: Materialize exact clean V16 candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          V15=$(find v15-artifact -type f -name Little-Gambit-V15.zip -print -quit); test -n "$V15"
+          echo '81e22344bf9a6b41f16e32f29f93c0b6074afe63e4fd51002a537e6a091f2852  '"$V15" | sha256sum --check --strict
+          rm -rf /tmp/control /tmp/candidate results
+          mkdir -p /tmp/control /tmp/candidate results
+          unzip -q "$V15" -d /tmp/control
+          cp -a /tmp/control/. /tmp/candidate/
+          python scripts/patch_v16_python_v15_unified_history.py /tmp/candidate/experiments/numba_search.py
+          python scripts/patch_v16_python_full_pruning_oracle.py /tmp/candidate/experiments/numba_search.py
+          python -m py_compile /tmp/control/agent.py /tmp/control/experiments/*.py /tmp/candidate/agent.py /tmp/candidate/experiments/*.py
+
+          grep -q 'QUIET_HISTORY_CONT_ENTRIES = QUIET_HISTORY_CONTEXTS \* QUIET_HISTORY_CONTEXTS' /tmp/candidate/experiments/numba_search.py
+          grep -q 'QUIET_HISTORY_LMR_THRESHOLD = 4_096' /tmp/candidate/experiments/numba_search.py
+          grep -q 'previous_move_context' /tmp/candidate/experiments/numba_search.py
+          grep -q 'pruning_static_eval = _evaluate_state(side, eval_stack\[ply\])' /tmp/candidate/experiments/numba_search.py
+          ! grep -q 'TT_QDEPTH_BASE' /tmp/candidate/experiments/numba_search.py
+          ! grep -q '_qsearch_tt_store' /tmp/candidate/experiments/numba_search.py
+          ! grep -q 'lmr_history' /tmp/candidate/experiments/numba_search.py
+
+          echo '5d8bba24dad3b9ce7c320d8aa7e813b4f8782809ecfbe095fb0c542ce9251ab8  /tmp/candidate/experiments/numba_search.py' | sha256sum --check --strict
+          sha256sum /tmp/candidate/agent.py /tmp/candidate/experiments/numba_core.py /tmp/candidate/experiments/numba_search.py /tmp/candidate/experiments/v14_student_single_runtime.py /tmp/candidate/experiments/v14_student_h64.npz /tmp/candidate/experiments/v13_residual.i16 /tmp/candidate/v14_kpk.u8 | tee results/source-model-hashes.txt
+
+          find /tmp/candidate -type d -name __pycache__ -prune -exec rm -rf {} +
+          (cd /tmp/candidate && zip -qr /tmp/Little-Gambit-V16-CLEAN-history-pruning.zip .)
+          sha256sum "$V15" /tmp/Little-Gambit-V16-CLEAN-history-pruning.zip | tee results/package-hashes.txt
+
+      - name: Build independent frozen UHO roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip \
+            https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6; mkdir /tmp/m6
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          roots=fresh[4368:4560]
+          assert len(roots)==192 and len(set(roots))==192
+          Path('/tmp/v16-clean-node.epd').write_text('\n'.join(roots[:96])+'\n')
+          Path('/tmp/v16-clean-clock.epd').write_text('\n'.join(roots[96:])+'\n')
+          print('frozen_suite_sha=5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e')
+          print('fresh_root_slice=4368:4560 node=4368:4464 clock=4464:4560')
+          PY
+
+      - name: 192-game 40k-node primary qualification versus exact V15
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u tools/v14_fixed_node_arena.py /tmp/candidate /tmp/control \
+            --nodes 40000 --pairs 96 --opening-file /tmp/v16-clean-node.epd \
+            --max-plies 220 --json-out results/equal-node-40k.json | tee results/equal-node-40k.log
+          python - <<'PY'
+          import json
+          p='results/equal-node-40k.json'
+          d=json.load(open(p))
+          score=float(d['score_fraction'])
+          print(f'PRIMARY_FIXED_NODE_SCORE={score:.6f} ({d["score"]}/{d["games"]})')
+          if score < 0.50:
+              raise SystemExit(f'clean V16 failed primary fixed-node non-regression gate: {score:.6f}')
+          PY
+
+      - name: 192-game competition-clock secondary confirmation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u scripts/v15_competition_gate.py \
+            --control /tmp/control --candidate /tmp/candidate \
+            --openings /tmp/v16-clean-clock.epd \
+            --output results/timed-192.json \
+            --label 'V16 clean exact-V15 + unified history + learned pruning; qTT omitted' \
+            --base-ms 2500 --inc-ms 50 --max-plies 180 --grace-ms 1500 \
+            | tee results/timed-192.log
+
+      - name: Preserve exact tested candidate
+        if: always()
+        run: cp /tmp/Little-Gambit-V16-CLEAN-history-pruning.zip results/ 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v16-python-clean-history-pruning-${{ github.sha }}
+          path: results/
+          retention-days: 30
