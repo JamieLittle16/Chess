@@ -1,0 +1,63 @@
+name: Round 85 Stockfish check
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [diagnostic/round85-v16-replay]
+    paths: ['.github/workflows/round85-stockfish-check.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  analyse:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2
+      - name: Fetch Stockfish 19
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz -o /tmp/sf.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  /tmp/sf.tar.gz' | sha256sum --check --strict
+          mkdir /tmp/sf && tar -xzf /tmp/sf.tar.gz -C /tmp/sf
+          SF=$(find /tmp/sf -type f -name 'stockfish*' -perm -111 -print -quit); test -n "$SF"
+          echo "SF=$SF" >> "$GITHUB_ENV"
+      - name: Analyse critical positions
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir results
+          python - <<'PY' | tee results/stockfish.txt
+          import os, chess, chess.engine
+          sf=chess.engine.SimpleEngine.popen_uci(os.environ['SF'])
+          sf.configure({'Threads':1,'Hash':128})
+          tests=[
+            ('before_33_Re1','2r5/5k2/pB5p/6p1/P3b3/3p3P/1P3P1K/5R2 w - - 0 33',['f1e1','h2g3','b6d4','f2f3']),
+            ('after_33_Re1_d2','2r5/5k2/pB5p/6p1/P3b3/7P/1P1p1P1K/4R3 w - - 0 34',['e1d1','e1e4']),
+          ]
+          try:
+            for label,fen,moves in tests:
+              b=chess.Board(fen)
+              print('POSITION',label,fen)
+              infos=sf.analyse(b,chess.engine.Limit(nodes=1_000_000),multipv=min(8,len(list(b.legal_moves))))
+              for i,info in enumerate(infos[:8],1):
+                score=info['score'].pov(chess.WHITE).score(mate_score=100000)
+                print('TOP',i,info['pv'][0].uci(),score,'pv',' '.join(m.uci() for m in info['pv'][:8]))
+              for uci in moves:
+                m=chess.Move.from_uci(uci)
+                info=sf.analyse(b,chess.engine.Limit(nodes=1_000_000),root_moves=[m])
+                score=info['score'].pov(chess.WHITE).score(mate_score=100000)
+                print('FORCED',uci,score,'pv',' '.join(x.uci() for x in info['pv'][:12]))
+          finally:
+            sf.quit()
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: round85-stockfish-${{ github.sha }}
+          path: results/
+          retention-days: 30
