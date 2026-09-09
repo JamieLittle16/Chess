@@ -87,7 +87,8 @@ jobs:
           print('PRIME_POSITION_KEY', k)
           print('PRIME_EVALUATE', e)
           PY
-          find /tmp/package -type f -path '*/__pycache__/*' -printf '%p %s bytes\n' | sort | tee package-results/cache-files.txt
+          ! grep -q 'Cannot cache compiled function' "$GITHUB_WORKSPACE/package-results/cache-prime.txt"
+          find /tmp/package -type f -path '*/__pycache__/*' -printf '%p %s bytes\n' | sort | tee "$GITHUB_WORKSPACE/package-results/cache-files.txt"
           test -n "$(find /tmp/package/experiments/__pycache__ -type f -name '*iterative_search_stateful_timed_cached*.nbc' -print -quit)" || {
             echo 'missing timed production cache' >&2
             exit 1
@@ -134,8 +135,9 @@ jobs:
           print('COLD_MOVE', move)
           PY
           grep -q 'data loaded.*iterative_search_stateful_timed_cached' "$GITHUB_WORKSPACE/package-results/cold-start.txt"
+          ! grep -q 'data saved.*iterative_search_stateful_timed_cached' "$GITHUB_WORKSPACE/package-results/cold-start.txt"
 
-      - name: Verify chess payload differs only by startup patch/cache
+      - name: Verify startup-only source delta
         shell: bash
         run: |
           set -euo pipefail
@@ -146,6 +148,9 @@ jobs:
           search=Path('/tmp/package/experiments/numba_search.py').read_text()
           assert 'NUMBA_CPU_NAME' in agent
           assert 'InTreeCacheLocatorFsAgnostic' in agent
+          assert 'ctypes.CDLL' not in search
+          assert 'get_or_insert_function' in search
+          assert '"clock"' in search
           for name in ('evaluate','position_key','iterative_search_stateful_timed_cached'):
               pat=rf'@njit\(cache=True\)\ndef {name}\('
               assert re.search(pat, search), name
