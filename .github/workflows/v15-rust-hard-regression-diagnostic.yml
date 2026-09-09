@@ -1,0 +1,83 @@
+name: V15 Rust hard-regression diagnostic
+
+on:
+  push:
+    branches:
+      - analysis/v15-python-leaf-gestalt-h16-20260909
+    paths:
+      - .github/workflows/v15-rust-hard-regression-diagnostic.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  round61:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Materialize exact qualified Rust V15 endpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin 3a6a194d91c32b207397158da5a7af86c9a5404f
+          git worktree add --detach /tmp/rust-v15 3a6a194d91c32b207397158da5a7af86c9a5404f
+          test "$(git -C /tmp/rust-v15 rev-parse HEAD)" = 3a6a194d91c32b207397158da5a7af86c9a5404f
+      - name: Download exact production Gestalt network
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/rust-v15/.qualification
+          curl --fail --location --retry 5 \
+            'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' \
+            -o /tmp/rust-v15/.qualification/gestalt-b840.nnue
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  /tmp/rust-v15/.qualification/gestalt-b840.nnue' | sha256sum --check --strict
+      - name: Build exact Rust V15 UCI engine
+        working-directory: /tmp/rust-v15
+        run: cargo build --release -p chess-uci
+      - name: Probe canonical Round-61 decision at increasing node budgets
+        shell: bash
+        env:
+          CHESS_GESTALT_NETWORK: /tmp/rust-v15/.qualification/gestalt-b840.nnue
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          python - <<'PY' | tee results/rust-v15-round61.json
+          import json,os,subprocess
+          engine='/tmp/rust-v15/target/release/chess-uci'
+          p=subprocess.Popen([engine],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,bufsize=1,env=os.environ.copy())
+          def send(s):
+              p.stdin.write(s+'\n'); p.stdin.flush()
+          def until(prefix):
+              lines=[]
+              while True:
+                  line=p.stdout.readline()
+                  if not line: raise RuntimeError('engine EOF before '+prefix+'; stderr='+p.stderr.read())
+                  line=line.strip(); lines.append(line)
+                  if line.startswith(prefix): return line,lines
+          send('uci'); until('uciok')
+          send('isready'); until('readyok')
+          fen='2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23'
+          rows=[]
+          for nodes in (300000,1000000,3000000):
+              send('ucinewgame'); send('isready'); until('readyok')
+              send('position fen '+fen)
+              send(f'go nodes {nodes}')
+              best,lines=until('bestmove')
+              infos=[x for x in lines if x.startswith('info ')]
+              rows.append({'nodes':nodes,'bestmove':best.split()[1] if len(best.split())>1 else None,'last_info':infos[-1] if infos else None})
+          send('quit'); p.wait(timeout=10)
+          print(json.dumps({'endpoint':'3a6a194d91c32b207397158da5a7af86c9a5404f','fen':fen,'rows':rows},indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-rust-round61-diagnostic-${{ github.sha }}
+          path: results/
+          retention-days: 30
