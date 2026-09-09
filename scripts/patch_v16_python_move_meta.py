@@ -142,35 +142,37 @@ if q.count(old) != 1:
 q = q.replace(old, newq, 1)
 s = s[:q0] + q + s[q1:]
 
-# Main recursive loop: reuse piece/tactical metadata for quietness, continuation context,
-# halfmove reset, and the moving signed piece needed by the lazy H64 edge.
+# Main recursive loop: perform small line-local substitutions so this stays robust to the lazy-H64
+# prefix update block inserted between halfmove handling and make_move_inplace.
 n0 = s.index('@njit(cache=False)\ndef _negamax(')
 n1 = s.index('\n\n@njit(cache=False)\ndef _root(', n0)
 n = s[n0:n1]
-old = '''        move = int(moves[index])
-        order_score = int(score_stack[ply, index])
-        quiet = not _is_tactical(board, move)
-        protected_killer = move == int(killers[ply, 0]) or move == int(killers[ply, 1])
-        current_move_context = _quiet_history_context(board, move)
-        move_context_stack[ply] = np.int16(current_move_context)
-        child_halfmove = _next_halfmove_clock(board, move, halfmove_clock)
-        moving_signed = int(board[move_from(move)])
-'''
-newn = '''        move = int(moves[index])
-        packed_order = int(score_stack[ply, index])
-        order_score = packed_order >> 4
-        meta = packed_order & 15
-        attacker_index = meta >> 1
-        quiet = (meta & 1) == 0
-        protected_killer = move == int(killers[ply, 0]) or move == int(killers[ply, 1])
-        current_move_context = attacker_index * 64 + move_to(move)
-        move_context_stack[ply] = np.int16(current_move_context)
-        child_halfmove = 0 if (meta & 1) != 0 or attacker_index == 0 else halfmove_clock + 1
-        moving_signed = side * (attacker_index + 1)
-'''
-if n.count(old) != 1:
-    raise SystemExit(f"negamax metadata anchor count={n.count(old)}")
-n = n.replace(old, newn, 1)
+repls = [
+    (
+        '        order_score = int(score_stack[ply, index])\n',
+        '        packed_order = int(score_stack[ply, index])\n'
+        '        order_score = packed_order >> 4\n'
+        '        meta = packed_order & 15\n'
+        '        attacker_index = meta >> 1\n',
+    ),
+    ('        quiet = not _is_tactical(board, move)\n', '        quiet = (meta & 1) == 0\n'),
+    (
+        '        current_move_context = _quiet_history_context(board, move)\n',
+        '        current_move_context = attacker_index * 64 + move_to(move)\n',
+    ),
+    (
+        '        child_halfmove = _next_halfmove_clock(board, move, halfmove_clock)\n',
+        '        child_halfmove = 0 if (meta & 1) != 0 or attacker_index == 0 else halfmove_clock + 1\n',
+    ),
+    (
+        '        moving_signed = int(board[move_from(move)])\n',
+        '        moving_signed = side * (attacker_index + 1)\n',
+    ),
+]
+for old, new in repls:
+    if n.count(old) != 1:
+        raise SystemExit(f"negamax metadata anchor count={n.count(old)} for {old.strip()}")
+    n = n.replace(old, new, 1)
 s = s[:n0] + n + s[n1:]
 
 # Root uses the same packed metadata, preserving the exact root ordering score.
