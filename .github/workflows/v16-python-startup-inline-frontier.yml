@@ -1,0 +1,151 @@
+name: V16 Python startup inline frontier
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v16/python-startup-inline-frontier]
+    paths: ['.github/workflows/v16-python-startup-inline-frontier.yml']
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  qualify:
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [graph12, graph-abs14, selective-hot17, selective22]
+    name: ${{ matrix.variant }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact final V15
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V15-FINAL-725be3e8595d1e54b1f12e11f2b9d92f1e415ebc
+          path: final-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34298586524
+      - name: Materialize variant
+        shell: bash
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          ZIP=$(find final-artifact -type f -name Little-Gambit-V15.zip -print -quit); test -n "$ZIP"
+          rm -rf /tmp/control /tmp/candidate results && mkdir /tmp/control /tmp/candidate results
+          unzip -q "$ZIP" -d /tmp/control && cp -a /tmp/control/. /tmp/candidate/
+          python - <<'PY' | tee results/patch.txt
+          from pathlib import Path
+          import os
+          graph={
+            '_ordinary_legal_with_context','_advance_eval_state_into','_advance_student_edge_into',
+            '_materialize_student_path','_has_legal_en_passant','_child_position_key',
+            '_is_threefold_repetition','_move_order_score_meta','_pick_next_scored_move',
+            '_order_tactical_moves','_legal_moves_for_state','_search_budget_exhausted',
+          }
+          abs_extra={'_apply_absolute_delta','advance_absolute768_accumulator_into'}
+          selective={
+            '_between_aligned','_ordinary_legal_with_context',
+            '_residual_feature_index','_evaluate_state_classical','_evaluate_state','_evaluate_state_v13_only',
+            '_advance_eval_state_into','_advance_student_edge_into','_materialize_student_path',
+            '_has_legal_en_passant','_child_position_key','_is_threefold_repetition','_is_rule_draw',
+            '_quiet_pawn_relative_rank','_move_order_score_meta','_pick_next_scored_move','_order_tactical_moves',
+            '_legal_moves_for_state','_search_budget_exhausted',
+            '_apply_absolute_delta','advance_absolute768_accumulator_into','infer_absolute768_student_cp',
+          }
+          hot_keep={
+            '_residual_feature_index','_evaluate_state_classical','_evaluate_state','_evaluate_state_v13_only',
+            'infer_absolute768_student_cp',
+          }
+          variant=os.environ['VARIANT']
+          if variant=='graph12': remove=graph
+          elif variant=='graph-abs14': remove=graph|abs_extra
+          elif variant=='selective-hot17': remove=selective-hot_keep
+          elif variant=='selective22': remove=selective
+          else: raise SystemExit(variant)
+          changed=[]
+          for fn in ('numba_core.py','numba_search.py','v14_student_single_runtime.py'):
+              p=Path('/tmp/candidate/experiments')/fn; s=p.read_text()
+              for name in sorted(remove):
+                  anchor=f'@njit(cache=False, inline="always")\ndef {name}('
+                  if anchor in s:
+                      s=s.replace(anchor,f'@njit(cache=False)\ndef {name}(',1); changed.append(name)
+              p.write_text(s)
+          missing=remove-set(changed)
+          if missing: raise SystemExit(f'missing targets: {sorted(missing)}')
+          remaining=sum((Path('/tmp/candidate/experiments')/f).read_text().count('inline="always"') for f in ('numba_core.py','numba_search.py','v14_student_single_runtime.py'))
+          print('VARIANT',variant); print('REMOVED',len(changed),sorted(changed)); print('FORCED_INLINE_REMAINING',remaining)
+          PY
+          python -m py_compile /tmp/candidate/agent.py /tmp/candidate/experiments/*.py
+          find /tmp/candidate -type d -name __pycache__ -prune -exec rm -rf {} +
+          (cd /tmp/candidate && zip -q -9 -r "$GITHUB_WORKSPACE/results/Little-Gambit-V16-startup-${VARIANT}.zip" .)
+
+      - name: Cold-init measurement
+        shell: bash
+        run: |
+          set -uo pipefail
+          rm -rf /tmp/cold /tmp/cold-home /tmp/cold-cache /tmp/cold-numba
+          mkdir /tmp/cold
+          unzip -q "results/Little-Gambit-V16-startup-${{ matrix.variant }}.zip" -d /tmp/cold
+          set +e
+          /usr/bin/time -f 'PROCESS_WALL_SECONDS %e\nPROCESS_CPU_SECONDS %U' -o results/cold-process.txt \
+            timeout 80s env PYTHONPATH=/tmp/cold HOME=/tmp/cold-home XDG_CACHE_HOME=/tmp/cold-cache NUMBA_CACHE_DIR=/tmp/cold-numba OMP_NUM_THREADS=1 \
+            python - <<'PY' > results/cold.txt 2>&1
+          import json,sys,time
+          from importlib import import_module
+          t=time.perf_counter(); sys.path.insert(0,'/tmp/cold'); import_module('agent'); ready=time.perf_counter()-t
+          print('READY_SECONDS',ready); print(json.dumps({'ready':True}))
+          PY
+          rc=$?
+          set -e
+          echo "COLD_RC $rc" | tee results/cold-rc.txt
+          cat results/cold-process.txt results/cold.txt || true
+
+      - name: Same-runner fixed-node throughput
+        shell: bash
+        run: |
+          set -euo pipefail
+          bench() {
+            local root="$1" out="$2"; cd "$root"
+            timeout 180s env PYTHONPATH="$root" python - <<'PY' > "$out" 2>&1
+          import statistics,time,chess,numpy as np
+          import agent
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful_timed_cached
+          fens=[chess.STARTING_FEN,'r2q1rk1/pp2bppp/2n1pn2/2pp4/8/1PN1PN2/PBPP1PPP/R2QKB1R w KQ - 2 9','2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23']
+          rows=[]
+          for fen in fens:
+              b=chess.Board(fen); e=encode_position(b)
+              agent._HASH_KEYS.fill(np.uint64(0)); agent._HASH_MOVES.fill(np.int32(-1)); agent._TT_TABLE.fill(np.uint64(0)); h=np.empty(0,dtype=np.uint64)
+              t=time.perf_counter(); r=iterative_search_stateful_timed_cached(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,60000,60000,300000,agent._HASH_KEYS,agent._HASH_MOVES,agent._TT_TABLE); dt=time.perf_counter()-t
+              sig=tuple(map(int,r)); rate=int(r[3])/dt; rows.append((sig,rate)); print('CASE',sig,dt,rate)
+          print('SIGNATURES',repr([x[0] for x in rows])); print('MEDIAN_NPS',statistics.median(x[1] for x in rows))
+          PY
+          }
+          bench /tmp/control "$GITHUB_WORKSPACE/results/control.txt"
+          bench /tmp/candidate "$GITHUB_WORKSPACE/results/candidate.txt"
+          cd "$GITHUB_WORKSPACE"
+          python - <<'PY' | tee results/summary.txt
+          import ast,re
+          from pathlib import Path
+          a=Path('results/control.txt').read_text(); b=Path('results/candidate.txt').read_text()
+          sig=lambda x:ast.literal_eval(re.search(r'^SIGNATURES (.*)$',x,re.M).group(1))
+          n=lambda x:float(re.search(r'^MEDIAN_NPS ([0-9.eE+-]+)$',x,re.M).group(1))
+          na,nb=n(a),n(b)
+          print('FIXED_NODE_SIGNATURE_EQUAL',sig(a)==sig(b)); print('CONTROL_NPS',na); print('CANDIDATE_NPS',nb); print('NPS_RATIO',nb/na)
+          assert sig(a)==sig(b)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v16-startup-inline-${{ matrix.variant }}-${{ github.sha }}
+          path: results/
+          retention-days: 14
