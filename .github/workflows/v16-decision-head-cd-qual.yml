@@ -1,0 +1,152 @@
+name: V16 exact-decision H64 coordinate qualification
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [analysis/v16-search-decision-distill]
+    paths:
+      - '.github/workflows/v16-decision-head-cd-qual.yml'
+      - 'scripts/train_v16_decision_head_cd.py'
+      - 'scripts/patch_v16_python_presort_once.py'
+      - 'scripts/patch_v16_python_trusted_continuity.py'
+      - 'scripts/patch_v16_python_rust_history.py'
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  train:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download frozen Rust decision corpus
+        uses: actions/download-artifact@v4
+        with:
+          name: v16-search-decision-corpus-7fb379ea54f45374469a88b1e2c01f84b3f20f8b
+          path: decision-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34293287037
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Optimise exact quantised decision heads
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
+          CORPUS=$(find decision-artifact -type f -name decision.jsonl -print -quit); test -n "$CORPUS"
+          rm -rf /tmp/v14 results; mkdir -p /tmp/v14 results
+          unzip -q "$ZIP" -d /tmp/v14
+          python -u scripts/train_v16_decision_head_cd.py \
+            --corpus "$CORPUS" --engine-dir /tmp/v14 \
+            --output-dir results/models --max-records 180000 \
+            | tee results/train.log
+          for b in 1 2 3; do test -f results/models/decision-head-cd-bound${b}.npz; done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v16-decision-head-cd-models-${{ github.sha }}
+          path: results/
+          retention-days: 30
+
+  qualify:
+    needs: train
+    strategy:
+      fail-fast: false
+      matrix:
+        bound: [1, 2, 3]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Download exact-decision heads
+        uses: actions/download-artifact@v4
+        with:
+          name: v16-decision-head-cd-models-${{ github.sha }}
+          path: model-artifact
+      - name: Materialize Rust-history control and coordinate-head candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
+          MODEL=$(find model-artifact -type f -name decision-head-cd-bound${{ matrix.bound }}.npz -print -quit); test -n "$MODEL"
+          rm -rf /tmp/control /tmp/candidate results; mkdir -p /tmp/control /tmp/candidate results
+          unzip -q "$ZIP" -d /tmp/control
+          python scripts/patch_v16_python_presort_once.py /tmp/control/experiments/numba_search.py
+          python scripts/patch_v16_python_trusted_continuity.py /tmp/control/agent.py
+          python scripts/patch_v16_python_rust_history.py /tmp/control/experiments/numba_search.py
+          cp -a /tmp/control/. /tmp/candidate/
+          cp "$MODEL" /tmp/candidate/experiments/v14_student_h64.npz
+          python -m py_compile tools/v14_agent_runner.py tools/v14_fixed_node_arena.py scripts/v15_competition_gate.py /tmp/control/agent.py /tmp/control/experiments/*.py /tmp/candidate/agent.py /tmp/candidate/experiments/*.py
+          python - <<'PY'
+          import numpy as np
+          c=np.load('/tmp/control/experiments/v14_student_h64.npz',allow_pickle=False)
+          n=np.load('/tmp/candidate/experiments/v14_student_h64.npz',allow_pickle=False)
+          assert np.array_equal(c['feature_weights'],n['feature_weights'])
+          assert np.array_equal(c['feature_bias'],n['feature_bias'])
+          assert int(np.asarray(c['output_bias']).reshape(-1)[0]) == int(np.asarray(n['output_bias']).reshape(-1)[0])
+          d=n['output_weights'].astype(int)-c['output_weights'].astype(int)
+          assert np.max(np.abs(d)) <= int('${{ matrix.bound }}') and np.any(d!=0)
+          print({'changed_lanes':int(np.count_nonzero(d)),'max_abs_step':int(np.max(np.abs(d))),'delta':d.tolist()})
+          PY
+      - name: Build fresh disjoint qualification roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6; mkdir /tmp/m6
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          chosen=fresh[1400:1480]
+          assert len(chosen)==80 and len(set(chosen))==80
+          Path('/tmp/cd-node.epd').write_text('\n'.join(chosen[:48])+'\n')
+          Path('/tmp/cd-clock.epd').write_text('\n'.join(chosen[48:])+'\n')
+          PY
+      - name: 96-game equal-node screen
+        run: |
+          python -u tools/v14_fixed_node_arena.py /tmp/candidate /tmp/control \
+            --nodes 20000 --pairs 48 --opening-file /tmp/cd-node.epd \
+            --max-plies 220 --json-out results/equal-node-bound${{ matrix.bound }}.json \
+            | tee results/equal-node-bound${{ matrix.bound }}.log
+      - name: 64-game competition-clock screen
+        run: |
+          python -u scripts/v15_competition_gate.py \
+            --control /tmp/control --candidate /tmp/candidate \
+            --openings /tmp/cd-clock.epd \
+            --output results/timed-bound${{ matrix.bound }}.json \
+            --label 'Rust-history + exact-decision H64 bound${{ matrix.bound }}' \
+            --base-ms 2500 --inc-ms 50 --max-plies 180 --grace-ms 1500 \
+            | tee results/timed-bound${{ matrix.bound }}.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v16-decision-head-cd-bound${{ matrix.bound }}-${{ github.sha }}
+          path: results/
+          retention-days: 30
