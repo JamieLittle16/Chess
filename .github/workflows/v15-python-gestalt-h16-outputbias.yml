@@ -1,0 +1,67 @@
+name: V15 Python Gestalt H16 output-bias training
+
+on:
+  push:
+    branches:
+      - analysis/v15-python-gestalt-h16-outputbias-20260909
+    paths:
+      - scripts/patch_v15_gestalt_output_bias_trainer.py
+      - scripts/patch_v15_python_leaf_gestalt_output_bias.py
+      - .github/workflows/v15-python-gestalt-h16-outputbias.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  train:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact search-leaf teacher corpus
+        uses: actions/download-artifact@v4
+        with:
+          name: v15-rust-search-leaf-gestalt-70736f6f056d42aa8ceee37e0b282e4f02d34556
+          path: teacher-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34277063353
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Train Rust-faithful H16 with output bias
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
+          TEACHER=$(find teacher-artifact -type f -name teacher.jsonl -print -quit); test -n "$TEACHER"
+          rm -rf /tmp/v14 /tmp/trainer.py results; mkdir -p /tmp/v14 results
+          unzip -q "$ZIP" -d /tmp/v14
+          cp scripts/train_v15_gestalt_topology_student.py /tmp/trainer.py
+          python scripts/patch_v15_gestalt_output_bias_trainer.py /tmp/trainer.py
+          python -m py_compile /tmp/trainer.py
+          python -u /tmp/trainer.py --teacher "$TEACHER" --engine-dir /tmp/v14 --output-dir results/h16 --hidden 16 --epochs 30 --batch-size 256 | tee results/train.log
+          python - <<'PY'
+          import json,numpy as np
+          p='results/h16/gestalt-topology-h16.npz';m=np.load(p,allow_pickle=False)
+          print({'files':m.files,'output_bias':int(np.asarray(m['output_bias']).reshape(-1)[0])})
+          meta=json.load(open('results/h16/metadata.json'))
+          print('FINAL_METRICS',json.dumps(meta['metrics'],sort_keys=True))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-gestalt-h16-outputbias-${{ github.sha }}
+          path: results/
+          retention-days: 30
