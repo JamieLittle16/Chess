@@ -6,4 +6,5 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 cargo test --workspace --all-features --release
+cargo test --release -p chess-core --test core_qualification deep_perft_qualification -- --ignored --exact
 cargo run --release --quiet -p chess-bench
