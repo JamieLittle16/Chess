@@ -1,0 +1,132 @@
+name: V15 Python search-focused Gestalt H16
+
+on:
+  push:
+    branches:
+      - analysis/v15-python-gestalt-searchfocused-20260909
+    paths:
+      - scripts/patch_v15_gestalt_search_focused_trainer.py
+      - .github/workflows/v15-python-gestalt-searchfocused.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  qualify:
+    strategy:
+      fail-fast: false
+      matrix:
+        focus: ['1.0', '3.0']
+    name: focus-${{ matrix.focus }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 95
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Download exact search-leaf teacher corpus
+        uses: actions/download-artifact@v4
+        with:
+          name: v15-rust-search-leaf-gestalt-70736f6f056d42aa8ceee37e0b282e4f02d34556
+          path: teacher-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34277063353
+
+      - name: Download exact vanilla H16 student
+        uses: actions/download-artifact@v4
+        with:
+          name: v15-leaf-gestalt-topology-h16-70736f6f056d42aa8ceee37e0b282e4f02d34556
+          path: vanilla-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34277063353
+
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+
+      - name: Train search-focused H16
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
+          TEACHER=$(find teacher-artifact -type f -name teacher.jsonl -print -quit); test -n "$TEACHER"
+          rm -rf /tmp/v14 /tmp/trainer.py trained results; mkdir -p /tmp/v14 trained results
+          unzip -q "$ZIP" -d /tmp/v14
+          cp scripts/train_v15_gestalt_topology_student.py /tmp/trainer.py
+          python scripts/patch_v15_gestalt_search_focused_trainer.py /tmp/trainer.py
+          python -u /tmp/trainer.py \
+            --teacher "$TEACHER" \
+            --engine-dir /tmp/v14 \
+            --output-dir trained/h16 \
+            --hidden 16 \
+            --epochs 30 \
+            --batch-size 256 \
+            --focus-weight '${{ matrix.focus }}' \
+            --focus-cp 450 \
+            | tee results/train.log
+          cp trained/h16/metadata.json results/metadata.json
+
+      - name: Materialize vanilla and focused leaf-only engines
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit)
+          VANILLA=$(find vanilla-artifact -type f -name gestalt-topology-h16.npz -print -quit); test -n "$VANILLA"
+          FOCUSED=trained/h16/gestalt-topology-h16.npz; test -f "$FOCUSED"
+          rm -rf /tmp/control /tmp/candidate; mkdir -p /tmp/control /tmp/candidate
+          unzip -q "$ZIP" -d /tmp/control; cp -a /tmp/control/. /tmp/candidate/
+          python scripts/patch_v15_python_presort_once.py /tmp/control/experiments/numba_search.py
+          python scripts/patch_v15_python_presort_once.py /tmp/candidate/experiments/numba_search.py
+          cp "$VANILLA" /tmp/control/experiments/v15_leaf_gestalt_h16.npz
+          cp "$FOCUSED" /tmp/candidate/experiments/v15_leaf_gestalt_h16.npz
+          for D in /tmp/control /tmp/candidate; do
+            python scripts/patch_v15_python_leaf_gestalt_h16.py "$D/experiments/numba_search.py"
+            python scripts/patch_v15_python_leaf_gestalt_h16_qall.py "$D/experiments/numba_search.py"
+          done
+          python -m py_compile /tmp/control/agent.py /tmp/candidate/agent.py /tmp/control/experiments/*.py /tmp/candidate/experiments/*.py
+
+      - name: Build fresh disjoint roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6; mkdir /tmp/m6
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          equal=fresh[3900:3932]; timed=fresh[3940:3972]
+          assert len(equal)==32 and len(timed)==32 and not set(equal)&set(timed)
+          Path('/tmp/focus-equal.epd').write_text('\n'.join(equal)+'\n')
+          Path('/tmp/focus-timed.epd').write_text('\n'.join(timed)+'\n')
+          PY
+
+      - name: 64-game equal-node model comparison
+        run: python -u tools/v14_fixed_node_arena.py /tmp/candidate /tmp/control --nodes 30000 --pairs 32 --opening-file /tmp/focus-equal.epd --opening-offset 0 --max-plies 200 --json-out results/equal-node.json | tee results/equal-node.log
+
+      - name: 64-game competition-clock model comparison
+        run: python -u scripts/v15_competition_gate.py --candidate /tmp/candidate --control /tmp/control --openings /tmp/focus-timed.epd --output results/timed-64.json --label gestalt-h16-focus-${{ matrix.focus }} --base-ms 2500 --inc-ms 50 --max-plies 180 | tee results/timed-64.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-gestalt-h16-focus-${{ matrix.focus }}-${{ github.sha }}
+          path: |
+            results/
+            trained/h16/gestalt-topology-h16.npz
+          retention-days: 30
