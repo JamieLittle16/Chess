@@ -19,12 +19,15 @@ fn actual_move_history_reaches_threefold_at_the_third_occurrence() {
         2,
         "one completed cycle is only the second occurrence"
     );
+    let second_root = engine.position().clone();
+    let second_history = engine.repetition_history().to_vec();
     let second_occurrence = engine.search_depth(2);
     assert!(
         second_occurrence.score > 0,
         "queen-up second occurrence must remain a live winning position"
     );
-    assert_eq!(engine.position(), &root);
+    assert_eq!(engine.position(), &second_root);
+    assert_eq!(engine.repetition_history(), second_history);
 
     play_cycle(&mut engine);
     assert_eq!(engine.position().repetition_key().raw(), root_key);
@@ -36,11 +39,12 @@ fn actual_move_history_reaches_threefold_at_the_third_occurrence() {
             .count(),
         3
     );
+    let third_root = engine.position().clone();
     let history = engine.repetition_history().to_vec();
     let third_occurrence = engine.search_depth(3);
     assert_eq!(third_occurrence.score, 0, "third occurrence must be a draw");
     assert!(third_occurrence.best_move.is_some());
-    assert_eq!(engine.position(), &root);
+    assert_eq!(engine.position(), &third_root);
     assert_eq!(engine.repetition_history(), history);
 }
 
