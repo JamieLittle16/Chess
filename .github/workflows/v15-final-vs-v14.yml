@@ -1,0 +1,89 @@
+name: V15 final vs exact V14
+
+on:
+  push:
+    branches: [analysis/v15-final-vs-v14-20260909]
+    paths: [.github/workflows/v15-final-vs-v14.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  match:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Download exact V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+
+      - name: Download exact final V15
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V15-FINAL-725be3e8595d1e54b1f12e11f2b9d92f1e415ebc
+          path: v15-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34298586524
+
+      - name: Materialize exact packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          V14=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$V14"
+          V15=$(find v15-artifact -type f -name Little-Gambit-V15.zip -print -quit); test -n "$V15"
+          echo '81e22344bf9a6b41f16e32f29f93c0b6074afe63e4fd51002a537e6a091f2852  '"$V15" | sha256sum --check --strict
+          rm -rf /tmp/v14 /tmp/v15 results; mkdir -p /tmp/v14 /tmp/v15 results
+          unzip -q "$V14" -d /tmp/v14
+          unzip -q "$V15" -d /tmp/v15
+          python -m py_compile /tmp/v14/agent.py /tmp/v14/experiments/*.py /tmp/v15/agent.py /tmp/v15/experiments/*.py
+          sha256sum "$V14" "$V15" | tee results/package-hashes.txt
+
+      - name: Build 48 fresh paired UHO roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6; mkdir /tmp/m6
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          roots=fresh[4200:4248]
+          assert len(roots)==48
+          Path('/tmp/v15-v14.epd').write_text('\n'.join(roots)+'\n')
+          PY
+
+      - name: 96-game final V15 vs exact V14
+        run: |
+          python -u scripts/v15_competition_gate.py \
+            --control /tmp/v14 \
+            --candidate /tmp/v15 \
+            --openings /tmp/v15-v14.epd \
+            --output results/v15-vs-v14.json \
+            --label 'exact final V15' \
+            --base-ms 10000 --inc-ms 500 --max-plies 180 --grace-ms 1500 \
+            | tee results/v15-vs-v14.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-final-vs-v14-${{ github.sha }}
+          path: results/
+          retention-days: 30
