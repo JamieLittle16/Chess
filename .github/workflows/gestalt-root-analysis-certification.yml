@@ -1,15 +1,18 @@
-name: Gestalt root-analysis certification
+name: Gestalt search-state certification
 
 on:
   pull_request:
     branches: [main]
+    paths:
+      - 'crates/chess-search/**'
+      - 'crates/chess-eval/**'
+      - '.github/workflows/gestalt-root-analysis-certification.yml'
 
 permissions:
   contents: read
 
 jobs:
-  real-network-root-analysis:
-    if: github.head_ref == 'fix/gestalt-root-analysis-state'
+  real-network-search-state:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -19,27 +22,31 @@ jobs:
           toolchain: 1.98.1
           components: rustfmt, clippy
 
-      - name: Strict source gate
-        run: |
-          cargo fmt --all -- --check
-          cargo clippy --workspace --all-targets --all-features -- -D warnings
-          cargo test --workspace --release
-
       - name: Download exact certified network
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p .qualification/root-analysis
+          mkdir -p .qualification/search-state
           curl --fail --location --retry 5 \
             'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' \
-            --output .qualification/root-analysis/gestalt-b840.nnue
-          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  .qualification/root-analysis/gestalt-b840.nnue' | sha256sum --check --strict
+            --output .qualification/search-state/gestalt-b840.nnue
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  .qualification/search-state/gestalt-b840.nnue' \
+            | sha256sum --check --strict
 
       - name: Require objective root analysis to match normal learned search
         shell: bash
         run: |
           set -euo pipefail
-          CHESS_GESTALT_NETWORK="$PWD/.qualification/root-analysis/gestalt-b840.nnue" \
+          CHESS_GESTALT_NETWORK="$PWD/.qualification/search-state/gestalt-b840.nnue" \
             cargo test -p chess-search --release \
               root_analysis::tests::top_root_candidate_matches_objective_depth_search \
               -- --exact --nocapture
+
+      - name: Qualify interruption, reuse and draw context with learned state enabled
+        shell: bash
+        run: |
+          set -euo pipefail
+          CHESS_GESTALT_NETWORK="$PWD/.qualification/search-state/gestalt-b840.nnue" \
+            cargo test -p chess-search --release \
+              --test search_state_qualification \
+              -- --nocapture
