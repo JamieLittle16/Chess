@@ -1,0 +1,154 @@
+name: V15 Python exact Rust Gestalt root guardian
+
+on:
+  push:
+    branches:
+      - analysis/v15-python-exact-gestalt-root-20260909
+    paths:
+      - scripts/patch_v15_python_exact_gestalt_root.py
+      - .github/workflows/v15-python-exact-gestalt-root.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Download exact production Rust Gestalt
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' -o /tmp/gestalt-b840.nnue
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  /tmp/gestalt-b840.nnue' | sha256sum --check --strict
+      - name: Materialize identical fast base and exact-guardian candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
+          rm -rf /tmp/base /tmp/cand results; mkdir -p /tmp/base /tmp/cand results
+          unzip -q "$ZIP" -d /tmp/base; cp -a /tmp/base/. /tmp/cand/
+          for D in /tmp/base /tmp/cand; do
+            python scripts/patch_v15_python_presort_once.py "$D/experiments/numba_search.py"
+            python scripts/patch_v15_python_fused_h64_direct.py "$D/experiments/v14_student_single_runtime.py"
+            python scripts/patch_v15_python_inline_fused_h64.py "$D/experiments/v14_student_single_runtime.py"
+            python scripts/patch_v15_python_fused_h64_zero_guard.py "$D/experiments/v14_student_single_runtime.py"
+            python scripts/patch_v15_python_lazy_h64_chain.py "$D/experiments/numba_search.py"
+            python scripts/patch_v15_python_scoremeta_hotloop.py "$D/experiments/numba_search.py"
+          done
+          cp /tmp/gestalt-b840.nnue /tmp/cand/experiments/gestalt-b840.nnue
+          python scripts/patch_v15_python_exact_gestalt_root.py /tmp/cand/experiments/numba_search.py
+          python -m py_compile tools/v14_agent_runner.py /tmp/base/agent.py /tmp/cand/agent.py /tmp/base/experiments/*.py /tmp/cand/experiments/*.py
+      - name: Certify exact Python Gestalt forward against Rust oracle values
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=/tmp/cand python - <<'PY'
+          import chess
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import _exact_gestalt_cp
+          cases=[
+              ('2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr1PP1/P5B1/R1Q2RK1 b - - 0 23',46),
+              ('2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/1RQ2RK1 b - - 2 23',-246),
+          ]
+          for fen,expected in cases:
+              e=encode_position(chess.Board(fen)); got=int(_exact_gestalt_cp(e.board,e.side)); print(fen,got,expected); assert got==expected,(got,expected)
+          PY
+      - name: Canonical Round-61 search diagnostic
+        shell: bash
+        run: |
+          set -euo pipefail
+          FEN='2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23'
+          cat >/tmp/root_diag.py <<'PY'
+          import chess,numpy as np,sys
+          from experiments.numba_core import encode_position,move_to_uci
+          from experiments.numba_search import iterative_search_stateful
+          b=chess.Board(sys.argv[1]);e=encode_position(b);h=np.empty(0,dtype=np.uint64)
+          for n in (30000,100000,300000):
+              o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,n)
+              print(n,move_to_uci(int(o[0])),int(o[1]),int(o[2]),int(o[3]))
+          PY
+          echo BASE | tee results/round61.log
+          PYTHONPATH=/tmp/base python /tmp/root_diag.py "$FEN" | tee -a results/round61.log
+          echo CANDIDATE | tee -a results/round61.log
+          PYTHONPATH=/tmp/cand python /tmp/root_diag.py "$FEN" | tee -a results/round61.log
+      - name: Build fresh disjoint roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6; mkdir /tmp/m6
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          equal=fresh[4300:4332]; timed=fresh[4335:4351]
+          assert len(equal)==32 and len(timed)==16 and not set(equal)&set(timed)
+          Path('/tmp/exact-equal.epd').write_text('\n'.join(equal)+'\n')
+          Path('/tmp/exact-timed.epd').write_text('\n'.join(timed)+'\n')
+          PY
+      - name: 64-game equal-node screen
+        run: python -u tools/v14_fixed_node_arena.py /tmp/cand /tmp/base --nodes 30000 --pairs 32 --opening-file /tmp/exact-equal.epd --opening-offset 0 --max-plies 200 --json-out results/equal-node.json | tee results/equal-node.log
+      - name: Three-repetition throughput
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/w.py <<'PY'
+          import json,sys,chess,numpy as np
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful
+          for line in sys.stdin:
+              q=json.loads(line);b=chess.Board(q['fen']);e=encode_position(b);h=np.empty(0,dtype=np.uint64)
+              o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,int(q['nodes']))
+              print(json.dumps({'nodes':int(o[3]),'depth':int(o[2])}),flush=True)
+          PY
+          python - <<'PY'
+          import json,os,statistics,subprocess,sys,time
+          from pathlib import Path
+          roots=Path('/tmp/exact-equal.epd').read_text().splitlines()[:16]
+          def start(d):
+              e=os.environ.copy();e['PYTHONPATH']=d
+              return subprocess.Popen([sys.executable,'/tmp/w.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=e)
+          def one(p,f,n):p.stdin.write(json.dumps({'fen':f,'nodes':n})+'\n');p.stdin.flush();return json.loads(p.stdout.readline())
+          b=start('/tmp/base');c=start('/tmp/cand');rat=[];rows=[]
+          try:
+              one(b,roots[0],500);one(c,roots[0],500)
+              for r in range(3):
+                  order=roots if r%2==0 else list(reversed(roots))
+                  def timed(p):
+                      nodes=0;t=time.perf_counter()
+                      for f in order:nodes+=one(p,f,30000)['nodes']
+                      return nodes/(time.perf_counter()-t)
+                  if r%2==0:bn=timed(b);cn=timed(c)
+                  else:cn=timed(c);bn=timed(b)
+                  rat.append(cn/bn);rows.append({'rep':r,'base_nps':bn,'candidate_nps':cn,'ratio':cn/bn})
+          finally:b.terminate();c.terminate();b.wait();c.wait()
+          out={'median_nps_ratio':statistics.median(rat),'rows':rows};Path('results/throughput.json').write_text(json.dumps(out,indent=2)+'\n');print('FINAL',out)
+          PY
+      - name: 32-game competition-clock screen
+        run: python -u scripts/v15_competition_gate.py --candidate /tmp/cand --control /tmp/base --openings /tmp/exact-timed.epd --output results/timed-32.json --label exact-gestalt-root-q25-cap96 --base-ms 2500 --inc-ms 50 --max-plies 180 | tee results/timed-32.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-exact-gestalt-root-${{ github.sha }}
+          path: results/
+          retention-days: 30
