@@ -1,0 +1,240 @@
+name: V16 current-main error mining
+
+on:
+  push:
+    branches: [v16/current-error-mining]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mine:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      RUSTFLAGS: -C target-cpu=x86-64-v3
+      GESTALT_URL: https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue
+      GESTALT_SHA256: 956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6
+      STOCKFISH_URL: https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+      STOCKFISH_ARCHIVE_SHA256: 9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f
+      UHO_URL: https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+      UHO_ARCHIVE_SHA256: 4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07
+      OPENING_SHA256: 5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e
+      FASTCHESS_COMMIT: f618e34540f94f4719ad3817950618dabe441318
+      ENGINE_NAME: little-gambit-v16-current
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: Qualify analysis tooling and Rust head
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check -r tools/requirements-analysis.txt
+          python -m compileall -q scripts/stockfish_lab.py scripts/stockfish_error_mining.py scripts/engine_error_replay.py scripts/test_strength_lab.py
+          PYTHONPATH=scripts python scripts/test_strength_lab.py
+          python scripts/engine_error_replay.py --help >/dev/null
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --all-features --release
+
+      - name: Build exact current Little Gambit
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/bin .qualification/networks .qualification/v16-error-mine
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/bin/little-gambit
+          chmod +x .qualification/bin/little-gambit
+          sha256sum .qualification/bin/little-gambit | tee .qualification/v16-error-mine/little-gambit.sha256
+          git rev-parse HEAD | tee .qualification/v16-error-mine/source-head.txt
+
+      - name: Fetch exact Gestalt and Stockfish 19
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 "$GESTALT_URL" --output .qualification/networks/gestalt-b840.nnue
+          echo "$GESTALT_SHA256  .qualification/networks/gestalt-b840.nnue" | sha256sum --check --strict
+
+          mkdir -p .qualification/stockfish
+          curl --fail --location --retry 5 "$STOCKFISH_URL" --output .qualification/stockfish.tar.gz
+          echo "$STOCKFISH_ARCHIVE_SHA256  .qualification/stockfish.tar.gz" | sha256sum --check --strict
+          tar -xzf .qualification/stockfish.tar.gz -C .qualification/stockfish
+          STOCKFISH_BIN=$(find "$PWD/.qualification/stockfish" -type f -name 'stockfish*' -perm -111 -print -quit)
+          test -n "$STOCKFISH_BIN"
+          echo "STOCKFISH_BIN=$STOCKFISH_BIN" >> "$GITHUB_ENV"
+          "$STOCKFISH_BIN" bench 1 1 4 default depth >/dev/null
+
+      - name: Reproduce certified 5000-root opening suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 "$UHO_URL" --output /tmp/UHO_Lichess_4852_v1.epd.zip
+          echo "$UHO_ARCHIVE_SHA256  /tmp/UHO_Lichess_4852_v1.epd.zip" | sha256sum --check --strict
+          mkdir -p .qualification/m6-openings
+          python scripts/build_m6_opening_suite.py \
+            --archive /tmp/UHO_Lichess_4852_v1.epd.zip \
+            --output-dir .qualification/m6-openings \
+            | tee .qualification/m6-openings/derivation.log
+          test "$(wc -l < .qualification/m6-openings/m6-uho-lichess-5000-v1.epd)" = '5000'
+          echo "$OPENING_SHA256  .qualification/m6-openings/m6-uho-lichess-5000-v1.epd" | sha256sum --check --strict
+
+      - name: Build pinned Fastchess
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet "$FASTCHESS_COMMIT"
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = "$FASTCHESS_COMMIT"
+          make -C .qualification/fastchess-src -j2
+          test -x .qualification/fastchess-src/fastchess
+
+      - name: Create current-production launcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$PWD"
+          mkdir -p .qualification/launchers
+          cat > .qualification/launchers/current.sh <<EOF
+          #!/usr/bin/env bash
+          export CHESS_GESTALT_NETWORK='$ROOT/.qualification/networks/gestalt-b840.nnue'
+          exec '$ROOT/.qualification/bin/little-gambit'
+          EOF
+          chmod +x .qualification/launchers/current.sh
+          {
+            printf 'uci\n'
+            printf 'isready\n'
+            printf 'position startpos\n'
+            printf 'go nodes 2000\n'
+            printf 'quit\n'
+          } | .qualification/launchers/current.sh | tee .qualification/v16-error-mine/current-smoke.txt
+          grep -q '^bestmove ' .qualification/v16-error-mine/current-smoke.txt
+
+      - name: Generate fresh paired current-main games against Stockfish 2800
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/v16-error-mine/match
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/.qualification/launchers/current.sh" name="$ENGINE_NAME" tc=1+0.01 option.Hash=32 \
+            -engine cmd="$STOCKFISH_BIN" name=stockfish-19-elo2800 tc=1+0.01 option.Threads=1 option.Hash=32 option.UCI_LimitStrength=true option.UCI_Elo=2800 \
+            -openings file="$PWD/.qualification/m6-openings/m6-uho-lichess-5000-v1.epd" format=epd order=random \
+            -srand 2026090916 \
+            -rounds 30 -repeat -concurrency 1 -maxmoves 300 \
+            -ratinginterval 20 \
+            -pgnout file=.qualification/v16-error-mine/match/games.pgn notation=uci append=false nodes=true nps=true \
+            -log file=.qualification/v16-error-mine/match/uci.log level=info engine=true append=false \
+            | tee .qualification/v16-error-mine/match/fastchess.stdout.log
+          test "$(grep -c '^\[Event ' .qualification/v16-error-mine/match/games.pgn)" = '60'
+
+      - name: Mine objective current-main move losses
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/stockfish_error_mining.py \
+            --pgn .qualification/v16-error-mine/match/games.pgn \
+            --engine-name "$ENGINE_NAME" \
+            --stockfish "$STOCKFISH_BIN" \
+            --nodes 50000 \
+            --threads 1 \
+            --hash-mb 64 \
+            --min-ply 10 \
+            --max-ply 180 \
+            --output-dir .qualification/v16-error-mine/teacher
+
+      - name: Replay largest errors through increasing Little Gambit node budgets
+        shell: bash
+        env:
+          CHESS_GESTALT_NETWORK: ${{ github.workspace }}/.qualification/networks/gestalt-b840.nnue
+        run: |
+          set -euo pipefail
+          python scripts/engine_error_replay.py \
+            --positions .qualification/v16-error-mine/teacher/positions.jsonl \
+            --engine .qualification/bin/little-gambit \
+            --stockfish "$STOCKFISH_BIN" \
+            --teacher-nodes 100000 \
+            --node-budgets 2000,10000,50000,200000 \
+            --engine-hash-mb 32 \
+            --teacher-threads 1 \
+            --teacher-hash-mb 64 \
+            --min-cp-loss 80 \
+            --max-positions 120 \
+            --output-dir .qualification/v16-error-mine/replay
+
+      - name: Extract highest-value persistent cases
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from collections import Counter
+          from pathlib import Path
+
+          replay = Path('.qualification/v16-error-mine/replay')
+          rows = [json.loads(line) for line in (replay / 'positions.jsonl').open() if line.strip()]
+          persistent = [row for row in rows if row['depth_response'] == 'persistent_at_tested_budget']
+          persistent.sort(key=lambda row: (-row['deepest_replay_cp_loss'], -float(row['original_expectation_loss'])))
+          (replay / 'top-persistent.json').write_text(json.dumps(persistent[:30], indent=2, sort_keys=True) + '\n')
+
+          patterns = Counter(
+              (row['phase'], row['original_played_kind'], row['original_best_kind'])
+              for row in persistent
+          )
+          payload = {
+              'persistent_positions': len(persistent),
+              'top_patterns': [
+                  {'phase': phase, 'played_kind': played, 'best_kind': best, 'count': count}
+                  for (phase, played, best), count in patterns.most_common(20)
+              ],
+          }
+          (replay / 'persistent-patterns.json').write_text(json.dumps(payload, indent=2, sort_keys=True) + '\n')
+          print(json.dumps(payload, indent=2, sort_keys=True))
+          PY
+
+      - name: Record immutable experiment identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > .qualification/v16-error-mine/evidence.txt <<EOF
+          purpose=post-#166 current-production error mining and node-response replay
+          source_head=$(git rev-parse HEAD)
+          evaluator=Gestalt-v85
+          gestalt_sha256=$GESTALT_SHA256
+          stockfish_archive_sha256=$STOCKFISH_ARCHIVE_SHA256
+          opening_sha256=$OPENING_SHA256
+          fastchess_commit=$FASTCHESS_COMMIT
+          match_opponent=Stockfish-19 UCI_Elo 2800
+          match_time_control=1+0.01
+          paired_games=60
+          match_seed=2026090916
+          mining_teacher_nodes=50000
+          replay_teacher_nodes=100000
+          replay_engine_nodes=2000,10000,50000,200000
+          replay_source_threshold_cp=80
+          EOF
+          sha256sum .qualification/v16-error-mine/match/games.pgn \
+            .qualification/v16-error-mine/teacher/positions.jsonl \
+            .qualification/v16-error-mine/replay/positions.jsonl \
+            >> .qualification/v16-error-mine/evidence.txt
+          cat .qualification/v16-error-mine/teacher/summary.json
+          cat .qualification/v16-error-mine/replay/summary.json
+          cat .qualification/v16-error-mine/replay/persistent-patterns.json
+
+      - name: Upload diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v16-current-error-mine-${{ github.sha }}
+          path: |
+            .qualification/v16-error-mine/
+            .qualification/m6-openings/derivation.log
+          retention-days: 30
