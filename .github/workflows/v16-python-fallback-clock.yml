@@ -1,0 +1,129 @@
+name: V16 Python fallback clock-leak qualification
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [analysis/v16-python-fallback-clock]
+    paths:
+      - '.github/workflows/v16-python-fallback-clock.yml'
+      - 'scripts/patch_v16_python_fast_fallback.py'
+      - 'scripts/patch_v16_python_presort_once.py'
+      - 'scripts/patch_v16_python_trusted_continuity.py'
+      - 'scripts/patch_v16_python_rust_history.py'
+      - 'scripts/v15_competition_gate.py'
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Materialize accepted history control and fast-fallback candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
+          rm -rf /tmp/control /tmp/candidate results; mkdir -p /tmp/control /tmp/candidate results
+          unzip -q "$ZIP" -d /tmp/control
+          python scripts/patch_v16_python_presort_once.py /tmp/control/experiments/numba_search.py
+          python scripts/patch_v16_python_trusted_continuity.py /tmp/control/agent.py
+          python scripts/patch_v16_python_rust_history.py /tmp/control/experiments/numba_search.py
+          cp -a /tmp/control/. /tmp/candidate/
+          python scripts/patch_v16_python_fast_fallback.py /tmp/candidate/experiments/numba_search.py
+          python -m py_compile /tmp/control/agent.py /tmp/control/experiments/*.py /tmp/candidate/agent.py /tmp/candidate/experiments/*.py scripts/v15_competition_gate.py
+          grep -q 'Fast emergency fallback' /tmp/candidate/experiments/numba_search.py
+      - name: Build fresh roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6; mkdir /tmp/m6
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          chosen=fresh[2700:2780]; assert len(chosen)==80 and len(set(chosen))==80
+          Path('/tmp/probe.epd').write_text('\n'.join(chosen[:32])+'\n')
+          Path('/tmp/clock.epd').write_text('\n'.join(chosen[32:64])+'\n')
+          Path('/tmp/extra.epd').write_text('\n'.join(chosen[64:])+'\n')
+          PY
+      - name: Timed-entry overhead and depth survey
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/timed_worker.py <<'PY'
+          import json,sys,time,chess,numpy as np
+          from experiments.numba_core import encode_position,move_to_uci
+          from experiments.numba_search import HASH_MOVE_SIZE,TT_STORAGE_SIZE,iterative_search_stateful_timed_cached
+          hk=np.zeros(HASH_MOVE_SIZE,dtype=np.uint64); hm=np.full(HASH_MOVE_SIZE,-1,dtype=np.int32); tt=np.zeros(TT_STORAGE_SIZE,dtype=np.uint64)
+          for line in sys.stdin:
+              q=json.loads(line); b=chess.Board(q['fen']); e=encode_position(b); h=np.empty(0,dtype=np.uint64)
+              t=time.perf_counter(); o=iterative_search_stateful_timed_cached(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,q['soft'],q['hard'],50_000_000,hk,hm,tt); elapsed=(time.perf_counter()-t)*1000
+              print(json.dumps({'move':move_to_uci(int(o[0])),'score':int(o[1]),'depth':int(o[2]),'nodes':int(o[3]),'elapsed_ms':elapsed}),flush=True)
+          PY
+          python - <<'PY'
+          import json,os,statistics,subprocess,sys
+          from pathlib import Path
+          roots=Path('/tmp/probe.epd').read_text().splitlines()
+          def start(d):
+              e=os.environ.copy(); e['PYTHONPATH']=d
+              return subprocess.Popen([sys.executable,'/tmp/timed_worker.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=e)
+          def one(p,fen,soft,hard):
+              p.stdin.write(json.dumps({'fen':fen,'soft':soft,'hard':hard})+'\n');p.stdin.flush();return json.loads(p.stdout.readline())
+          a=start('/tmp/control');b=start('/tmp/candidate');rows=[]
+          try:
+              one(a,roots[0],3,5);one(b,roots[0],3,5)
+              for hard in (5,7,10,20,50):
+                  soft=max(1,int(hard*.6))
+                  for fen in roots:
+                      x=one(a,fen,soft,hard); y=one(b,fen,soft,hard)
+                      rows.append({'hard':hard,'control':x,'candidate':y})
+          finally:
+              a.terminate();b.terminate();a.wait();b.wait()
+          normal=[r for r in rows if r['hard']>=7]
+          zero=sum(1 for r in normal if r['candidate']['depth']<1)
+          by={}
+          for hard in (5,7,10,20,50):
+              rr=[r for r in rows if r['hard']==hard]
+              by[str(hard)]={
+                  'control_mean_ms':statistics.mean(r['control']['elapsed_ms'] for r in rr),
+                  'candidate_mean_ms':statistics.mean(r['candidate']['elapsed_ms'] for r in rr),
+                  'control_mean_depth':statistics.mean(r['control']['depth'] for r in rr),
+                  'candidate_mean_depth':statistics.mean(r['candidate']['depth'] for r in rr),
+                  'candidate_depth0':sum(r['candidate']['depth']<1 for r in rr),
+              }
+          out={'candidate_depth0_hard_ge_7':zero,'by_hard_ms':by}
+          Path('results/depth-overhead.json').write_text(json.dumps(out,indent=2)+'\n')
+          print('FINAL',json.dumps(out,sort_keys=True))
+          assert zero==0, out
+          PY
+      - name: 64-game competition-clock gate
+        run: |
+          python -u scripts/v15_competition_gate.py \
+            --control /tmp/control --candidate /tmp/candidate --openings /tmp/clock.epd \
+            --output results/timed.json --label 'V16 fast presearch fallback' \
+            --base-ms 2500 --inc-ms 50 --max-plies 180 --grace-ms 1500 | tee results/timed.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v16-python-fast-fallback-${{ github.sha }}
+          path: results/
+          retention-days: 30
