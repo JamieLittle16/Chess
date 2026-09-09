@@ -43,7 +43,7 @@ jobs:
           unzip -q "$ZIP" -d /tmp/v15
           START=$(date +%s%N)
           /usr/bin/time -f 'validation_wall_s=%e validation_maxrss_kb=%M' -o validation-time.txt \
-            timeout 90s python tools/v9_agent_runner.py /tmp/v15 <<'EOF' | tee validation-output.json
+            timeout 90s python tools/v14_agent_runner.py /tmp/v15 <<'EOF' | tee validation-output.json
           {"fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1","time_left_ms":80000}
           EOF
           END=$(date +%s%N)
