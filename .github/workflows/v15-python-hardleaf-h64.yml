@@ -1,0 +1,132 @@
+name: V15 Python bounded hard-leaf H64 screen
+
+on:
+  push:
+    branches:
+      - analysis/v15-python-hardleaf-h64-20260909
+    paths:
+      - scripts/build_v15_hardleaf_teacher.py
+      - .github/workflows/v15-python-hardleaf-h64.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  qualify:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: c024, cap_cp: 24}
+          - {name: c040, cap_cp: 40}
+          - {name: c056, cap_cp: 56}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+
+      - name: Download real Rust-Gestalt search-leaf corpus
+        uses: actions/download-artifact@v4
+        with:
+          name: v15-rust-search-leaf-gestalt-70736f6f056d42aa8ceee37e0b282e4f02d34556
+          path: leaf-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34277063353
+
+      - name: Build hard-leaf target and fine-tune exact H64 topology
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
+          TEACHER=$(find leaf-artifact -type f -name teacher.jsonl -print -quit); test -n "$TEACHER"
+          rm -rf /tmp/v14 results; mkdir -p /tmp/v14 results
+          unzip -q "$ZIP" -d /tmp/v14
+          python -u scripts/build_v15_hardleaf_teacher.py \
+            --teacher "$TEACHER" --engine-dir /tmp/v14 \
+            --gain 0.10 --threshold-cp 200 --cap-cp ${{ matrix.cap_cp }} \
+            --output results/hardleaf.jsonl | tee results/teacher.log
+          python -u scripts/train_v15_h64_finetune_blend.py \
+            --teacher results/hardleaf.jsonl --engine-dir /tmp/v14 \
+            --init-model /tmp/v14/experiments/v14_student_h64.npz \
+            --output-dir results/model --epochs 10 --batch-size 512 \
+            --lr 0.00025 --anchor 0.0025 --seed 20260909 \
+            | tee results/train.log
+
+      - name: Materialize presort-only A/B
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/base /tmp/cand; mkdir -p /tmp/base /tmp/cand
+          cp -a /tmp/v14/. /tmp/base/; cp -a /tmp/v14/. /tmp/cand/
+          for D in /tmp/base /tmp/cand; do
+            python scripts/patch_v15_python_presort_once.py "$D/experiments/numba_search.py"
+          done
+          cp results/model/v14_student_h64.npz /tmp/cand/experiments/v14_student_h64.npz
+          python -m py_compile tools/v14_agent_runner.py /tmp/base/agent.py /tmp/cand/agent.py /tmp/base/experiments/*.py /tmp/cand/experiments/*.py
+
+      - name: Canonical Round61 probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/probe.py <<'PY'
+          import chess,numpy as np
+          from experiments.numba_core import encode_position,move_to_uci
+          from experiments.numba_search import iterative_search_stateful
+          fen='2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23'
+          b=chess.Board(fen); e=encode_position(b); h=np.empty(0,dtype=np.uint64)
+          for n in (300000,1000000):
+              o=iterative_search_stateful(e.board.copy(),e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,n)
+              print(n,move_to_uci(int(o[0])),int(o[1]),int(o[2]),int(o[3]))
+          PY
+          echo CONTROL | tee results/round61.log
+          PYTHONPATH=/tmp/base python /tmp/probe.py | tee -a results/round61.log
+          echo CANDIDATE | tee -a results/round61.log
+          PYTHONPATH=/tmp/cand python /tmp/probe.py | tee -a results/round61.log
+
+      - name: Build fresh qualification roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6; mkdir -p /tmp/m6
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          equal=fresh[4000:4048]; timed=fresh[4050:4082]
+          assert len(equal)==48 and len(timed)==32 and not set(equal)&set(timed)
+          Path('/tmp/hardleaf-equal.epd').write_text('\n'.join(equal)+'\n')
+          Path('/tmp/hardleaf-timed.epd').write_text('\n'.join(timed)+'\n')
+          PY
+
+      - name: 96-game equal-node screen
+        run: python -u tools/v14_fixed_node_arena.py /tmp/cand /tmp/base --nodes 30000 --pairs 48 --opening-file /tmp/hardleaf-equal.epd --opening-offset 0 --max-plies 200 --json-out results/equal-node.json | tee results/equal-node.log
+
+      - name: 64-game competition-clock screen
+        run: python -u scripts/v15_competition_gate.py --candidate /tmp/cand --control /tmp/base --openings /tmp/hardleaf-timed.epd --output results/timed-64.json --label hardleaf-${{ matrix.name }} --base-ms 2500 --inc-ms 50 --max-plies 180 | tee results/timed-64.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-hardleaf-${{ matrix.name }}-${{ github.sha }}
+          path: results/
+          retention-days: 30
