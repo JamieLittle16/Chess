@@ -126,6 +126,19 @@ def result_value(result: str, python_white: bool) -> float:
     raise ValueError(result)
 
 
+def reset_python_game(agent: object) -> None:
+    """Emulate the submission's fresh-process-per-game contract without re-JITing."""
+    agent._GAME_KEYS = []
+    agent._PENDING_AFTER_OUR_MOVE = None
+    agent._LAST_CALL_TIME_LEFT_MS = None
+    agent._LAST_GET_MOVE_ELAPSED_MS = None
+    agent._CLOCK_OVERHEAD_EMA_MS = 40.0
+    agent._CLOCK_FEEDBACK_SAMPLES = 0
+    agent._HASH_KEYS.fill(0)
+    agent._HASH_MOVES.fill(-1)
+    agent._TT_TABLE.fill(0)
+
+
 def main() -> int:
     a = parse_args()
     python_dir = a.python_dir.resolve()
@@ -141,6 +154,7 @@ def main() -> int:
         mv = agent.get_move(fen, 80000)
         if chess.Move.from_uci(mv) not in chess.Board(fen).legal_moves:
             raise RuntimeError('Python warmup returned illegal move ' + mv)
+    reset_python_game(agent)
 
     rust_env = os.environ.copy()
     rust = RustUCI(a.rust.resolve(), rust_env)
@@ -151,7 +165,12 @@ def main() -> int:
     try:
         for opening_index, root_fen in enumerate(opening_fens(a.openings)):
             for python_white in (True, False):
+                # Rust's ucinewgame reconstructs Engine search memory. Python's
+                # official submission contract is one worker process per game,
+                # so clear every mutable game/search cache here as the exact
+                # in-process equivalent while retaining only compiled machine code.
                 rust.new_game()
+                reset_python_game(agent)
                 board = chess.Board(root_fen)
                 clocks = [float(a.base_ms), float(a.base_ms)]  # white, black
                 reason = 'max-plies'
@@ -257,6 +276,7 @@ def main() -> int:
         'base_ms': a.base_ms,
         'inc_ms': a.inc_ms,
         'max_plies': a.max_plies,
+        'python_state_reset_each_game': True,
     }
     a.output.parent.mkdir(parents=True, exist_ok=True)
     a.output.write_text(json.dumps({'summary': summary, 'games_detail': games}, indent=2) + '\n')
