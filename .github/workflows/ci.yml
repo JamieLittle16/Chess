@@ -28,5 +28,7 @@ jobs:
         run: cargo test --workspace --all-features
       - name: Release tests
         run: cargo test --workspace --all-features --release
+      - name: Deep chess-core qualification
+        run: cargo test --release -p chess-core --test core_qualification deep_perft_qualification -- --ignored --exact
       - name: Reference benchmark signature
         run: cargo run --release --quiet -p chess-bench
