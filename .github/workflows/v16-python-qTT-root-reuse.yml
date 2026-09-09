@@ -1,0 +1,84 @@
+name: V16 Python qTT exact root reuse
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v16/python-qTT-root-reuse]
+    paths:
+      - '.github/workflows/v16-python-qTT-root-reuse.yml'
+      - 'scripts/patch_v16_python_qtt_root_reuse.py'
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Materialize qTT control and root-reuse candidate
+        shell: bash
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: |
+          set -euo pipefail
+          gh run download 34298586524 -n Little-Gambit-V15-FINAL-725be3e8595d1e54b1f12e11f2b9d92f1e415ebc -D /tmp/v15-artifact
+          V15=$(find /tmp/v15-artifact -type f -name Little-Gambit-V15.zip -print -quit); test -n "$V15"
+          echo '81e22344bf9a6b41f16e32f29f93c0b6074afe63e4fd51002a537e6a091f2852  '"$V15" | sha256sum --check --strict
+          rm -rf /tmp/control /tmp/candidate results; mkdir -p /tmp/control /tmp/candidate results
+          unzip -q "$V15" -d /tmp/control
+          python scripts/patch_v16_python_v15_qsearch_tt.py /tmp/control/experiments/numba_search.py
+          python - <<'PY'
+          from pathlib import Path
+          remove={'_advance_eval_state_into','_child_position_key','_legal_moves_for_state'}; changed=[]
+          for fn in ('numba_core.py','numba_search.py','v14_student_single_runtime.py'):
+              p=Path('/tmp/control/experiments')/fn; s=p.read_text()
+              for name in sorted(remove):
+                  a=f'@njit(cache=False, inline="always")\ndef {name}('
+                  if a in s: s=s.replace(a,f'@njit(cache=False)\ndef {name}(',1); changed.append(name)
+              p.write_text(s)
+          if remove-set(changed): raise SystemExit(f'missing boundaries {sorted(remove-set(changed))}')
+          PY
+          cp -a /tmp/control/. /tmp/candidate/
+          python scripts/patch_v16_python_qtt_root_reuse.py /tmp/candidate/experiments/numba_search.py
+          python -m py_compile /tmp/control/agent.py /tmp/control/experiments/*.py /tmp/candidate/agent.py /tmp/candidate/experiments/*.py
+          grep -q 'root_tt_depth < TT_QDEPTH_BASE' /tmp/candidate/experiments/numba_search.py
+          (cd /tmp/candidate && zip -qr /tmp/Little-Gambit-V16-qTT-root-reuse.zip .)
+      - name: Hard 70-second cold-start gate
+        run: |
+          rm -rf /tmp/cold /tmp/home /tmp/cache /tmp/numba; mkdir /tmp/cold
+          unzip -q /tmp/Little-Gambit-V16-qTT-root-reuse.zip -d /tmp/cold
+          /usr/bin/time -f 'PROCESS_WALL_SECONDS %e' -o results/cold-process.txt timeout 70s env PYTHONPATH=/tmp/cold HOME=/tmp/home XDG_CACHE_HOME=/tmp/cache NUMBA_CACHE_DIR=/tmp/numba OMP_NUM_THREADS=1 python - <<'PY' > results/cold.txt 2>&1
+          import sys,time; from importlib import import_module
+          t=time.perf_counter(); sys.path.insert(0,'/tmp/cold'); import_module('agent'); print('READY_SECONDS',time.perf_counter()-t)
+          PY
+          cat results/cold-process.txt results/cold.txt
+      - name: Build fresh roots
+        run: |
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6; mkdir /tmp/m6; python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]; roots=fresh[4648:4728]; assert len(roots)==80 and len(set(roots))==80
+          Path('/tmp/node.epd').write_text('\n'.join(roots[:48])+'\n'); Path('/tmp/clock.epd').write_text('\n'.join(roots[48:])+'\n')
+          PY
+      - name: 96-game equal-node screen
+        run: python -u tools/v14_fixed_node_arena.py /tmp/candidate /tmp/control --nodes 20000 --pairs 48 --opening-file /tmp/node.epd --max-plies 220 --json-out results/equal-node.json | tee results/equal-node.log
+      - name: 64-game real-clock screen
+        run: python -u scripts/v15_competition_gate.py --control /tmp/control --candidate /tmp/candidate --openings /tmp/clock.epd --output results/timed.json --label 'V16 qTT exact root reuse' --base-ms 2500 --inc-ms 50 --max-plies 180 --grace-ms 1500 | tee results/timed.log
+      - name: Preserve candidate
+        if: always()
+        run: cp /tmp/Little-Gambit-V16-qTT-root-reuse.zip results/ 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v16-python-qTT-root-reuse-${{ github.sha }}
+          path: results/
+          retention-days: 30
