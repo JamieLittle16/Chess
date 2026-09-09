@@ -1,0 +1,128 @@
+name: V15 Python leaf-H16 Round61 regression
+
+on:
+  push:
+    branches:
+      - analysis/v15-python-leaf-h16-round61-20260909
+    paths:
+      - .github/workflows/v15-python-leaf-h16-round61.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: full
+            runtime_den: 1
+          - name: half
+            runtime_den: 2
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208e8ac6f98df8515dc48aa79596
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+        continue-on-error: true
+
+      - name: Download exact packaged V14 fallback
+        if: steps.v14-primary.outcome == 'failure'
+        uses: actions/download-artifact@v4
+        id: v14-fallback
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+
+      - name: Download H16 search-leaf Gestalt student
+        uses: actions/download-artifact@v4
+        with:
+          name: v15-leaf-gestalt-topology-h16-70736f6f056d42aa8ceee37e0b282e4f02d34556
+          path: h16-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34277063353
+
+      - name: Materialize exact-speed control and H16 candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
+          MODEL=$(find h16-artifact -type f -name gestalt-topology-h16.npz -print -quit); test -n "$MODEL"
+          rm -rf /tmp/base /tmp/cand results; mkdir -p /tmp/base /tmp/cand results
+          unzip -q "$ZIP" -d /tmp/base; cp -a /tmp/base/. /tmp/cand/
+
+          python scripts/patch_v15_python_presort_once.py /tmp/base/experiments/numba_search.py
+          python scripts/patch_v15_python_fused_h64_direct.py /tmp/base/experiments/v14_student_single_runtime.py
+          python scripts/patch_v15_python_inline_fused_h64.py /tmp/base/experiments/v14_student_single_runtime.py
+          python scripts/patch_v15_python_fused_h64_zero_guard.py /tmp/base/experiments/v14_student_single_runtime.py
+          python scripts/patch_v15_python_lazy_h64_chain.py /tmp/base/experiments/numba_search.py
+          python scripts/patch_v15_python_scoremeta_hotloop.py /tmp/base/experiments/numba_search.py
+
+          python scripts/patch_v15_python_presort_once.py /tmp/cand/experiments/numba_search.py
+          python scripts/patch_v15_python_scoremeta_hotloop.py /tmp/cand/experiments/numba_search.py
+          cp "$MODEL" /tmp/cand/experiments/v15_gestalt_h16.npz
+          python scripts/patch_v15_python_leaf_h16_gestalt.py /tmp/cand/experiments/numba_search.py --runtime-den ${{ matrix.runtime_den }}
+
+          python -m py_compile /tmp/base/experiments/*.py /tmp/cand/experiments/*.py
+
+      - name: Round61 fixed-node diagnostic
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/round61_probe.py <<'PY'
+          import json
+          import chess
+          import numpy as np
+          from experiments.numba_core import encode_position, move_to_uci
+          from experiments.numba_search import iterative_search_stateful
+
+          fen='2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23'
+          b=chess.Board(fen)
+          e=encode_position(b)
+          h=np.empty(0,dtype=np.uint64)
+          # Compile once, then measure the exact historical node budgets in the same process.
+          iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,12000)
+          rows=[]
+          for nodes in (300000,1000000):
+              e=encode_position(b)
+              o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,nodes)
+              rows.append({
+                  'nodes_requested':nodes,
+                  'move':move_to_uci(int(o[0])),
+                  'score':int(o[1]),
+                  'depth':int(o[2]),
+                  'nodes':int(o[3]),
+                  'desired_move':'b1b1' if False else 'a1b1',
+              })
+          print(json.dumps({'fen':fen,'rows':rows}))
+          PY
+          echo CONTROL
+          PYTHONPATH=/tmp/base python /tmp/round61_probe.py | tee results/round61-control-${{ matrix.name }}.json
+          echo H16-${{ matrix.name }}
+          PYTHONPATH=/tmp/cand python /tmp/round61_probe.py | tee results/round61-h16-${{ matrix.name }}.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-leaf-h16-round61-${{ matrix.name }}-${{ github.sha }}
+          path: results/
+          retention-days: 30
