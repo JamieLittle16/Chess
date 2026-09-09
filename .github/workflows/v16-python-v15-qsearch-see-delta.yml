@@ -1,0 +1,91 @@
+name: V16 Python V15 qsearch SEE delta
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v16/python-v15-qsearch-see-delta]
+    paths:
+      - '.github/workflows/v16-python-v15-qsearch-see-delta.yml'
+      - 'scripts/patch_v16_python_v15_qsearch_see_delta.py'
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Download exact final V15
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V15-FINAL-725be3e8595d1e54b1f12e11f2b9d92f1e415ebc
+          path: v15-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34298586524
+
+      - name: Materialize control and SEE/delta candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          V15=$(find v15-artifact -type f -name Little-Gambit-V15.zip -print -quit); test -n "$V15"
+          echo '81e22344bf9a6b41f16e32f29f93c0b6074afe63e4fd51002a537e6a091f2852  '"$V15" | sha256sum --check --strict
+          rm -rf /tmp/control /tmp/candidate results
+          mkdir -p /tmp/control /tmp/candidate results
+          unzip -q "$V15" -d /tmp/control
+          cp -a /tmp/control/. /tmp/candidate/
+          python scripts/patch_v16_python_v15_qsearch_see_delta.py /tmp/candidate/experiments/numba_search.py
+          python -m py_compile /tmp/control/agent.py /tmp/control/experiments/*.py /tmp/candidate/agent.py /tmp/candidate/experiments/*.py
+          grep -q 'QSEARCH_DELTA_MARGIN = 140' /tmp/candidate/experiments/numba_search.py
+          grep -q 'QSEARCH_BAD_CAPTURE_THRESHOLD = -80' /tmp/candidate/experiments/numba_search.py
+          grep -q '_see_capture_is_legal' /tmp/candidate/experiments/numba_search.py
+          grep -q 'gives_check = _state_in_check' /tmp/candidate/experiments/numba_search.py
+          (cd /tmp/candidate && zip -qr /tmp/Little-Gambit-V16B-qSEE.zip .)
+          sha256sum "$V15" /tmp/Little-Gambit-V16B-qSEE.zip | tee results/package-hashes.txt
+
+      - name: Build fresh disjoint UHO roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6; mkdir /tmp/m6
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          roots=fresh[4408:4488]
+          assert len(roots)==80 and len(set(roots))==80
+          Path('/tmp/v16b-see-node.epd').write_text('\n'.join(roots[:48])+'\n')
+          Path('/tmp/v16b-see-clock.epd').write_text('\n'.join(roots[48:80])+'\n')
+          PY
+
+      - name: 96-game equal-node SEE/delta screen
+        run: |
+          python -u tools/v14_fixed_node_arena.py /tmp/candidate /tmp/control --nodes 20000 --pairs 48 --opening-file /tmp/v16b-see-node.epd --max-plies 220 --json-out results/equal-node.json | tee results/equal-node.log
+
+      - name: 64-game short-clock SEE/delta screen
+        run: |
+          python -u scripts/v15_competition_gate.py --control /tmp/control --candidate /tmp/candidate --openings /tmp/v16b-see-clock.epd --output results/timed.json --label 'V16B exact-V15 legality-aware qsearch SEE/delta' --base-ms 2500 --inc-ms 50 --max-plies 180 --grace-ms 1500 | tee results/timed.log
+
+      - name: Preserve candidate package
+        if: always()
+        run: cp /tmp/Little-Gambit-V16B-qSEE.zip results/ 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v16-python-v15-qsearch-see-delta-${{ github.sha }}
+          path: results/
+          retention-days: 30
