@@ -87,7 +87,10 @@ fn one_entry_tt_collisions_never_reuse_foreign_positions() {
         let reused_result = reused.search_depth(&mut reused_root, 3);
         let fresh_result = Searcher::with_tt_entries(1).search_depth(&mut fresh_root, 3);
 
-        assert_eq!(reused_result.score, fresh_result.score, "score mismatch: {fen}");
+        assert_eq!(
+            reused_result.score, fresh_result.score,
+            "score mismatch: {fen}"
+        );
         assert_eq!(
             reused_result.best_move, fresh_result.best_move,
             "best-move mismatch: {fen}"
