@@ -1,6 +1,8 @@
 name: Core external chess-rule oracle
 
 on:
+  push:
+    branches: [test/v16-external-oracle]
   pull_request:
     branches: [main]
     paths:
