@@ -26,11 +26,8 @@ fn interruption_restores_roots_across_many_recursive_cut_points() {
             let mut position = Position::from_fen(fen).expect("qualification FEN must parse");
             let original = position.clone();
             let mut searcher = Searcher::with_tt_entries(1 << 12);
-            let outcome = searcher.iterative_deepening_controlled(
-                &mut position,
-                8,
-                &StopAtNodes(budget),
-            );
+            let outcome =
+                searcher.iterative_deepening_controlled(&mut position, 8, &StopAtNodes(budget));
 
             assert_eq!(
                 position, original,
@@ -50,23 +47,17 @@ fn interruption_restores_roots_across_many_recursive_cut_points() {
 
 #[test]
 fn interrupted_searcher_can_be_reused_without_transient_state_leakage() {
-    let mut interrupted_root = Position::from_fen(
-        "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
-    )
-    .expect("valid interruption root");
+    let mut interrupted_root =
+        Position::from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1")
+            .expect("valid interruption root");
     let interrupted_original = interrupted_root.clone();
 
     let mut reused = Searcher::with_tt_entries(1 << 15);
-    let stopped = reused.iterative_deepening_controlled(
-        &mut interrupted_root,
-        8,
-        &StopAtNodes(37),
-    );
+    let stopped = reused.iterative_deepening_controlled(&mut interrupted_root, 8, &StopAtNodes(37));
     assert!(stopped.stopped);
     assert_eq!(interrupted_root, interrupted_original);
 
-    let target = Position::from_fen("7k/8/8/8/8/8/6Q1/K7 w - - 0 1")
-        .expect("valid target root");
+    let target = Position::from_fen("7k/8/8/8/8/8/6Q1/K7 w - - 0 1").expect("valid target root");
     let mut reused_target = target.clone();
     let mut fresh_target = target.clone();
     let reused_result = reused.search_depth(&mut reused_target, 3);
@@ -81,8 +72,7 @@ fn interrupted_searcher_can_be_reused_without_transient_state_leakage() {
 #[test]
 fn transposition_cache_cannot_override_halfmove_draw_context() {
     let live = Position::from_fen("7k/8/8/8/8/8/6Q1/K7 w - - 0 1").expect("valid live FEN");
-    let drawn =
-        Position::from_fen("7k/8/8/8/8/8/6Q1/K7 w - - 100 1").expect("valid draw FEN");
+    let drawn = Position::from_fen("7k/8/8/8/8/8/6Q1/K7 w - - 100 1").expect("valid draw FEN");
 
     assert_eq!(
         live.zobrist_key(),
@@ -93,13 +83,22 @@ fn transposition_cache_cannot_override_halfmove_draw_context() {
     let mut searcher = Searcher::with_tt_entries(1 << 12);
     let mut live_working = live.clone();
     let warm = searcher.search_depth(&mut live_working, 2);
-    assert!(warm.score > 0, "queen-up control must not be scored as a draw");
+    assert!(
+        warm.score > 0,
+        "queen-up control must not be scored as a draw"
+    );
     assert_eq!(live_working, live);
 
     let mut drawn_working = drawn.clone();
     let draw = searcher.search_depth(&mut drawn_working, 2);
-    assert_eq!(draw.score, 0, "50-move context must beat a warm exact TT hit");
-    assert!(draw.best_move.is_some(), "claimable draw position is not terminal");
+    assert_eq!(
+        draw.score, 0,
+        "50-move context must beat a warm exact TT hit"
+    );
+    assert!(
+        draw.best_move.is_some(),
+        "claimable draw position is not terminal"
+    );
     assert_eq!(drawn_working, drawn);
 
     let mut live_again = live.clone();
@@ -111,8 +110,7 @@ fn transposition_cache_cannot_override_halfmove_draw_context() {
 
 #[test]
 fn repetition_threshold_and_normalized_identity_survive_tt_reuse() {
-    let without_ep =
-        Position::from_fen("7k/8/8/8/8/8/6Q1/K7 w - - 0 1").expect("valid FEN");
+    let without_ep = Position::from_fen("7k/8/8/8/8/8/6Q1/K7 w - - 0 1").expect("valid FEN");
     let with_irrelevant_ep =
         Position::from_fen("7k/8/8/8/8/8/6Q1/K7 w - e6 0 1").expect("valid FEN");
 
@@ -140,15 +138,18 @@ fn repetition_threshold_and_normalized_identity_survive_tt_reuse() {
 
     let mut third_occurrence = with_irrelevant_ep.clone();
     let third = searcher.search_depth_with_history(&mut third_occurrence, &[key, key], 2);
-    assert_eq!(third.score, 0, "two prior occurrences make the root threefold");
+    assert_eq!(
+        third.score, 0,
+        "two prior occurrences make the root threefold"
+    );
     assert!(third.best_move.is_some());
     assert_eq!(third_occurrence, with_irrelevant_ep);
 }
 
 #[test]
 fn mate_on_the_hundredth_halfmove_takes_precedence_over_draw_claim() {
-    let mut root = Position::from_fen("7k/5Q2/6K1/8/8/8/8/8 w - - 99 1")
-        .expect("valid mate-in-one FEN");
+    let mut root =
+        Position::from_fen("7k/5Q2/6K1/8/8/8/8/8 w - - 99 1").expect("valid mate-in-one FEN");
     let original = root.clone();
     let mut searcher = Searcher::with_tt_entries(1 << 12);
     let result = searcher.search_depth(&mut root, 1);
