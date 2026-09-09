@@ -1,0 +1,138 @@
+name: V15 Python release candidate
+
+on:
+  push:
+    branches:
+      - analysis/v15-python-release-candidate-20260909
+    paths:
+      - .github/workflows/v15-python-release-candidate.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: safe
+            use_lmr: '0'
+          - label: lmr2048
+            use_lmr: '1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+
+      - name: Download replicated b050 model
+        uses: actions/download-artifact@v4
+        with:
+          name: v15-python-searchleaf-h64-b050-94ef8e11b956050aaa057863010ce555d76733af
+          path: b050-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34290665543
+
+      - name: Materialize exact V14 control and V15 candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
+          MODEL=$(find b050-artifact -type f -path '*/model/v14_student_h64.npz' -print -quit); test -n "$MODEL"
+          rm -rf /tmp/v14 /tmp/v15 release-results; mkdir -p /tmp/v14 /tmp/v15 release-results
+          unzip -q "$ZIP" -d /tmp/v14
+          cp -a /tmp/v14/. /tmp/v15/
+          python scripts/patch_v15_python_presort_once.py /tmp/v15/experiments/numba_search.py
+          python scripts/patch_v15_python_fused_h64_direct.py /tmp/v15/experiments/v14_student_single_runtime.py
+          python scripts/patch_v15_python_inline_fused_h64.py /tmp/v15/experiments/v14_student_single_runtime.py
+          python scripts/patch_v15_python_fused_h64_zero_guard.py /tmp/v15/experiments/v14_student_single_runtime.py
+          python scripts/patch_v15_python_lazy_h64_chain.py /tmp/v15/experiments/numba_search.py
+          python scripts/patch_v15_python_scoremeta_hotloop.py /tmp/v15/experiments/numba_search.py
+          cp "$MODEL" /tmp/v15/experiments/v14_student_h64.npz
+          if [ '${{ matrix.use_lmr }}' = '1' ]; then
+            python scripts/patch_v15_python_lean_lmr_history.py /tmp/v15/experiments/numba_search.py --threshold 2048
+          fi
+          python -m py_compile /tmp/v15/agent.py /tmp/v15/experiments/*.py
+
+      - name: Competition API and canonical regression smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=/tmp/v15 python - <<'PY'
+          import agent,chess,time
+          tests=[
+            (chess.STARTING_FEN,80000),
+            ('2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23',80000),
+          ]
+          for fen,clock in tests:
+              b=chess.Board(fen); t=time.perf_counter(); u=agent.get_move(fen,clock); dt=time.perf_counter()-t
+              m=chess.Move.from_uci(u); assert m in b.legal_moves,(fen,u)
+              print('SMOKE',fen,u,dt)
+          PY
+
+      - name: Build fresh V15-vs-V14 roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6; mkdir /tmp/m6
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          roots=fresh[4000:4032]; assert len(roots)==32
+          Path('/tmp/v15-v14.epd').write_text('\n'.join(roots)+'\n')
+          PY
+
+      - name: 64-game competition-clock V15 vs exact V14
+        run: python -u scripts/v15_competition_gate.py --candidate /tmp/v15 --control /tmp/v14 --openings /tmp/v15-v14.epd --output release-results/v15-v14-64.json --label v15-${{ matrix.label }}-vs-v14 --base-ms 2500 --inc-ms 50 --max-plies 180 | tee release-results/v15-v14-64.log
+
+      - name: Build exact submission ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/package /tmp/smoke
+          mkdir -p /tmp/package/experiments /tmp/smoke
+          cp /tmp/v15/agent.py /tmp/package/agent.py
+          cp /tmp/v15/v14_kpk.u8 /tmp/package/v14_kpk.u8
+          cp /tmp/v15/experiments/__init__.py /tmp/package/experiments/__init__.py
+          cp /tmp/v15/experiments/numba_core.py /tmp/package/experiments/numba_core.py
+          cp /tmp/v15/experiments/numba_search.py /tmp/package/experiments/numba_search.py
+          cp /tmp/v15/experiments/v13_residual.i16 /tmp/package/experiments/v13_residual.i16
+          cp /tmp/v15/experiments/v14_student_single_runtime.py /tmp/package/experiments/v14_student_single_runtime.py
+          cp /tmp/v15/experiments/v14_student_h64.npz /tmp/package/experiments/v14_student_h64.npz
+          (cd /tmp/package && zip -q -9 -r "$GITHUB_WORKSPACE/release-results/Little-Gambit-V15-${{ matrix.label }}.zip" .)
+          sha256sum release-results/Little-Gambit-V15-${{ matrix.label }}.zip | tee release-results/Little-Gambit-V15-${{ matrix.label }}.sha256
+          unzip -l release-results/Little-Gambit-V15-${{ matrix.label }}.zip | tee release-results/contents.txt
+          unzip -q release-results/Little-Gambit-V15-${{ matrix.label }}.zip -d /tmp/smoke
+          PYTHONPATH=/tmp/smoke python - <<'PY'
+          import agent,chess
+          for fen in (chess.STARTING_FEN,'2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23'):
+              b=chess.Board(fen); u=agent.get_move(fen,80000); m=chess.Move.from_uci(u); assert m in b.legal_moves,(fen,u); print('ZIP_SMOKE',u)
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Little-Gambit-V15-${{ matrix.label }}-${{ github.sha }}
+          path: release-results/
+          retention-days: 30
