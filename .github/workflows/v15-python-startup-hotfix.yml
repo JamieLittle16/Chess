@@ -1,0 +1,159 @@
+name: V15 Python startup-cache hotfix
+
+on:
+  push:
+    branches:
+      - hotfix/v15-python-startup-cache-20260909
+    paths:
+      - .github/workflows/v15-python-startup-hotfix.yml
+      - scripts/patch_v15_python_startup_cache.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Download exact V14 and replicated b050
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - uses: actions/download-artifact@v4
+        with:
+          name: v15-python-searchleaf-h64-b050-94ef8e11b956050aaa057863010ce555d76733af
+          path: b050-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34290665543
+
+      - name: Reconstruct exact qualified V15 plus startup-only patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
+          MODEL=$(find b050-artifact -type f -path '*/model/v14_student_h64.npz' -print -quit); test -n "$MODEL"
+          rm -rf /tmp/v15 /tmp/package package-results
+          mkdir -p /tmp/v15 /tmp/package/experiments package-results
+          unzip -q "$ZIP" -d /tmp/v15
+          python scripts/patch_v15_python_presort_once.py /tmp/v15/experiments/numba_search.py
+          python scripts/patch_v15_python_fused_h64_direct.py /tmp/v15/experiments/v14_student_single_runtime.py
+          python scripts/patch_v15_python_inline_fused_h64.py /tmp/v15/experiments/v14_student_single_runtime.py
+          python scripts/patch_v15_python_fused_h64_zero_guard.py /tmp/v15/experiments/v14_student_single_runtime.py
+          python scripts/patch_v15_python_lazy_h64_chain.py /tmp/v15/experiments/numba_search.py
+          python scripts/patch_v15_python_scoremeta_hotloop.py /tmp/v15/experiments/numba_search.py
+          cp "$MODEL" /tmp/v15/experiments/v14_student_h64.npz
+          python scripts/patch_v15_python_lean_lmr_history.py /tmp/v15/experiments/numba_search.py --threshold 2048
+          python scripts/patch_v15_python_startup_cache.py /tmp/v15/agent.py /tmp/v15/experiments/numba_search.py
+          python -m py_compile /tmp/v15/agent.py /tmp/v15/experiments/*.py
+
+          cp /tmp/v15/agent.py /tmp/package/agent.py
+          cp /tmp/v15/v14_kpk.u8 /tmp/package/v14_kpk.u8
+          cp /tmp/v15/experiments/__init__.py /tmp/package/experiments/__init__.py
+          cp /tmp/v15/experiments/numba_core.py /tmp/package/experiments/numba_core.py
+          cp /tmp/v15/experiments/numba_search.py /tmp/package/experiments/numba_search.py
+          cp /tmp/v15/experiments/v13_residual.i16 /tmp/package/experiments/v13_residual.i16
+          cp /tmp/v15/experiments/v14_student_single_runtime.py /tmp/package/experiments/v14_student_single_runtime.py
+          cp /tmp/v15/experiments/v14_student_h64.npz /tmp/package/experiments/v14_student_h64.npz
+
+      - name: Prime portable Numba production cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/package
+          PYTHONPATH=/tmp/package NUMBA_DEBUG_CACHE=1 python - <<'PY' 2>&1 | tee "$GITHUB_WORKSPACE/package-results/cache-prime.txt"
+          import time
+          t0=time.perf_counter()
+          import agent
+          import chess
+          imported=time.perf_counter()-t0
+          b=chess.Board()
+          k=agent._position_key(b)
+          e=agent.evaluate(b)
+          print('PRIME_IMPORT_SECONDS', imported)
+          print('PRIME_POSITION_KEY', k)
+          print('PRIME_EVALUATE', e)
+          PY
+          find /tmp/package -type f -path '*/__pycache__/*' -printf '%p %s bytes\n' | sort | tee package-results/cache-files.txt
+          test -n "$(find /tmp/package/experiments/__pycache__ -type f -name '*iterative_search_stateful_timed_cached*.nbc' -print -quit)" || {
+            echo 'missing timed production cache' >&2
+            exit 1
+          }
+
+      - name: Build cached submission ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd /tmp/package && zip -q -9 -r "$GITHUB_WORKSPACE/package-results/Little-Gambit-V15-STARTUP-HOTFIX.zip" .)
+          sha256sum package-results/Little-Gambit-V15-STARTUP-HOTFIX.zip | tee package-results/Little-Gambit-V15-STARTUP-HOTFIX.sha256
+          unzip -l package-results/Little-Gambit-V15-STARTUP-HOTFIX.zip | tee package-results/contents.txt
+          ls -lh package-results/Little-Gambit-V15-STARTUP-HOTFIX.zip
+
+      - name: Cold extraction and startup gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/cold
+          mkdir /tmp/cold
+          t0=$(date +%s%N)
+          unzip -q package-results/Little-Gambit-V15-STARTUP-HOTFIX.zip -d /tmp/cold
+          t1=$(date +%s%N)
+          python - <<PY | tee package-results/unpack.txt
+          print('UNPACK_SECONDS', (${t1}-${t0})/1e9)
+          PY
+          cd /tmp/cold
+          timeout 60s env PYTHONPATH=/tmp/cold NUMBA_DEBUG_CACHE=1 python - <<'PY' 2>&1 | tee "$GITHUB_WORKSPACE/package-results/cold-start.txt"
+          import time
+          t0=time.perf_counter()
+          import agent
+          import chess
+          imported=time.perf_counter()-t0
+          print('COLD_IMPORT_SECONDS', imported)
+          fen=chess.STARTING_FEN
+          t1=time.perf_counter()
+          move=agent.get_move(fen, 120000)
+          first_move=time.perf_counter()-t1
+          board=chess.Board(fen)
+          parsed=chess.Move.from_uci(move)
+          assert parsed in board.legal_moves, move
+          print('COLD_FIRST_GET_MOVE_SECONDS', first_move)
+          print('COLD_TOTAL_READY_SECONDS', time.perf_counter()-t0)
+          print('COLD_MOVE', move)
+          PY
+          grep -q 'data loaded.*iterative_search_stateful_timed_cached' "$GITHUB_WORKSPACE/package-results/cold-start.txt"
+
+      - name: Verify chess payload differs only by startup patch/cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' | tee package-results/payload-audit.txt
+          from pathlib import Path
+          import re
+          agent=Path('/tmp/package/agent.py').read_text()
+          search=Path('/tmp/package/experiments/numba_search.py').read_text()
+          assert 'NUMBA_CPU_NAME' in agent
+          assert 'InTreeCacheLocatorFsAgnostic' in agent
+          for name in ('evaluate','position_key','iterative_search_stateful_timed_cached'):
+              pat=rf'@njit\(cache=True\)\ndef {name}\('
+              assert re.search(pat, search), name
+          print('STARTUP_PATCH_AUDIT_OK')
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Little-Gambit-V15-STARTUP-HOTFIX-${{ github.sha }}
+          path: package-results/
+          retention-days: 30
