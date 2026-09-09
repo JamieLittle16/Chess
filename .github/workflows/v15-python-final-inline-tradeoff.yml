@@ -1,0 +1,164 @@
+name: V15 Python final inline startup tradeoff
+
+on:
+  push:
+    branches:
+      - analysis/v15-python-release-candidate-20260909
+    paths:
+      - .github/workflows/v15-python-final-inline-tradeoff.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  init:
+    strategy:
+      fail-fast: false
+      matrix:
+        replica: [1, 2, 3]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact final V15 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V15-FINAL-725be3e8595d1e54b1f12e11f2b9d92f1e415ebc
+          path: final-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34298586524
+      - name: Materialize semantics-identical no-forced-inline variant
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find final-artifact -type f -name Little-Gambit-V15.zip -print -quit); test -n "$ZIP"
+          rm -rf /tmp/v15; mkdir /tmp/v15
+          unzip -q "$ZIP" -d /tmp/v15
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/v15/experiments/v14_student_single_runtime.py')
+          s=p.read_text()
+          old='@njit(cache=False, inline="always")\ndef advance_absolute768_accumulator_into('
+          new='@njit(cache=False)\ndef advance_absolute768_accumulator_into('
+          assert s.count(old)==1,s.count(old)
+          p.write_text(s.replace(old,new,1))
+          PY
+          python -m py_compile /tmp/v15/agent.py /tmp/v15/experiments/*.py
+      - name: Hard 90-second cold-start probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          START=$(date +%s%N)
+          /usr/bin/time -f 'validation_wall_s=%e validation_maxrss_kb=%M' -o validation-time.txt \
+            timeout 90s python tools/v14_agent_runner.py /tmp/v15 <<'EOF' | tee validation-output.json
+          {"fen":"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1","time_left_ms":80000}
+          EOF
+          END=$(date +%s%N)
+          cat validation-time.txt
+          grep -q '"ready": true' validation-output.json
+          grep -q '"move":' validation-output.json
+          python - <<PY
+          print('replica=${{ matrix.replica }} elapsed_wall_s=',($END-$START)/1e9)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-noinline-init-${{ matrix.replica }}-${{ github.sha }}
+          path: |
+            validation-time.txt
+            validation-output.json
+          retention-days: 30
+
+  throughput:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact final V15 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V15-FINAL-725be3e8595d1e54b1f12e11f2b9d92f1e415ebc
+          path: final-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34298586524
+      - name: Materialize inline control and no-inline candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find final-artifact -type f -name Little-Gambit-V15.zip -print -quit); test -n "$ZIP"
+          rm -rf /tmp/inline /tmp/noinline results; mkdir /tmp/inline /tmp/noinline results
+          unzip -q "$ZIP" -d /tmp/inline; cp -a /tmp/inline/. /tmp/noinline/
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/noinline/experiments/v14_student_single_runtime.py'); s=p.read_text()
+          old='@njit(cache=False, inline="always")\ndef advance_absolute768_accumulator_into('
+          new='@njit(cache=False)\ndef advance_absolute768_accumulator_into('
+          assert s.count(old)==1
+          p.write_text(s.replace(old,new,1))
+          PY
+      - name: Five-repetition throughput
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6; mkdir /tmp/m6
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          lines=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          Path('/tmp/roots.epd').write_text('\n'.join(lines[4100:4120])+'\n')
+          PY
+          cat >/tmp/w.py <<'PY'
+          import json,sys,chess,numpy as np
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful
+          for line in sys.stdin:
+              q=json.loads(line); b=chess.Board(q['fen']); e=encode_position(b); h=np.empty(0,dtype=np.uint64)
+              o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,int(q['nodes']))
+              print(json.dumps({'nodes':int(o[3]),'depth':int(o[2])}),flush=True)
+          PY
+          python - <<'PY'
+          import json,os,statistics,subprocess,sys,time
+          from pathlib import Path
+          roots=Path('/tmp/roots.epd').read_text().splitlines(); rows=[]; ratios=[]
+          def start(d):
+              e=os.environ.copy(); e['PYTHONPATH']=d
+              return subprocess.Popen([sys.executable,'/tmp/w.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=e)
+          def call(p,f,n):
+              p.stdin.write(json.dumps({'fen':f,'nodes':n})+'\n'); p.stdin.flush(); return json.loads(p.stdout.readline())
+          a=start('/tmp/inline'); b=start('/tmp/noinline')
+          try:
+              call(a,roots[0],500); call(b,roots[0],500)
+              for rep in range(5):
+                  order=roots if rep%2==0 else list(reversed(roots))
+                  def timed(p):
+                      nodes=0; t=time.perf_counter()
+                      for fen in order: nodes+=call(p,fen,35000)['nodes']
+                      return nodes/(time.perf_counter()-t)
+                  if rep%2==0: ia=timed(a); nb=timed(b)
+                  else: nb=timed(b); ia=timed(a)
+                  ratio=nb/ia; ratios.append(ratio); rows.append({'rep':rep,'inline_nps':ia,'noinline_nps':nb,'noinline_over_inline':ratio})
+          finally:
+              a.terminate(); b.terminate(); a.wait(); b.wait()
+          out={'median_noinline_over_inline':statistics.median(ratios),'rows':rows}; print(out)
+          Path('results/throughput.json').write_text(json.dumps(out,indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-final-inline-tradeoff-${{ github.sha }}
+          path: results/
+          retention-days: 30
