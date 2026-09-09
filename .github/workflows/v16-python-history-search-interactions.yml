@@ -1,0 +1,136 @@
+name: V16 Python history search interactions
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [v16/python-history-search-interactions]
+    paths:
+      - '.github/workflows/v16-python-history-search-interactions.yml'
+      - 'scripts/patch_v16_python_lmr_schedule.py'
+      - 'scripts/patch_v16_python_lmp.py'
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  qualify:
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [lmr, lmp, combo]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Materialize history control and interaction candidate
+        shell: bash
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); test -n "$ZIP"
+          rm -rf /tmp/control /tmp/candidate results
+          mkdir -p /tmp/control /tmp/candidate results
+          unzip -q "$ZIP" -d /tmp/control
+          python scripts/patch_v16_python_presort_once.py /tmp/control/experiments/numba_search.py
+          python scripts/patch_v16_python_trusted_continuity.py /tmp/control/agent.py
+          python scripts/patch_v16_python_rust_history.py /tmp/control/experiments/numba_search.py
+
+          rm -rf /tmp/candidate
+          mkdir -p /tmp/candidate
+          unzip -q "$ZIP" -d /tmp/candidate
+          python scripts/patch_v16_python_presort_once.py /tmp/candidate/experiments/numba_search.py
+          python scripts/patch_v16_python_trusted_continuity.py /tmp/candidate/agent.py
+          if [[ "$VARIANT" == "lmr" || "$VARIANT" == "combo" ]]; then
+            # Change the verified base schedule first; Rust-history then layers its +/-1 confidence
+            # adjustment on top of this schedule through _history_adjusted_lmr_reduction.
+            python scripts/patch_v16_python_lmr_schedule.py /tmp/candidate/experiments/numba_search.py 3 3 5 7 8 10
+          fi
+          python scripts/patch_v16_python_rust_history.py /tmp/candidate/experiments/numba_search.py
+          if [[ "$VARIANT" == "lmp" || "$VARIANT" == "combo" ]]; then
+            python scripts/patch_v16_python_lmp.py /tmp/candidate/experiments/numba_search.py 5 9 999
+          fi
+
+          python -m py_compile tools/v14_agent_runner.py tools/v14_fixed_node_arena.py scripts/v15_competition_gate.py /tmp/control/agent.py /tmp/control/experiments/*.py /tmp/candidate/agent.py /tmp/candidate/experiments/*.py
+          grep -q 'QUIET_HISTORY_CONT_ENTRIES = QUIET_HISTORY_CONTEXTS \* QUIET_HISTORY_CONTEXTS' /tmp/control/experiments/numba_search.py
+          grep -q 'QUIET_HISTORY_CONT_ENTRIES = QUIET_HISTORY_CONTEXTS \* QUIET_HISTORY_CONTEXTS' /tmp/candidate/experiments/numba_search.py
+          if [[ "$VARIANT" == "lmr" || "$VARIANT" == "combo" ]]; then
+            grep -q 'if depth >= 8 and move_index >= 10' /tmp/candidate/experiments/numba_search.py
+            grep -q 'if depth >= 5 and move_index >= 7' /tmp/candidate/experiments/numba_search.py
+            grep -q 'if depth >= 3 and move_index >= 3' /tmp/candidate/experiments/numba_search.py
+          fi
+          if [[ "$VARIANT" == "lmp" || "$VARIANT" == "combo" ]]; then
+            grep -q 'lmp_candidate = (' /tmp/candidate/experiments/numba_search.py
+          fi
+      - name: Search smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          for D in /tmp/control /tmp/candidate; do
+            PYTHONPATH="$D" python - <<'PY'
+          import chess, numpy as np
+          from experiments.numba_core import encode_position, move_to_uci
+          from experiments.numba_search import iterative_search_stateful
+          b=chess.Board(); e=encode_position(b); h=np.empty(0,dtype=np.uint64)
+          out=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,8000)
+          m=chess.Move.from_uci(move_to_uci(int(out[0])))
+          assert m in b.legal_moves
+          print(tuple(int(x) for x in out), m)
+          PY
+          done
+      - name: Build fresh shared qualification roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6; mkdir /tmp/m6
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          chosen=fresh[2100:2180]
+          assert len(chosen)==80 and len(set(chosen))==80
+          Path('/tmp/interact-node.epd').write_text('\n'.join(chosen[:48])+'\n')
+          Path('/tmp/interact-clock.epd').write_text('\n'.join(chosen[48:])+'\n')
+          PY
+      - name: 96-game equal-node marginal screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u tools/v14_fixed_node_arena.py /tmp/candidate /tmp/control \
+            --nodes 20000 --pairs 48 --opening-file /tmp/interact-node.epd \
+            --max-plies 220 --json-out results/equal-node.json | tee results/equal-node.log
+      - name: 64-game competition-clock marginal screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -u scripts/v15_competition_gate.py \
+            --control /tmp/control --candidate /tmp/candidate \
+            --openings /tmp/interact-clock.epd \
+            --output results/timed.json \
+            --label "history + ${{ matrix.variant }} vs history" \
+            --base-ms 2500 --inc-ms 50 --max-plies 180 --grace-ms 1500 \
+            | tee results/timed.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v16-history-interaction-${{ matrix.variant }}-${{ github.sha }}
+          path: results/
+          retention-days: 30
