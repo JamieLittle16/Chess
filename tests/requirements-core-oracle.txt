@@ -1,0 +1,2 @@
+# Independent chess-rules oracle used only by the path-triggered qualification workflow.
+python-chess==1.999
