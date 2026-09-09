@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'crates/chess-search/**'
+      - 'crates/chess-engine/**'
       - 'crates/chess-eval/**'
       - '.github/workflows/gestalt-root-analysis-certification.yml'
 
@@ -49,4 +50,13 @@ jobs:
           CHESS_GESTALT_NETWORK="$PWD/.qualification/search-state/gestalt-b840.nnue" \
             cargo test -p chess-search --release \
               --test search_state_qualification \
+              -- --nocapture
+
+      - name: Qualify engine orchestration with learned state enabled
+        shell: bash
+        run: |
+          set -euo pipefail
+          CHESS_GESTALT_NETWORK="$PWD/.qualification/search-state/gestalt-b840.nnue" \
+            cargo test -p chess-engine --release \
+              --test orchestration_qualification \
               -- --nocapture
