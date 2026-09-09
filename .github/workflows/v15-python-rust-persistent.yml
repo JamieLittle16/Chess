@@ -1,0 +1,101 @@
+name: V15 Python persistent final-Rust calibration
+
+on:
+  push:
+    branches: [analysis/v15-python-rust-persistent-20260909]
+    paths:
+      - scripts/v15_python_rust_persistent_match.py
+      - .github/workflows/v15-python-rust-persistent.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  RUSTFLAGS: -C target-cpu=native
+
+jobs:
+  calibrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+
+      - name: Download exact final Python V15
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V15-FINAL-725be3e8595d1e54b1f12e11f2b9d92f1e415ebc
+          path: v15-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34298586524
+
+      - name: Materialize exact V15 package
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v15-artifact -type f -name Little-Gambit-V15.zip -print -quit); test -n "$ZIP"
+          echo '81e22344bf9a6b41f16e32f29f93c0b6074afe63e4fd51002a537e6a091f2852  '"$ZIP" | sha256sum --check --strict
+          rm -rf /tmp/python-v15 results; mkdir -p /tmp/python-v15 results
+          unzip -q "$ZIP" -d /tmp/python-v15
+          python -m py_compile /tmp/python-v15/agent.py /tmp/python-v15/experiments/*.py
+
+      - name: Build exact final Rust V15
+        shell: bash
+        run: |
+          set -euo pipefail
+          git worktree add --detach /tmp/rust-v15 3a6a194d91c32b207397158da5a7af86c9a5404f
+          CARGO_TARGET_DIR=/tmp/rust-v15-target cargo build --release -p chess-uci --manifest-path /tmp/rust-v15/Cargo.toml
+          cp /tmp/rust-v15-target/release/chess-uci /tmp/rust-v15-engine
+          chmod +x /tmp/rust-v15-engine
+          curl --fail --location --retry 5 \
+            'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' \
+            --output /tmp/gestalt-b840.nnue
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  /tmp/gestalt-b840.nnue' | sha256sum --check --strict
+
+      - name: Build fresh paired UHO roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          rm -rf /tmp/m6; mkdir /tmp/m6
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          roots=fresh[4000:4032]
+          assert len(roots)==32
+          Path('/tmp/direct.epd').write_text('\n'.join(roots)+'\n')
+          PY
+
+      - name: 64-game persistent Python V15 vs final Rust V15
+        env:
+          CHESS_GESTALT_NETWORK: /tmp/gestalt-b840.nnue
+        run: |
+          python -u scripts/v15_python_rust_persistent_match.py \
+            --python-dir /tmp/python-v15 \
+            --rust /tmp/rust-v15-engine \
+            --openings /tmp/direct.epd \
+            --output results/direct.json \
+            --base-ms 10000 --inc-ms 500 --max-plies 180 \
+            | tee results/direct.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-vs-rust-persistent-${{ github.sha }}
+          path: results/
+          retention-days: 30
