@@ -1,0 +1,129 @@
+name: V15 Python leaf H16 delta blend
+on:
+  push:
+    branches: [analysis/v15-python-leaf-h16-delta-blend-20260909]
+    paths:
+      - scripts/patch_v15_python_leaf_h16_delta_blend.py
+      - .github/workflows/v15-python-leaf-h16-delta-blend.yml
+  workflow_dispatch:
+permissions: {contents: read, actions: read}
+jobs:
+  qualify:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: b10, num: 1, den: 10}
+          - {name: b25, num: 1, den: 4}
+          - {name: b50, num: 1, den: 2}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 80
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact packaged V14
+        uses: actions/download-artifact@v4
+        with:
+          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
+          path: v14-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34214504775
+      - name: Download H16 search-leaf Gestalt student
+        uses: actions/download-artifact@v4
+        with:
+          name: v15-leaf-gestalt-topology-h16-70736f6f056d42aa8ceee37e0b282e4f02d34556
+          path: h16-artifact
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34277063353
+      - name: Materialize exact-speed control and H16-delta candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit); MODEL=$(find h16-artifact -type f -name gestalt-topology-h16.npz -print -quit); test -n "$ZIP"; test -n "$MODEL"
+          rm -rf /tmp/base /tmp/cand results;mkdir -p /tmp/base /tmp/cand results
+          unzip -q "$ZIP" -d /tmp/base;cp -a /tmp/base/. /tmp/cand/
+          for D in /tmp/base /tmp/cand; do
+            python scripts/patch_v15_python_presort_once.py "$D/experiments/numba_search.py"
+            python scripts/patch_v15_python_fused_h64_direct.py "$D/experiments/v14_student_single_runtime.py"
+            python scripts/patch_v15_python_inline_fused_h64.py "$D/experiments/v14_student_single_runtime.py"
+            python scripts/patch_v15_python_fused_h64_zero_guard.py "$D/experiments/v14_student_single_runtime.py"
+            python scripts/patch_v15_python_lazy_h64_chain.py "$D/experiments/numba_search.py"
+            python scripts/patch_v15_python_scoremeta_hotloop.py "$D/experiments/numba_search.py"
+          done
+          cp "$MODEL" /tmp/cand/experiments/v15_gestalt_h16.npz
+          python scripts/patch_v15_python_leaf_h16_delta_blend.py /tmp/cand/experiments/numba_search.py --blend-num ${{ matrix.num }} --blend-den ${{ matrix.den }}
+          python -m py_compile tools/v14_agent_runner.py /tmp/base/agent.py /tmp/cand/agent.py /tmp/base/experiments/*.py /tmp/cand/experiments/*.py
+          PYTHONPATH=/tmp/cand python - <<'PY'
+          import chess,numpy as np
+          from experiments.numba_core import encode_position,move_to_uci
+          from experiments.numba_search import iterative_search_stateful
+          b=chess.Board();e=encode_position(b);h=np.empty(0,dtype=np.uint64);o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,12000);m=chess.Move.from_uci(move_to_uci(int(o[0])));assert m in b.legal_moves;print('SMOKE',m,tuple(int(x) for x in o))
+          PY
+      - name: Round61 diagnostic
+        shell: bash
+        run: |
+          cat >/tmp/probe.py <<'PY'
+          import chess,json,numpy as np
+          from experiments.numba_core import encode_position,move_to_uci
+          from experiments.numba_search import iterative_search_stateful
+          fen='2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23';b=chess.Board(fen);e=encode_position(b);h=np.empty(0,dtype=np.uint64);o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,300000);print(json.dumps({'move':move_to_uci(int(o[0])),'score':int(o[1]),'depth':int(o[2]),'nodes':int(o[3])}))
+          PY
+          echo BASE | tee results/round61.log;PYTHONPATH=/tmp/base python /tmp/probe.py | tee -a results/round61.log
+          echo CANDIDATE | tee -a results/round61.log;PYTHONPATH=/tmp/cand python /tmp/probe.py | tee -a results/round61.log
+      - name: Build fresh roots
+        shell: bash
+        run: |
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum -c --strict
+          rm -rf /tmp/m6;mkdir /tmp/m6;python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')};large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()];fresh=[x for x in large if x not in old]
+          eq=fresh[3800:3848];tm=fresh[3850:3882];assert len(eq)==48 and len(tm)==32 and not set(eq)&set(tm);Path('/tmp/equal.epd').write_text('\n'.join(eq)+'\n');Path('/tmp/timed.epd').write_text('\n'.join(tm)+'\n')
+          PY
+      - name: 96 equal-node
+        run: python -u tools/v14_fixed_node_arena.py /tmp/cand /tmp/base --nodes 30000 --pairs 48 --opening-file /tmp/equal.epd --opening-offset 0 --max-plies 200 --json-out results/equal-node.json | tee results/equal-node.log
+      - name: Five-repetition throughput
+        shell: bash
+        run: |
+          cat >/tmp/w.py <<'PY'
+          import json,sys,chess,numpy as np
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful
+          for line in sys.stdin:
+            q=json.loads(line);b=chess.Board(q['fen']);e=encode_position(b);h=np.empty(0,dtype=np.uint64);o=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,int(q['nodes']));print(json.dumps({'nodes':int(o[3]),'depth':int(o[2])}),flush=True)
+          PY
+          python - <<'PY'
+          import json,os,statistics,subprocess,sys,time
+          from pathlib import Path
+          roots=Path('/tmp/equal.epd').read_text().splitlines()[:20]
+          def start(d):
+            e=os.environ.copy();e['PYTHONPATH']=d;return subprocess.Popen([sys.executable,'/tmp/w.py'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env=e)
+          def one(p,f,n):p.stdin.write(json.dumps({'fen':f,'nodes':n})+'\n');p.stdin.flush();return json.loads(p.stdout.readline())
+          b=start('/tmp/base');c=start('/tmp/cand');rat=[];rows=[]
+          try:
+            one(b,roots[0],500);one(c,roots[0],500)
+            for r in range(5):
+              order=roots if r%2==0 else list(reversed(roots))
+              def timed(p):
+                nn=0;t=time.perf_counter()
+                for f in order:nn+=one(p,f,35000)['nodes']
+                return nn/(time.perf_counter()-t)
+              if r%2==0:bn=timed(b);cn=timed(c)
+              else:cn=timed(c);bn=timed(b)
+              rat.append(cn/bn);rows.append({'rep':r,'base_nps':bn,'candidate_nps':cn,'ratio':cn/bn})
+          finally:b.terminate();c.terminate();b.wait();c.wait()
+          out={'median_nps_ratio':statistics.median(rat),'rows':rows};Path('results/throughput.json').write_text(json.dumps(out,indent=2)+'\n');print('FINAL',out)
+          PY
+      - name: 64 timed
+        run: python -u scripts/v15_competition_gate.py --candidate /tmp/cand --control /tmp/base --openings /tmp/timed.epd --output results/timed-64.json --label leaf-h16-${{ matrix.name }} --base-ms 2500 --inc-ms 50 --max-plies 180 | tee results/timed-64.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v15-python-leaf-h16-delta-${{ matrix.name }}-${{ github.sha }}
+          path: results/
+          retention-days: 30
