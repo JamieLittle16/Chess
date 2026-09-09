@@ -1,10 +1,12 @@
-name: V16 Python startup inline frontier
+name: V16 Python eval hot-cold startup
 
 on:
   workflow_dispatch:
   push:
-    branches: [v16/python-startup-inline-frontier]
-    paths: ['.github/workflows/v16-python-startup-inline-frontier.yml']
+    branches: [v16/python-eval-hotcold-startup]
+    paths:
+      - '.github/workflows/v16-python-startup-inline-frontier.yml'
+      - 'scripts/patch_v16_python_eval_hotcold.py'
 
 permissions:
   actions: read
@@ -12,13 +14,8 @@ permissions:
 
 jobs:
   qualify:
-    strategy:
-      fail-fast: false
-      matrix:
-        variant: [legal-only, eval-only, key-only, legal-eval-key]
-    name: ${{ matrix.variant }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 18
+    timeout-minutes: 22
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -33,80 +30,64 @@ jobs:
           github-token: ${{ github.token }}
           repository: JamieLittle16/Chess
           run-id: 34298586524
-      - name: Materialize variant
+
+      - name: Materialize hot-cold candidate
         shell: bash
-        env:
-          VARIANT: ${{ matrix.variant }}
         run: |
           set -euo pipefail
           ZIP=$(find final-artifact -type f -name Little-Gambit-V15.zip -print -quit); test -n "$ZIP"
           rm -rf /tmp/control /tmp/candidate results && mkdir /tmp/control /tmp/candidate results
           unzip -q "$ZIP" -d /tmp/control && cp -a /tmp/control/. /tmp/candidate/
-          python - <<'PY' | tee results/patch.txt
-          from pathlib import Path
-          import os
-          groups={
-            'legal-only': {'_legal_moves_for_state'},
-            'eval-only': {'_advance_eval_state_into'},
-            'key-only': {'_child_position_key'},
-            'legal-eval-key': {'_legal_moves_for_state','_advance_eval_state_into','_child_position_key'},
-          }
-          variant=os.environ['VARIANT']; remove=groups[variant]; changed=[]
-          for fn in ('numba_core.py','numba_search.py','v14_student_single_runtime.py'):
-              p=Path('/tmp/candidate/experiments')/fn; s=p.read_text()
-              for name in sorted(remove):
-                  anchor=f'@njit(cache=False, inline="always")\ndef {name}('
-                  if anchor in s:
-                      s=s.replace(anchor,f'@njit(cache=False)\ndef {name}(',1); changed.append(name)
-              p.write_text(s)
-          missing=remove-set(changed)
-          if missing: raise SystemExit(f'missing targets: {sorted(missing)}')
-          remaining=sum((Path('/tmp/candidate/experiments')/f).read_text().count('inline="always"') for f in ('numba_core.py','numba_search.py','v14_student_single_runtime.py'))
-          print('VARIANT',variant); print('REMOVED',len(changed),sorted(changed)); print('FORCED_INLINE_REMAINING',remaining)
-          PY
+          python scripts/patch_v16_python_eval_hotcold.py /tmp/candidate/experiments/numba_search.py | tee results/patch.txt
           python -m py_compile /tmp/candidate/agent.py /tmp/candidate/experiments/*.py
+          grep -q 'def _advance_eval_state_special_into' /tmp/candidate/experiments/numba_search.py
+          grep -q 'Fast ordinary-move eval transition' /tmp/candidate/experiments/numba_search.py
           find /tmp/candidate -type d -name __pycache__ -prune -exec rm -rf {} +
-          (cd /tmp/candidate && zip -q -9 -r "$GITHUB_WORKSPACE/results/Little-Gambit-V16-startup-${VARIANT}.zip" .)
+          (cd /tmp/candidate && zip -q -9 -r "$GITHUB_WORKSPACE/results/Little-Gambit-V16-eval-hotcold.zip" .)
 
-      - name: Cold-init measurement
+      - name: Hard 60-second cold init
         shell: bash
         run: |
-          set -uo pipefail
-          rm -rf /tmp/cold /tmp/cold-home /tmp/cold-cache /tmp/cold-numba
-          mkdir /tmp/cold
-          unzip -q "results/Little-Gambit-V16-startup-${{ matrix.variant }}.zip" -d /tmp/cold
-          set +e
+          set -euo pipefail
+          rm -rf /tmp/cold /tmp/hc-home /tmp/hc-cache /tmp/hc-numba && mkdir /tmp/cold
+          unzip -q results/Little-Gambit-V16-eval-hotcold.zip -d /tmp/cold
           /usr/bin/time -f 'PROCESS_WALL_SECONDS %e\nPROCESS_CPU_SECONDS %U' -o results/cold-process.txt \
-            timeout 75s env PYTHONPATH=/tmp/cold HOME=/tmp/cold-home XDG_CACHE_HOME=/tmp/cold-cache NUMBA_CACHE_DIR=/tmp/cold-numba OMP_NUM_THREADS=1 \
+            timeout 60s env PYTHONPATH=/tmp/cold HOME=/tmp/hc-home XDG_CACHE_HOME=/tmp/hc-cache NUMBA_CACHE_DIR=/tmp/hc-numba OMP_NUM_THREADS=1 \
             python - <<'PY' > results/cold.txt 2>&1
           import json,sys,time
           from importlib import import_module
           t=time.perf_counter(); sys.path.insert(0,'/tmp/cold'); import_module('agent'); ready=time.perf_counter()-t
           print('READY_SECONDS',ready); print(json.dumps({'ready':True}))
           PY
-          rc=$?
-          set -e
-          echo "COLD_RC $rc" | tee results/cold-rc.txt
-          cat results/cold-process.txt results/cold.txt || true
+          cat results/cold-process.txt results/cold.txt
 
-      - name: Same-runner fixed-node throughput
+      - name: Exact fixed-node semantics and throughput
         shell: bash
         run: |
           set -euo pipefail
           bench() {
             local root="$1" out="$2"; cd "$root"
-            timeout 180s env PYTHONPATH="$root" python - <<'PY' > "$out" 2>&1
+            timeout 240s env PYTHONPATH="$root" python - <<'PY' > "$out" 2>&1
           import statistics,time,chess,numpy as np
           import agent
           from experiments.numba_core import encode_position
           from experiments.numba_search import iterative_search_stateful_timed_cached
-          fens=[chess.STARTING_FEN,'r2q1rk1/pp2bppp/2n1pn2/2pp4/8/1PN1PN2/PBPP1PPP/R2QKB1R w KQ - 2 9','2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23']
+          # Include ordinary middlegames plus positions forcing the rare transition path:
+          # castling, en-passant, promotion, and captures.
+          fens=[
+            chess.STARTING_FEN,
+            'r2q1rk1/pp2bppp/2n1pn2/2pp4/8/1PN1PN2/PBPP1PPP/R2QKB1R w KQ - 2 9',
+            '2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23',
+            'r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1',
+            '8/8/8/3pP3/8/8/8/K6k w - d6 0 1',
+            '8/P7/8/8/8/8/7p/k6K w - - 0 1',
+          ]
           rows=[]
           for fen in fens:
               b=chess.Board(fen); e=encode_position(b)
               agent._HASH_KEYS.fill(np.uint64(0)); agent._HASH_MOVES.fill(np.int32(-1)); agent._TT_TABLE.fill(np.uint64(0)); h=np.empty(0,dtype=np.uint64)
-              t=time.perf_counter(); r=iterative_search_stateful_timed_cached(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,60000,60000,200000,agent._HASH_KEYS,agent._HASH_MOVES,agent._TT_TABLE); dt=time.perf_counter()-t
-              sig=tuple(map(int,r)); rate=int(r[3])/dt; rows.append((sig,rate)); print('CASE',sig,dt,rate)
+              t=time.perf_counter(); r=iterative_search_stateful_timed_cached(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,60000,60000,120000,agent._HASH_KEYS,agent._HASH_MOVES,agent._TT_TABLE); dt=time.perf_counter()-t
+              sig=tuple(map(int,r)); rate=int(r[3])/dt; rows.append((sig,rate)); print('CASE',repr(fen),sig,dt,rate)
           print('SIGNATURES',repr([x[0] for x in rows])); print('MEDIAN_NPS',statistics.median(x[1] for x in rows))
           PY
           }
@@ -119,13 +100,14 @@ jobs:
           a=Path('results/control.txt').read_text(); b=Path('results/candidate.txt').read_text()
           sig=lambda x:ast.literal_eval(re.search(r'^SIGNATURES (.*)$',x,re.M).group(1))
           n=lambda x:float(re.search(r'^MEDIAN_NPS ([0-9.eE+-]+)$',x,re.M).group(1))
-          na,nb=n(a),n(b)
-          print('FIXED_NODE_SIGNATURE_EQUAL',sig(a)==sig(b)); print('CONTROL_NPS',na); print('CANDIDATE_NPS',nb); print('NPS_RATIO',nb/na)
-          assert sig(a)==sig(b)
+          sa,sb=sig(a),sig(b); na,nb=n(a),n(b)
+          print('FIXED_NODE_SIGNATURE_EQUAL',sa==sb); print('CONTROL_NPS',na); print('CANDIDATE_NPS',nb); print('NPS_RATIO',nb/na)
+          assert sa==sb
           PY
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: v16-startup-inline-${{ matrix.variant }}-${{ github.sha }}
+          name: v16-python-eval-hotcold-${{ github.sha }}
           path: results/
           retention-days: 14
