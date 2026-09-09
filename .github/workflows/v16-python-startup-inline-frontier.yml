@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [graph12, graph-abs14, selective-hot17, selective22]
+        variant: [legal-only, eval-only, key-only, legal-eval-key]
     name: ${{ matrix.variant }}
     runs-on: ubuntu-24.04
     timeout-minutes: 18
@@ -45,33 +45,13 @@ jobs:
           python - <<'PY' | tee results/patch.txt
           from pathlib import Path
           import os
-          graph={
-            '_ordinary_legal_with_context','_advance_eval_state_into','_advance_student_edge_into',
-            '_materialize_student_path','_has_legal_en_passant','_child_position_key',
-            '_is_threefold_repetition','_move_order_score_meta','_pick_next_scored_move',
-            '_order_tactical_moves','_legal_moves_for_state','_search_budget_exhausted',
+          groups={
+            'legal-only': {'_legal_moves_for_state'},
+            'eval-only': {'_advance_eval_state_into'},
+            'key-only': {'_child_position_key'},
+            'legal-eval-key': {'_legal_moves_for_state','_advance_eval_state_into','_child_position_key'},
           }
-          abs_extra={'_apply_absolute_delta','advance_absolute768_accumulator_into'}
-          selective={
-            '_between_aligned','_ordinary_legal_with_context',
-            '_residual_feature_index','_evaluate_state_classical','_evaluate_state','_evaluate_state_v13_only',
-            '_advance_eval_state_into','_advance_student_edge_into','_materialize_student_path',
-            '_has_legal_en_passant','_child_position_key','_is_threefold_repetition','_is_rule_draw',
-            '_quiet_pawn_relative_rank','_move_order_score_meta','_pick_next_scored_move','_order_tactical_moves',
-            '_legal_moves_for_state','_search_budget_exhausted',
-            '_apply_absolute_delta','advance_absolute768_accumulator_into','infer_absolute768_student_cp',
-          }
-          hot_keep={
-            '_residual_feature_index','_evaluate_state_classical','_evaluate_state','_evaluate_state_v13_only',
-            'infer_absolute768_student_cp',
-          }
-          variant=os.environ['VARIANT']
-          if variant=='graph12': remove=graph
-          elif variant=='graph-abs14': remove=graph|abs_extra
-          elif variant=='selective-hot17': remove=selective-hot_keep
-          elif variant=='selective22': remove=selective
-          else: raise SystemExit(variant)
-          changed=[]
+          variant=os.environ['VARIANT']; remove=groups[variant]; changed=[]
           for fn in ('numba_core.py','numba_search.py','v14_student_single_runtime.py'):
               p=Path('/tmp/candidate/experiments')/fn; s=p.read_text()
               for name in sorted(remove):
@@ -97,7 +77,7 @@ jobs:
           unzip -q "results/Little-Gambit-V16-startup-${{ matrix.variant }}.zip" -d /tmp/cold
           set +e
           /usr/bin/time -f 'PROCESS_WALL_SECONDS %e\nPROCESS_CPU_SECONDS %U' -o results/cold-process.txt \
-            timeout 80s env PYTHONPATH=/tmp/cold HOME=/tmp/cold-home XDG_CACHE_HOME=/tmp/cold-cache NUMBA_CACHE_DIR=/tmp/cold-numba OMP_NUM_THREADS=1 \
+            timeout 75s env PYTHONPATH=/tmp/cold HOME=/tmp/cold-home XDG_CACHE_HOME=/tmp/cold-cache NUMBA_CACHE_DIR=/tmp/cold-numba OMP_NUM_THREADS=1 \
             python - <<'PY' > results/cold.txt 2>&1
           import json,sys,time
           from importlib import import_module
@@ -125,7 +105,7 @@ jobs:
           for fen in fens:
               b=chess.Board(fen); e=encode_position(b)
               agent._HASH_KEYS.fill(np.uint64(0)); agent._HASH_MOVES.fill(np.int32(-1)); agent._TT_TABLE.fill(np.uint64(0)); h=np.empty(0,dtype=np.uint64)
-              t=time.perf_counter(); r=iterative_search_stateful_timed_cached(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,60000,60000,300000,agent._HASH_KEYS,agent._HASH_MOVES,agent._TT_TABLE); dt=time.perf_counter()-t
+              t=time.perf_counter(); r=iterative_search_stateful_timed_cached(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,60000,60000,200000,agent._HASH_KEYS,agent._HASH_MOVES,agent._TT_TABLE); dt=time.perf_counter()-t
               sig=tuple(map(int,r)); rate=int(r[3])/dt; rows.append((sig,rate)); print('CASE',sig,dt,rate)
           print('SIGNATURES',repr([x[0] for x in rows])); print('MEDIAN_NPS',statistics.median(x[1] for x in rows))
           PY
