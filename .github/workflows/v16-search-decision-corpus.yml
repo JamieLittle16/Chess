@@ -1,0 +1,89 @@
+name: V16 Rust search-decision corpus
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [analysis/v16-search-decision-distill]
+    paths:
+      - '.github/workflows/v16-search-decision-corpus.yml'
+      - 'scripts/apply_search_decision_trace_probe.py'
+      - 'tools/collect_search_decision_corpus.py'
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  corpus:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2
+      - name: Materialize research-only decision trace
+        run: python scripts/apply_search_decision_trace_probe.py
+      - name: Build traced Rust V15
+        run: CARGO_TARGET_DIR="$PWD/target-decision" cargo build --release -p chess-uci --features search-trace
+      - name: Download exact production Gestalt
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/decision
+          curl --fail --location --retry 5 'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' -o /tmp/decision/gestalt-b840.nnue
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  /tmp/decision/gestalt-b840.nnue' | sha256sum --check --strict
+      - name: Build fresh decision roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/decision/m6
+          python - <<'PY'
+          from pathlib import Path
+          old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
+          large=[x.strip() for x in Path('/tmp/decision/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          fresh=[x for x in large if x not in old]
+          roots=fresh[500:564]
+          assert len(roots)==64 and len(set(roots))==64
+          Path('/tmp/decision/roots.epd').write_text('\n'.join(roots)+'\n')
+          PY
+      - name: Collect alpha-beta decision events
+        env:
+          CHESS_GESTALT_NETWORK: /tmp/decision/gestalt-b840.nnue
+        run: |
+          python -u tools/collect_search_decision_corpus.py \
+            --engine target-decision/release/chess-uci \
+            --openings /tmp/decision/roots.epd \
+            --roots 64 --nodes 18000 --stride 4 --duplicate-cap 2 \
+            --output /tmp/decision/decision.jsonl \
+            --manifest /tmp/decision/manifest.json | tee /tmp/decision/collect.log
+      - name: Validate decision semantics
+        run: |
+          python - <<'PY'
+          import json
+          from collections import Counter
+          from pathlib import Path
+          rows=[json.loads(x) for x in Path('/tmp/decision/decision.jsonl').read_text().splitlines()]
+          assert rows
+          kinds=Counter(r['kind'] for r in rows);splits=Counter(r['split'] for r in rows)
+          finite_beta=[r for r in rows if abs(r['beta'])<30000]
+          finite_alpha=[r for r in rows if abs(r['alpha'])<30000]
+          beta_cut=sum(r['teacher_cp']>=r['beta'] for r in finite_beta)
+          alpha_raise=sum(r['teacher_cp']>r['alpha'] for r in finite_alpha)
+          print({'records':len(rows),'kinds':dict(kinds),'splits':dict(splits),'finite_beta':len(finite_beta),'teacher_beta_cut':beta_cut,'finite_alpha':len(finite_alpha),'teacher_alpha_raise':alpha_raise})
+          assert min(splits.values())>200
+          assert kinds['qstand']>1000 and kinds['rfp']>100
+          assert 0 < beta_cut < len(finite_beta)
+          assert 0 < alpha_raise < len(finite_alpha)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v16-search-decision-corpus-${{ github.sha }}
+          path: |
+            /tmp/decision/decision.jsonl
+            /tmp/decision/manifest.json
+            /tmp/decision/collect.log
+          retention-days: 30
