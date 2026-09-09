@@ -34,18 +34,6 @@ jobs:
       - name: Download exact packaged V14
         uses: actions/download-artifact@v4
         with:
-          name: Little-Gambit-V14-PACKAGE-ae1dc230b9208e8ac6f98df8515dc48aa79596
-          path: v14-artifact
-          github-token: ${{ github.token }}
-          repository: JamieLittle16/Chess
-          run-id: 34214504775
-        continue-on-error: true
-
-      - name: Download exact packaged V14 fallback
-        if: steps.v14-primary.outcome == 'failure'
-        uses: actions/download-artifact@v4
-        id: v14-fallback
-        with:
           name: Little-Gambit-V14-PACKAGE-ae1dc230b9208f5ec46c9a661c3f0e526d6f0e56
           path: v14-artifact
           github-token: ${{ github.token }}
@@ -97,8 +85,8 @@ jobs:
 
           fen='2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23'
           b=chess.Board(fen)
-          e=encode_position(b)
           h=np.empty(0,dtype=np.uint64)
+          e=encode_position(b)
           # Compile once, then measure the exact historical node budgets in the same process.
           iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,12000)
           rows=[]
@@ -111,7 +99,7 @@ jobs:
                   'score':int(o[1]),
                   'depth':int(o[2]),
                   'nodes':int(o[3]),
-                  'desired_move':'b1b1' if False else 'a1b1',
+                  'desired_move':'a1b1',
               })
           print(json.dumps({'fen':fen,'rows':rows}))
           PY
