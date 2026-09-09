@@ -1,103 +1,42 @@
-name: V16 Python qTT + full learned pruning
+name: V16 final direct timed V15 parallel
 
 on:
   workflow_dispatch:
   push:
-    branches: [v16/python-qTT-full-pruning]
-    paths:
-      - '.github/workflows/v16-python-qTT-full-pruning.yml'
-      - 'scripts/patch_v16_python_full_pruning_oracle.py'
-      - 'scripts/patch_v16_python_v15_qsearch_tt.py'
+    branches: [v16/python-final-timed-parallel]
+    paths: ['.github/workflows/v16-python-qTT-full-pruning.yml']
 
 permissions:
   actions: read
   contents: read
 
 jobs:
-  qualify:
+  timed:
     runs-on: ubuntu-24.04
-    timeout-minutes: 65
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install exact competition runtime
-        run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
-
-      - name: Materialize qTT control and pruning candidate
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
+      - name: Download exact V15 and exact qualified V16 candidate
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
+        env: {GH_TOKEN: '${{ github.token }}'}
         run: |
           set -euo pipefail
-          gh run download 34298586524 -n Little-Gambit-V15-FINAL-725be3e8595d1e54b1f12e11f2b9d92f1e415ebc -D /tmp/v15-artifact
-          V15=$(find /tmp/v15-artifact -type f -name Little-Gambit-V15.zip -print -quit); test -n "$V15"
+          rm -rf /tmp/v15-art /tmp/v16-art /tmp/control /tmp/candidate results
+          mkdir -p /tmp/control /tmp/candidate results
+          gh run download 34298586524 -n Little-Gambit-V15-FINAL-725be3e8595d1e54b1f12e11f2b9d92f1e415ebc -D /tmp/v15-art
+          V15=$(find /tmp/v15-art -type f -name Little-Gambit-V15.zip -print -quit); test -n "$V15"
           echo '81e22344bf9a6b41f16e32f29f93c0b6074afe63e4fd51002a537e6a091f2852  '"$V15" | sha256sum --check --strict
-          rm -rf /tmp/control /tmp/candidate results; mkdir -p /tmp/control /tmp/candidate results
           unzip -q "$V15" -d /tmp/control
-          python scripts/patch_v16_python_v15_qsearch_tt.py /tmp/control/experiments/numba_search.py
-          python - <<'PY'
-          from pathlib import Path
-          remove={'_advance_eval_state_into','_child_position_key','_legal_moves_for_state'}
-          changed=[]
-          for fn in ('numba_core.py','numba_search.py','v14_student_single_runtime.py'):
-              p=Path('/tmp/control/experiments')/fn; s=p.read_text()
-              for name in sorted(remove):
-                  anchor=f'@njit(cache=False, inline="always")\ndef {name}('
-                  if anchor in s:
-                      s=s.replace(anchor,f'@njit(cache=False)\ndef {name}(',1); changed.append(name)
-              p.write_text(s)
-          if remove-set(changed): raise SystemExit(f'missing startup boundaries: {sorted(remove-set(changed))}')
-          PY
-          cp -a /tmp/control/. /tmp/candidate/
-          python scripts/patch_v16_python_full_pruning_oracle.py /tmp/candidate/experiments/numba_search.py
+          gh run download 34359639522 -n v16-python-qTT-full-pruning-8ca7e7ccaba29acff86409b218364411d7e037ef -D /tmp/v16-art
+          V16=$(find /tmp/v16-art -type f -name Little-Gambit-V16-qTT-pruning.zip -print -quit); test -n "$V16"
+          echo 'e6841b309fa142f2b89465c43ec319e6e050c7ec405ee4415ab74ebcd4e93204  '"$V16" | sha256sum --check --strict
+          unzip -q "$V16" -d /tmp/candidate
           python -m py_compile /tmp/control/agent.py /tmp/control/experiments/*.py /tmp/candidate/agent.py /tmp/candidate/experiments/*.py
-          grep -q 'TT_QDEPTH_BASE = 64' /tmp/candidate/experiments/numba_search.py
-          grep -q 'pruning_static_eval = _evaluate_state(side, eval_stack\[ply\])' /tmp/candidate/experiments/numba_search.py
-          (cd /tmp/candidate && zip -qr /tmp/Little-Gambit-V16-qTT-pruning.zip .)
-
-      - name: Hard 70-second cold-start gate
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf /tmp/cold /tmp/q-home /tmp/q-cache /tmp/q-numba; mkdir /tmp/cold
-          unzip -q /tmp/Little-Gambit-V16-qTT-pruning.zip -d /tmp/cold
-          /usr/bin/time -f 'PROCESS_WALL_SECONDS %e' -o results/cold-process.txt timeout 70s env PYTHONPATH=/tmp/cold HOME=/tmp/q-home XDG_CACHE_HOME=/tmp/q-cache NUMBA_CACHE_DIR=/tmp/q-numba OMP_NUM_THREADS=1 python - <<'PY' > results/cold.txt 2>&1
-          import sys,time
-          from importlib import import_module
-          t=time.perf_counter(); sys.path.insert(0,'/tmp/cold'); import_module('agent'); print('READY_SECONDS',time.perf_counter()-t)
-          PY
-          cat results/cold-process.txt results/cold.txt
-
-      - name: Fixed-node throughput probe
-        shell: bash
-        run: |
-          set -euo pipefail
-          bench() { local root="$1" out="$2"; cd "$root"; timeout 180s env PYTHONPATH="$root" python - <<'PY' > "$out" 2>&1
-          import statistics,time,chess,numpy as np
-          import agent
-          from experiments.numba_core import encode_position
-          from experiments.numba_search import iterative_search_stateful_timed_cached
-          fens=[chess.STARTING_FEN,'r2q1rk1/pp2bppp/2n1pn2/2pp4/8/1PN1PN2/PBPP1PPP/R2QKB1R w KQ - 2 9','2r3k1/4qp2/4b3/p5p1/4P1P1/2Pr2P1/P4PB1/R1Q2RK1 w - - 1 23']
-          rates=[]
-          for fen in fens:
-              b=chess.Board(fen); e=encode_position(b); agent._HASH_KEYS.fill(np.uint64(0)); agent._HASH_MOVES.fill(np.int32(-1)); agent._TT_TABLE.fill(np.uint64(0)); h=np.empty(0,dtype=np.uint64)
-              t=time.perf_counter(); r=iterative_search_stateful_timed_cached(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,60000,60000,150000,agent._HASH_KEYS,agent._HASH_MOVES,agent._TT_TABLE); dt=time.perf_counter()-t
-              rates.append(int(r[3])/dt); print('CASE',tuple(map(int,r)),dt,rates[-1])
-          print('MEDIAN_NPS',statistics.median(rates))
-          PY
-          }
-          bench /tmp/control "$GITHUB_WORKSPACE/results/control-throughput.txt"
-          bench /tmp/candidate "$GITHUB_WORKSPACE/results/candidate-throughput.txt"
-          cd "$GITHUB_WORKSPACE"; python - <<'PY' | tee results/throughput-summary.txt
-          import re
-          from pathlib import Path
-          def n(p): return float(re.search(r'^MEDIAN_NPS ([0-9.eE+-]+)$',Path(p).read_text(),re.M).group(1))
-          a=n('results/control-throughput.txt'); b=n('results/candidate-throughput.txt'); print('CONTROL_NPS',a); print('CANDIDATE_NPS',b); print('NPS_RATIO',b/a)
-          PY
-
-      - name: Build fresh UHO roots
+          sha256sum "$V15" "$V16" | tee results/package-hashes.txt
+      - name: Build exact release clock roots
         shell: bash
         run: |
           set -euo pipefail
@@ -108,22 +47,16 @@ jobs:
           from pathlib import Path
           old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
           large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
-          fresh=[x for x in large if x not in old]; roots=fresh[4568:4648]; assert len(roots)==80 and len(set(roots))==80
-          Path('/tmp/node.epd').write_text('\n'.join(roots[:48])+'\n'); Path('/tmp/clock.epd').write_text('\n'.join(roots[48:])+'\n')
+          fresh=[x for x in large if x not in old]
+          roots=fresh[4696:4760]
+          assert len(roots)==64 and len(set(roots))==64
+          Path('/tmp/clock.epd').write_text('\n'.join(roots)+'\n')
           PY
-
-      - name: 96-game equal-node incremental screen
-        run: python -u tools/v14_fixed_node_arena.py /tmp/candidate /tmp/control --nodes 20000 --pairs 48 --opening-file /tmp/node.epd --max-plies 220 --json-out results/equal-node.json | tee results/equal-node.log
-
-      - name: 64-game real-clock incremental screen
-        run: python -u scripts/v15_competition_gate.py --control /tmp/control --candidate /tmp/candidate --openings /tmp/clock.epd --output results/timed.json --label 'V16 qTT plus full learned pruning incremental' --base-ms 2500 --inc-ms 50 --max-plies 180 --grace-ms 1500 | tee results/timed.log
-
-      - name: Preserve candidate
-        if: always()
-        run: cp /tmp/Little-Gambit-V16-qTT-pruning.zip results/ 2>/dev/null || true
+      - name: 128-game direct competition-clock V16 versus V15
+        run: python -u scripts/v15_competition_gate.py --control /tmp/control --candidate /tmp/candidate --openings /tmp/clock.epd --output results/timed-direct-128.json --label 'Little Gambit V16 final qTT learned-pruning direct vs V15' --base-ms 2500 --inc-ms 50 --max-plies 180 --grace-ms 1500 | tee results/timed-direct-128.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: v16-python-qTT-full-pruning-${{ github.sha }}
+          name: v16-final-timed-parallel-${{ github.sha }}
           path: results/
           retention-days: 30
