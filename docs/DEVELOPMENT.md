@@ -12,6 +12,8 @@
 8. Derived position/evaluation caches mutate through narrow APIs so they cannot drift independently.
 9. New architectural decisions or reversals get an ADR under `docs/adr/`.
 10. Documentation changes with architecture, not months afterwards.
+11. Tests should pin semantic invariants rather than incidental move ordering, node counts or implementation details unless those details are themselves the contract.
+12. A failing qualification test is classified before code is changed; do not weaken tests merely to restore green CI.
 
 ## Required local gate
 
@@ -19,7 +21,9 @@
 ./scripts/check.sh
 ```
 
-CI runs formatting, clippy, debug tests and release tests.
+The script mirrors the standing workspace CI gate: qualification-tool tests, formatting, clippy with warnings denied, strict rustdoc, debug and release workspace tests, deep release perft qualification, and the deterministic reference-search signature.
+
+Additional path-triggered GitHub Actions run the exact checksum-pinned Gestalt network when search/evaluation or incremental learned-state code changes. See [`TESTING.md`](TESTING.md) for the complete correctness, derived-state, performance and strength evidence hierarchy.
 
 ## Commit discipline
 
@@ -37,3 +41,5 @@ Examples:
 Before making code more complex, establish the workload and metric. Preserve a simple implementation as a reference test when that meaningfully increases confidence.
 
 Do not optimise based only on NPS if a change alters what counts as a node. Prefer equal-time Elo for whole-engine decisions.
+
+A semantics-preserving optimization should first demonstrate semantic equivalence or explain any tree change, then measure whole-search impact. An isolated microbenchmark is supporting evidence rather than a strength result.
