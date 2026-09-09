@@ -1,0 +1,43 @@
+name: Core portability qualification
+
+on:
+  push:
+    branches: [test/v16-core-portability]
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/chess-core/**'
+      - '.github/workflows/core-portability.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: chess-core ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Test chess-core
+        run: cargo test -p chess-core --all-features
+      - name: Release-test chess-core
+        run: cargo test -p chess-core --all-features --release
+
+  wasm:
+    name: chess-core wasm32-unknown-unknown
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          targets: wasm32-unknown-unknown
+      - name: Check browser-target core
+        run: cargo check -p chess-core --all-features --target wasm32-unknown-unknown
