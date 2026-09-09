@@ -1,8 +1,7 @@
 name: V16 core mutation audit
 
 on:
-  push:
-    branches: [test/v16-mutation-audit]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -22,7 +21,9 @@ jobs:
         with:
           toolchain: 1.98.1
       - name: Install pinned cargo-mutants
-        run: cargo install --locked cargo-mutants --version 27.1.0
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0
       - name: Execute mutation shard
         shell: bash
         run: |
@@ -47,14 +48,6 @@ jobs:
           status=$?
           set -e
           printf 'cargo_mutants_exit=%s\n' "$status" > "$output/exit.txt"
-          for kind in caught missed timeout unviable; do
-            file="$output/$kind.txt"
-            count=0
-            if [ -f "$file" ]; then
-              count=$(grep -cve '^$' "$file" || true)
-            fi
-            printf '%s=%s\n' "$kind" "$count" | tee -a "$output/summary.txt"
-          done
       - name: Upload mutation evidence
         if: always()
         uses: actions/upload-artifact@v4
