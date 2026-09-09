@@ -2,11 +2,15 @@ name: V15 Python evaluator finalist head-to-head
 
 on:
   push:
-    branches: [analysis/v15-python-evaluator-finalist-20260909]
-    paths: [.github/workflows/v15-python-evaluator-finalist.yml]
+    branches:
+      - analysis/v15-python-evaluator-finalist-20260909
+    paths:
+      - .github/workflows/v15-python-evaluator-finalist.yml
   workflow_dispatch:
 
-permissions: {contents: read, actions: read}
+permissions:
+  contents: read
+  actions: read
 
 jobs:
   decide:
@@ -15,7 +19,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: {python-version: '3.12'}
+        with:
+          python-version: '3.12'
       - run: python -m pip install --disable-pip-version-check chess==1.11.2 numpy==2.5.2 numba==0.67.0
       - name: Download exact V14
         uses: actions/download-artifact@v4
@@ -48,9 +53,13 @@ jobs:
           ZIP=$(find v14-artifact -type f -name Little-Gambit-V14.zip -print -quit)
           B200=$(find b200-artifact -type f -name v14_student_h64.npz -print -quit)
           LEAF=$(find leaf-artifact -type f -name v14_student_h64.npz -print -quit)
-          test -n "$ZIP"; test -n "$B200"; test -n "$LEAF"
-          rm -rf /tmp/b200 /tmp/leaf /tmp/m6 results;mkdir -p /tmp/b200 /tmp/leaf /tmp/m6 results
-          unzip -q "$ZIP" -d /tmp/b200; cp -a /tmp/b200/. /tmp/leaf/
+          test -n "$ZIP"
+          test -n "$B200"
+          test -n "$LEAF"
+          rm -rf /tmp/b200 /tmp/leaf /tmp/m6 results
+          mkdir -p /tmp/b200 /tmp/leaf /tmp/m6 results
+          unzip -q "$ZIP" -d /tmp/b200
+          cp -a /tmp/b200/. /tmp/leaf/
           for D in /tmp/b200 /tmp/leaf; do
             python scripts/patch_v15_python_presort_once.py "$D/experiments/numba_search.py"
             python scripts/patch_v15_python_fused_h64_direct.py "$D/experiments/v14_student_single_runtime.py"
@@ -70,7 +79,8 @@ jobs:
           from pathlib import Path
           old={x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')}
           large=[x.strip() for x in Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
-          fresh=[x for x in large if x not in old];roots=fresh[4100:4196]
+          fresh=[x for x in large if x not in old]
+          roots=fresh[4100:4196]
           assert len(roots)==96 and len(set(roots))==96
           Path('/tmp/evaluator-final-96.epd').write_text('\n'.join(roots)+'\n')
           PY
@@ -78,4 +88,7 @@ jobs:
         run: python -u scripts/v15_competition_gate.py --candidate /tmp/leaf --control /tmp/b200 --openings /tmp/evaluator-final-96.epd --output results/head-to-head-192.json --label searchleaf-b050-vs-b200 --base-ms 2500 --inc-ms 50 --max-plies 180 | tee results/head-to-head-192.log
       - uses: actions/upload-artifact@v4
         if: always()
-        with: {name: v15-python-evaluator-finalist-${{ github.sha }}, path: results/, retention-days: 30}
+        with:
+          name: v15-python-evaluator-finalist-${{ github.sha }}
+          path: results/
+          retention-days: 30
