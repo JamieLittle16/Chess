@@ -58,8 +58,21 @@ class RustUCI:
         self._send('isready')
         self._wait('readyok')
 
-    def move(self, board: chess.Board, white_ms: int, black_ms: int, inc_ms: int) -> tuple[str, float]:
-        self._send('position fen ' + board.fen())
+    def move(
+        self,
+        root_fen: str,
+        moves: list[str],
+        white_ms: int,
+        black_ms: int,
+        inc_ms: int,
+    ) -> tuple[str, float]:
+        # Preserve the UCI move sequence rather than resetting from a freshly
+        # synthesized FEN every ply. This is the path used by the Rust engine's
+        # own repetition/context tests and retains all search history correctly.
+        command = 'position fen ' + root_fen
+        if moves:
+            command += ' moves ' + ' '.join(moves)
+        self._send(command)
         self._send(f'go wtime {max(1, white_ms)} btime {max(1, black_ms)} winc {inc_ms} binc {inc_ms}')
         started = time.perf_counter()
         line = self._wait('bestmove ')
@@ -80,16 +93,17 @@ class RustUCI:
             self.p.kill()
 
 
-def epd_fens(path: Path) -> list[str]:
+def opening_fens(path: Path) -> list[str]:
     out: list[str] = []
     for raw in path.read_text().splitlines():
         line = raw.strip()
         if not line or line.startswith('#'):
             continue
         fields = line.split()
-        if len(fields) < 4:
-            continue
-        out.append(' '.join(fields[:4]) + ' 0 1')
+        if len(fields) >= 6 and fields[4].isdigit() and fields[5].isdigit():
+            out.append(' '.join(fields[:6]))
+        elif len(fields) >= 4:
+            out.append(' '.join(fields[:4]) + ' 0 1')
     return out
 
 
@@ -135,15 +149,16 @@ def main() -> int:
     wins = draws = losses = 0
 
     try:
-        for opening_index, fen in enumerate(epd_fens(a.openings)):
+        for opening_index, root_fen in enumerate(opening_fens(a.openings)):
             for python_white in (True, False):
                 rust.new_game()
-                board = chess.Board(fen)
-                clocks = [a.base_ms, a.base_ms]  # white, black
+                board = chess.Board(root_fen)
+                clocks = [float(a.base_ms), float(a.base_ms)]  # white, black
                 reason = 'max-plies'
                 result = '1/2-1/2'
                 moves: list[str] = []
                 ply_times: list[dict[str, object]] = []
+                attempted_move: str | None = None
 
                 for ply in range(a.max_plies):
                     if board.is_game_over(claim_draw=True):
@@ -159,11 +174,20 @@ def main() -> int:
                         move_uci = agent.get_move(board.fen(), max(1, int(before)))
                         elapsed = (time.perf_counter() - started) * 1000.0
                     else:
-                        move_uci, elapsed = rust.move(board, clocks[0], clocks[1], a.inc_ms)
+                        move_uci, elapsed = rust.move(
+                            root_fen, moves, int(clocks[0]), int(clocks[1]), a.inc_ms
+                        )
 
+                    attempted_move = move_uci
                     clocks[side_idx] -= elapsed
                     actor = 'python' if is_python else 'rust'
-                    ply_times.append({'ply': ply + 1, 'actor': actor, 'elapsed_ms': elapsed, 'clock_before_ms': before})
+                    ply_times.append({
+                        'ply': ply + 1,
+                        'actor': actor,
+                        'elapsed_ms': elapsed,
+                        'clock_before_ms': before,
+                        'move': move_uci,
+                    })
 
                     if clocks[side_idx] < 0:
                         python_lost = is_python
@@ -178,7 +202,6 @@ def main() -> int:
                     except ValueError:
                         move = chess.Move.null()
                     if move not in board.legal_moves:
-                        # Illegal move loses immediately.
                         result = '0-1' if board.turn == chess.WHITE else '1-0'
                         reason = actor + '-illegal'
                         break
@@ -199,10 +222,12 @@ def main() -> int:
                     losses += 1
                 rec = {
                     'opening_index': opening_index,
+                    'root_fen': root_fen,
                     'python_white': python_white,
                     'result': result,
                     'python_score': val,
                     'reason': reason,
+                    'attempted_move': attempted_move,
                     'plies': len(moves),
                     'final_fen': board.fen(),
                     'moves': moves,
@@ -212,10 +237,15 @@ def main() -> int:
                 games.append(rec)
                 n = len(games)
                 elo = elo_from_score(py_score, n)
-                print(f'GAME {n}: py_score={py_score:.1f}/{n} WDL={wins}-{draws}-{losses} elo={elo}', flush=True)
+                print(
+                    f'GAME {n}: py_score={py_score:.1f}/{n} '
+                    f'WDL={wins}-{draws}-{losses} reason={reason} elo={elo}',
+                    flush=True,
+                )
     finally:
         rust.close()
 
+    elo = elo_from_score(py_score, len(games))
     summary = {
         'games': len(games),
         'python_score': py_score,
@@ -223,8 +253,8 @@ def main() -> int:
         'wins': wins,
         'draws': draws,
         'losses': losses,
-        'python_elo_vs_rust': elo_from_score(py_score, len(games)),
-        'rust_elo_advantage': None if elo_from_score(py_score, len(games)) is None else -elo_from_score(py_score, len(games)),
+        'python_elo_vs_rust': elo,
+        'rust_elo_advantage': None if elo is None else -elo,
         'base_ms': a.base_ms,
         'inc_ms': a.inc_ms,
         'max_plies': a.max_plies,
