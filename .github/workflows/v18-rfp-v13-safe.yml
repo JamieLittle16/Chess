@@ -1,0 +1,73 @@
+name: V18 RFP V13-safe screen
+on:
+  push:
+    branches: [analysis/v18-rfp-v13-safe-20260910]
+permissions:
+  contents: read
+jobs:
+  screen:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ci/v18-stockfish-calibration
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Reconstruct baseline and candidate
+        run: |
+          set -euo pipefail
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          for d in /tmp/base /tmp/cand; do rm -rf "$d"; mkdir "$d"; unzip -q /tmp/p150.zip -d "$d"; sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' "$d/agent.py"; done
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/cand/experiments/numba_search.py'); t=p.read_text()
+          old='        pruning_static_eval = _evaluate_state(side, eval_stack[ply])\n'
+          assert t.count(old)==1
+          p.write_text(t.replace(old,'        pruning_static_eval = _evaluate_state_v13_only(side, eval_stack[ply])\n'))
+          PY
+          diff -u /tmp/base/experiments/numba_search.py /tmp/cand/experiments/numba_search.py
+      - name: Critical sweep
+        run: |
+          cat >/tmp/run.py <<'PY'
+          import sys,time,chess,numpy as np
+          sys.path.insert(0,sys.argv[1]);import agent
+          from experiments.numba_core import encode_position,move_to_uci
+          from experiments.numba_search import iterative_search_stateful
+          cases=[('castle','r2q1rk1/1b1n1pbp/pp1ppnp1/8/PPPNPP2/2NBB2P/2Q3P1/R3K2R w KQ - 1 14'),('dxe4','r1bqk1nr/3n1pbp/3pp1p1/1B1p4/4P3/2N1B3/PP1QNPPP/R3K2R b KQkq - 0 11'),('Qb3','rnb1kb1r/2q2ppp/p1pp1n2/1p2p3/2PPP3/2NBB3/PP2NPPP/R2QK2R w KQkq - 0 8'),('a4','rnb1k2r/2q1bppp/p1pp1n2/1p2p3/2PPP3/1QNBB3/PP2NPPP/R3K2R w KQkq - 2 9'),('a3a2','r5k1/2q1bppp/p1p5/3p1P2/P1P3n1/QB1n4/1P1BNPPP/R4K1R w - - 0 20')]
+          h=np.empty(0,dtype=np.uint64)
+          for name,fen in cases:
+            b=chess.Board(fen);e=encode_position(b);print('\n',name)
+            for n in (200000,1000000,4000000):
+              agent._TT_TABLE.fill(0);agent._QUIET_HISTORY.fill(0);agent._HASH_KEYS.fill(0);agent._HASH_MOVES.fill(-1)
+              t=time.perf_counter();m,s,d,nn=iterative_search_stateful(e.board.copy(),e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,n)
+              print(n,move_to_uci(m),int(s),int(d),int(nn),round(time.perf_counter()-t,3),flush=True)
+          PY
+          echo BASE; python /tmp/run.py /tmp/base
+          echo CAND; python /tmp/run.py /tmp/cand
+      - name: 50 UHO fixed-node root difference
+        run: |
+          cat >/tmp/roots.py <<'PY'
+          import sys,json,chess,numpy as np,time
+          from pathlib import Path
+          sys.path.insert(0,sys.argv[1]);import agent
+          from experiments.numba_core import encode_position,move_to_uci
+          from experiments.numba_search import iterative_search_stateful
+          H=np.empty(0,dtype=np.uint64);rows=[]
+          lines=[x for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')][:50]
+          for i,line in enumerate(lines):
+            b=chess.Board(line);e=encode_position(b);agent._TT_TABLE.fill(0);agent._QUIET_HISTORY.fill(0);agent._HASH_KEYS.fill(0);agent._HASH_MOVES.fill(-1)
+            t=time.perf_counter();m,s,d,n=iterative_search_stateful(e.board.copy(),e.side,e.castling,e.ep_square,b.halfmove_clock,H,0,500000)
+            rows.append((i,b.fen(),move_to_uci(m),int(s),int(d),int(n),time.perf_counter()-t))
+          open(sys.argv[2],'w').write('\n'.join(json.dumps(x) for x in rows)+'\n')
+          PY
+          python /tmp/roots.py /tmp/base /tmp/base.jsonl
+          python /tmp/roots.py /tmp/cand /tmp/cand.jsonl
+          python - <<'PY'
+          import json,statistics
+          A=[json.loads(x) for x in open('/tmp/base.jsonl')];B=[json.loads(x) for x in open('/tmp/cand.jsonl')]
+          D=[(a[0],a[2],b[2],a[3],b[3],a[4],b[4],a[5],b[5]) for a,b in zip(A,B) if a[2]!=b[2]]
+          print('ROOT_DIFFS',len(D));[print(x) for x in D]
+          print('MEAN_SEC',statistics.mean(x[6] for x in A),statistics.mean(x[6] for x in B),'TOTAL_NODES',sum(x[5] for x in A),sum(x[5] for x in B))
+          PY
