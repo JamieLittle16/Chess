@@ -39,9 +39,22 @@ jobs:
           curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/engine/v18_gm2001.bin
           test "$(sha256sum /tmp/engine/v18_gm2001.bin | cut -d' ' -f1)" = 'fb6e9f3f27bb19a5b2fdefcc441c88ddeae48db61d5f00ad83973abb9f939c87'
           python -m py_compile /tmp/engine/agent.py /tmp/engine/experiments/*.py
-          (cd /tmp/engine && zip -qr /tmp/p133-check.zip .)
           echo ENGINE_MEMBERS
           find /tmp/engine -maxdepth 2 -type f -printf '%P %s\n' | sort
+
+      - name: Enforce independent benchmark-state reset
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/v18_competitor_move_benchmark.py')
+          s = p.read_text()
+          needle = '    if hasattr(agent, "_CLOCK_FEEDBACK_SAMPLES"):\n        agent._CLOCK_FEEDBACK_SAMPLES = 0\n'
+          repl = needle + '    if hasattr(agent, "_BOOK_POST_SEARCH_BOOSTS"):\n        agent._BOOK_POST_SEARCH_BOOSTS = 0\n'
+          assert s.count(needle) == 1
+          s = s.replace(needle, repl, 1)
+          p.write_text(s)
+          assert 'agent._BOOK_POST_SEARCH_BOOSTS = 0' in s
+          PY
 
       - name: Fetch and verify Stockfish 19
         run: |
