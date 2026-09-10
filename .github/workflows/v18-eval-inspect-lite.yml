@@ -1,0 +1,40 @@
+name: V18 evaluation source inspect lite
+on:
+  push:
+    branches: [analysis/v18-eval-inspect-lite-20260910]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ci/v18-stockfish-calibration
+      - name: Reconstruct exact PUNCH133
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/engine && mkdir /tmp/engine
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          unzip -q /tmp/p150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+      - name: Print exact evaluation sections
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          for fp in [Path('/tmp/engine/experiments/numba_core.py'), Path('/tmp/engine/experiments/numba_search.py')]:
+              lines=fp.read_text().splitlines()
+              print('\n====',fp,'====')
+              needles=['def evaluate','def _evaluate','def evaluate_state','residual','student_score','student_eval','h64','eval_score','phase']
+              seen=[]
+              for i,l in enumerate(lines):
+                  if any(n.lower() in l.lower() for n in needles):
+                      a=max(0,i-12); b=min(len(lines),i+28)
+                      if seen and a <= seen[-1][1]: seen[-1]=(seen[-1][0],max(seen[-1][1],b))
+                      else: seen.append((a,b))
+              for a,b in seen:
+                  print(f'--- {a+1}-{b} ---')
+                  for j in range(a,b): print(f'{j+1:5d}: {lines[j]}')
+          PY
