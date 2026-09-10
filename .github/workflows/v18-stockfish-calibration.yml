@@ -39,14 +39,27 @@ jobs:
           print('python-chess', chess.__version__)
           PY
 
-      - name: Verify and extract exact V18
+      - name: Verify and extract exact V18 contents
+        shell: bash
         run: |
-          echo 'c144e050b6f81a5c3ea62e95bb7b4ea1f28cfd9c84135b2f5fc311f74a1a0e77  ci/v18.zip' | sha256sum -c -
+          set -euo pipefail
           rm -rf ci/v18-engine
           mkdir -p ci/v18-engine
           unzip -q ci/v18.zip -d ci/v18-engine
-          test -f ci/v18-engine/agent.py
-          test -f ci/v18-engine/v18_gm2001.bin
+          cd ci/v18-engine
+          cat > /tmp/v18-files.sha256 <<'EOF'
+          0306e8145a453d91b9b5ac92e9980931510d9e18f8ba598a7548d08b85165c35  experiments/numba_core.py
+          e38876e2a37193639f9b8b559b02bc064d820c4cdeda44579c9f88e5bd4468b1  experiments/v14_student_h64.npz
+          7d0fc5f7a186e79317cf12a2ff285d7716c651fbd045c53d65a3cc6eb1b15319  experiments/v13_residual.i16
+          f74f46499cc0fdef8fba53c2ba77652414463b0a68e7a3fac1e3764f70f94032  experiments/numba_search.py
+          cb9540d5ea2a7074ae0c3b5894babecc2fb01de94b102420d8a65e159325ada6  experiments/v14_student_single_runtime.py
+          6422eb8eb8713e02e6d62d33ef230f37cf707188e864b575226802aead128b2f  experiments/__init__.py
+          c2cc0534a984124c5a75e250bab65f2756ade47341bbca84d6b6871fdb2977f2  v14_kpk.u8
+          eefc286900dbdcbdde360c5d4d867e078d29e790fadb1028b73da7fe82fe7215  agent.py
+          fb6e9f3f27bb19a5b2fdefcc441c88ddeae48db61d5f00ad83973abb9f939c87  v18_gm2001.bin
+          EOF
+          sha256sum -c /tmp/v18-files.sha256
+          test "$(find . -type f | wc -l)" -eq 9
 
       - name: Fetch and verify Stockfish 19
         shell: bash
