@@ -1,0 +1,1 @@
+Two parallel shards, each 4 opening pairs / 8 games, 30+0.5, fresh shuffled UHO seeds. Exact PUNCH133 vs exact BIAS90. This matches the engine's hard-coded +500ms increment assumption; only base clock is quarter-scale vs the 120+0.5 Swiss.
