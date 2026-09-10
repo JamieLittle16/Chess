@@ -10,16 +10,56 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact chess package
+        run: python -m pip install --disable-pip-version-check chess==1.11.2
       - name: Fetch GM 2001-2013 Polyglot book
         run: curl -fL --retry 3 -o gm2001.bin https://raw.githubusercontent.com/joeyrobert/ceruleanjs_opening_books/master/gm2001.bin
-      - name: Verify asset
+      - name: Verify asset and opening coverage
+        shell: bash
         run: |
-          test -s gm2001.bin
           python - <<'PY'
           import hashlib, os
+          import chess
+          import chess.polyglot
+
           p='gm2001.bin'
+          print('chess', chess.__version__)
           print('bytes', os.path.getsize(p))
           print('sha256', hashlib.sha256(open(p,'rb').read()).hexdigest())
+
+          lines = {
+              'start': [],
+              'taimanov': ['e2e4','c7c5','g1f3','e7e6','d2d4','c5d4','f3d4','b8c6'],
+              'semi_slav': ['d2d4','d7d5','c2c4','e7e6','g1f3','g8f6','e2e3','c7c6'],
+              'queens_indian': ['d2d4','g8f6','c2c4','e7e6','g1f3','b7b6'],
+              'english_sym': ['c2c4','c7c5','b1c3','b8c6','g2g3','g7g6','f1g2','f8g7'],
+              'sveshnikov': ['e2e4','c7c5','g1f3','b8c6','d2d4','c5d4','f3d4','g8f6','b1c3','e7e5'],
+              'french_tarrasch': ['e2e4','e7e6','d2d4','d7d5','b1d2'],
+          }
+          with chess.polyglot.open_reader(p) as reader:
+              for name, seq in lines.items():
+                  b=chess.Board()
+                  for u in seq:
+                      m=chess.Move.from_uci(u)
+                      assert m in b.legal_moves, (name,u,b.fen())
+                      b.push(m)
+                  entries=list(reader.find_all(b))
+                  entries.sort(key=lambda e:e.weight, reverse=True)
+                  print(name, 'ply', b.ply(), 'hit', bool(entries),
+                        'entries', [(e.move.uci(),e.weight,e.learn) for e in entries[:6]])
+                  if name != 'start':
+                      assert entries, f'expected representative opening hit: {name}'
+
+              # Castling normalization: reader moves must be legal python-chess moves.
+              b=chess.Board()
+              for u in ['e2e4','e7e5','g1f3','b8c6','f1b5','a7a6','b5a4','g8f6']:
+                  b.push_uci(u)
+              for e in reader.find_all(b):
+                  assert e.move in b.legal_moves
+          print('SMOKE PASS')
           PY
       - name: Upload book
         uses: actions/upload-artifact@v4
