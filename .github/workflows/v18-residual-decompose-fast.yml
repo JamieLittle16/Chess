@@ -1,0 +1,52 @@
+name: V18 residual decomposition fast
+on:
+  push:
+    branches: [analysis/v18-residual-decompose-fast-20260910]
+permissions:
+  contents: read
+jobs:
+  decompose:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ci/v18-stockfish-calibration
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Reconstruct PUNCH133
+        run: |
+          mkdir -p /tmp/engine
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          unzip -q /tmp/p150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+      - name: Decompose
+        env:
+          NUMBA_DISABLE_JIT: '1'
+          PYTHONPATH: /tmp/engine
+        run: |
+          python - <<'PY'
+          import chess,numpy as np
+          from experiments.numba_core import encode_position
+          import experiments.numba_search as s
+          from experiments.v14_student_single_runtime import infer_absolute768_student_cp,trunc_div_scalar
+          W=1
+          cases=[
+          ('CASTLE_SAFE','r2q1rk1/1b1n1pbp/pp1ppnp1/8/PPPNPP2/2NBB2P/2Q3P1/R3K2R w KQ - 1 14','e1g1',W),
+          ('CASTLE_BAD','r2q1rk1/1b1n1pbp/pp1ppnp1/8/PPPNPP2/2NBB2P/2Q3P1/R3K2R w KQ - 1 14','e1c1',W),
+          ('DXE4_BAD','r1bqk1nr/3n1pbp/3pp1p1/1B1p4/4P3/2N1B3/PP1QNPPP/R3K2R b KQkq - 0 11','d5e4',-W),
+          ('NE7_ALT','r1bqk1nr/3n1pbp/3pp1p1/1B1p4/4P3/2N1B3/PP1QNPPP/R3K2R b KQkq - 0 11','g8e7',-W),
+          ('NF6_SF','r1bqk1nr/3n1pbp/3pp1p1/1B1p4/4P3/2N1B3/PP1QNPPP/R3K2R b KQkq - 0 11','g8f6',-W),
+          ('A3A2_BAD','r5k1/2q1bppp/p1p5/3p1P2/P1P3n1/QB1n4/1P1BNPPP/R4K1R w - - 0 20','a3a2',W),
+          ('C4C5_SF','r5k1/2q1bppp/p1p5/3p1P2/P1P3n1/QB1n4/1P1BNPPP/R4K1R w - - 0 20','c4c5',W)]
+          for name,fen,uci,pov in cases:
+              b=chess.Board(fen); m=chess.Move.from_uci(uci); b.push(m); enc=encode_position(b)
+              st=np.empty(s.EVAL_WIDTH,dtype=np.int32); s._build_eval_state_into(enc.board,st)
+              classical=int(s._evaluate_state_classical(pov,st))
+              raw=(int(st[s.EVAL_RESIDUAL_WHITE])-int(st[s.EVAL_RESIDUAL_BLACK])) if pov==W else (int(st[s.EVAL_RESIDUAL_BLACK])-int(st[s.EVAL_RESIDUAL_WHITE]))
+              biased=raw+s.RESIDUAL_BIAS; clamp=max(-s.RESIDUAL_CLAMP,min(s.RESIDUAL_CLAMP,biased))
+              h=int(infer_absolute768_student_cp(st[s.STUDENT_OFFSET:s.EVAL_WIDTH],s.STUDENT_OUTPUT_WEIGHTS,s.STUDENT_OUTPUT_BIAS)); h=h if pov==W else -h
+              hs=trunc_div_scalar(h*s.STUDENT_SCALE_NUM,s.STUDENT_SCALE_DEN)
+              print(name,'move',uci,'CLASS',classical,'RAW_RES',raw,'BIAS_CLAMP',clamp,'R6',clamp//6,'R5',clamp//5,'R4',clamp//4,'R3',clamp//3,'HRAW',h,'H12',hs,'TOTAL6',classical+clamp//6+hs)
+          PY
