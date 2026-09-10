@@ -1,0 +1,34 @@
+name: Diagnostic Stockfish 19 V18
+
+on:
+  push:
+    branches: [diagnostic/v18-gmbook-upload-test]
+    paths: ['.github/workflows/diagnostic-stockfish19-v18.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stockfish:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Fetch exact Stockfish 19 universal binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz -o sf.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  sf.tar.gz' | sha256sum --check --strict
+          mkdir out tmp
+          tar -xzf sf.tar.gz -C tmp
+          SF=$(find tmp -type f -name 'stockfish*' -perm -111 -print -quit)
+          test -n "$SF"
+          cp "$SF" out/stockfish-19
+          chmod +x out/stockfish-19
+          out/stockfish-19 bench 1 1 4 default depth >/dev/null
+          sha256sum out/stockfish-19
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stockfish-19-universal-v18
+          path: out/stockfish-19
+          retention-days: 1
