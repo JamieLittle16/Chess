@@ -1,0 +1,89 @@
+name: V18 legal two-wing castling v2
+on:
+  push:
+    branches: [analysis/v18-root-castle-legal-v2-20260910]
+permissions:
+  contents: read
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ci/v18-stockfish-calibration
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Build baseline and legal-differential candidate
+        run: |
+          set -euo pipefail
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          for d in /tmp/base /tmp/cand; do
+            rm -rf "$d"; mkdir "$d"; unzip -q /tmp/p150.zip -d "$d"
+            sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' "$d/agent.py"
+            curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o "$d/v18_gm2001.bin"
+          done
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/cand/experiments/numba_search.py'); t=p.read_text()
+          marker='@njit(cache=False)\ndef _root(\n'; assert marker in t
+          helper='''@njit(cache=False)\ndef _root_castle_shield_badness(board: np.ndarray, side: int, king_file: int) -> int:\n    badness = 0\n    lo = max(0, king_file - 1)\n    hi = min(7, king_file + 1)\n    for file in range(lo, hi + 1):\n        nearest = 8\n        for sq in range(64):\n            if int(board[sq]) != side * PAWN or (sq & 7) != file:\n                continue\n            rank = sq >> 3\n            rel = rank if side == WHITE else 7 - rank\n            if rel > 0 and rel < nearest:\n                nearest = rel\n        if nearest <= 1:\n            lane = 0\n        elif nearest == 2:\n            lane = 10\n        elif nearest == 3:\n            lane = 25\n        elif nearest < 8:\n            lane = 40\n        else:\n            lane = 45\n        badness += lane\n    return badness\n\n@njit(cache=False)\ndef _root_castle_differential_v2(board: np.ndarray, side: int, move: int, both_castles_legal: bool) -> int:\n    if not both_castles_legal or (move & FLAG_CASTLE) == 0:\n        return 0\n    king_file = move_to(move) & 7\n    other_file = 2 if king_file >= 4 else 6\n    here = _root_castle_shield_badness(board, side, king_file)\n    other = _root_castle_shield_badness(board, side, other_file)\n    if here <= 45 and other >= 75:\n        return 40\n    if here >= 75 and other <= 45:\n        return -100\n    return 0\n\n\n'''
+          t=t.replace(marker,helper+marker,1)
+          old='''    if count == 0:\n        return -1, (-MATE if _state_in_check(board, side, eval_stack[0]) else 0), False\n    root_key = path_keys[0]\n'''
+          new='''    if count == 0:\n        return -1, (-MATE if _state_in_check(board, side, eval_stack[0]) else 0), False\n    root_kcastle_legal = False\n    root_qcastle_legal = False\n    for castle_index in range(count):\n        castle_move = int(moves[castle_index])\n        if (castle_move & FLAG_CASTLE) != 0:\n            castle_file = move_to(castle_move) & 7\n            if castle_file == 6:\n                root_kcastle_legal = True\n            elif castle_file == 2:\n                root_qcastle_legal = True\n    both_castles_legal = root_kcastle_legal and root_qcastle_legal\n    root_key = path_keys[0]\n'''
+          assert old in t; t=t.replace(old,new,1)
+          old='''        move = int(moves[index])\n        packed_order = int(score_stack[0, index])\n'''
+          new='''        move = int(moves[index])\n        root_castle_adjustment = _root_castle_differential_v2(board, side, move, both_castles_legal)\n        packed_order = int(score_stack[0, index])\n'''
+          pos=t.index('def _root('); head=t[:pos]; tail=t[pos:]; assert old in tail; tail=tail.replace(old,new,1); t=head+tail
+          old='''        score = -score\n        if score > best_score:\n'''; new='''        score = -score + root_castle_adjustment\n        if score > best_score:\n'''
+          pos=t.index('def _root('); head=t[:pos]; tail=t[pos:]; assert old in tail; tail=tail.replace(old,new,1); t=head+tail
+          p.write_text(t)
+          PY
+          python -m py_compile /tmp/cand/experiments/numba_search.py
+      - name: Critical depth sweep and 100-UHO parity
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          src=[x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')][:100]
+          crit=['r2q1rk1/1b1n1pbp/pp1ppnp1/8/PPPNPP2/2NBB2P/2Q3P1/R3K2R w KQ - 1 14','r1bqk1nr/3n1pbp/3pp1p1/1B1p4/4P3/2N1B3/PP1QNPPP/R3K2R b KQkq - 0 11','rnb1kb1r/2q2ppp/p1pp1n2/1p2p3/2PPP3/2NBB3/PP2NPPP/R2QK2R w KQkq - 0 8','rnb1k2r/2q1bppp/p1pp1n2/1p2p3/2PPP3/1QNBB3/PP2NPPP/R3K2R w KQkq - 2 9','r5k1/2q1bppp/p1p5/3p1P2/P1P3n1/QB1n4/1P1BNPPP/R4K1R w - - 0 20']
+          Path('/tmp/uho.txt').write_text('\n'.join(src)+'\n'); Path('/tmp/crit.txt').write_text('\n'.join(crit)+'\n')
+          PY
+          cat >/tmp/crit.py <<'PY'
+          import sys,chess,numpy as np
+          sys.path.insert(0,sys.argv[1]);import agent
+          from experiments.numba_core import encode_position,move_to_uci
+          from experiments.numba_search import iterative_search_stateful
+          H=np.empty(0,dtype=np.uint64)
+          for i,fen in enumerate(open('/tmp/crit.txt')):
+            b=chess.Board(fen.strip());e=encode_position(b);print('CRIT',i)
+            for n in (200000,500000,1000000,4000000):
+              agent._TT_TABLE.fill(0);agent._QUIET_HISTORY.fill(0);agent._HASH_KEYS.fill(0);agent._HASH_MOVES.fill(-1)
+              m,s,d,nn=iterative_search_stateful(e.board.copy(),e.side,e.castling,e.ep_square,b.halfmove_clock,H,0,n)
+              print(n,move_to_uci(m),int(s),int(d),int(nn),flush=True)
+          PY
+          echo BASE; python /tmp/crit.py /tmp/base
+          echo CAND; python /tmp/crit.py /tmp/cand
+          cat >/tmp/roots.py <<'PY'
+          import sys,json,chess,numpy as np
+          sys.path.insert(0,sys.argv[1]);import agent
+          from experiments.numba_core import encode_position,move_to_uci
+          from experiments.numba_search import iterative_search_stateful
+          H=np.empty(0,dtype=np.uint64); out=[]
+          for i,fen in enumerate(open('/tmp/uho.txt')):
+            b=chess.Board(fen.strip());e=encode_position(b);agent._TT_TABLE.fill(0);agent._QUIET_HISTORY.fill(0);agent._HASH_KEYS.fill(0);agent._HASH_MOVES.fill(-1)
+            m,s,d,n=iterative_search_stateful(e.board.copy(),e.side,e.castling,e.ep_square,b.halfmove_clock,H,0,500000);out.append((i,move_to_uci(m),int(s),int(d),int(n)))
+          open(sys.argv[2],'w').write('\n'.join(json.dumps(x) for x in out)+'\n')
+          PY
+          python /tmp/roots.py /tmp/base /tmp/base.jsonl; python /tmp/roots.py /tmp/cand /tmp/cand.jsonl
+          python - <<'PY'
+          import json
+          A=[json.loads(x) for x in open('/tmp/base.jsonl')];B=[json.loads(x) for x in open('/tmp/cand.jsonl')]
+          D=[(a[0],a[1],b[1],a[2],b[2]) for a,b in zip(A,B) if a[1]!=b[1]]
+          print('UHO_ROOT_DIFFS',len(D));[print('DIFF',x) for x in D]
+          print('NODES',sum(x[4] for x in A),sum(x[4] for x in B))
+          PY
+      - name: Fresh import startup comparison
+        run: |
+          /usr/bin/time -f 'BASE_WALL=%e BASE_RSS=%M' env PYTHONPATH=/tmp/base python -c 'import agent; print(agent._INIT_COMPILE_ELAPSED_MS, agent._INIT_READY_DEPTH, agent._INIT_READY_NODES)'
+          /usr/bin/time -f 'CAND_WALL=%e CAND_RSS=%M' env PYTHONPATH=/tmp/cand python -c 'import agent; print(agent._INIT_COMPILE_ELAPSED_MS, agent._INIT_READY_DEPTH, agent._INIT_READY_NODES)'
