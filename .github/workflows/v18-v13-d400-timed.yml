@@ -1,0 +1,95 @@
+name: V18 damp400 timed A/B
+on:
+  push:
+    branches: [analysis/v18-v13-d400-timed-20260910]
+permissions:
+  contents: read
+jobs:
+  match:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Reconstruct exact A/B engines
+        run: |
+          set -euo pipefail
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          for d in /tmp/base /tmp/cand; do
+            rm -rf "$d"; mkdir "$d"; unzip -q /tmp/p150.zip -d "$d"
+            sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' "$d/agent.py"
+            curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o "$d/v18_gm2001.bin"
+          done
+          python - <<'PY'
+          import json,numpy as np,hashlib
+          p='/tmp/cand/experiments/v13_residual.i16';w=np.fromfile(p,dtype=np.int16).astype(np.int32)
+          for i,d in json.load(open('ci/v13-gestalt-delta400.json')):w[i]+=d
+          w.astype(np.int16).tofile(p)
+          print('BASE',hashlib.sha256(open('/tmp/base/experiments/v13_residual.i16','rb').read()).hexdigest())
+          print('CAND',hashlib.sha256(open(p,'rb').read()).hexdigest())
+          PY
+      - name: 32-game paired 5+0.05 self-play
+        run: |
+          cat >/tmp/worker.py <<'PY'
+          import sys,json,contextlib,numpy as np
+          with contextlib.redirect_stdout(sys.stderr):
+              import agent
+          def reset():
+              agent._GAME_KEYS.clear();agent._PENDING_AFTER_OUR_MOVE=None
+              agent._LAST_CALL_TIME_LEFT_MS=None;agent._LAST_GET_MOVE_ELAPSED_MS=None
+              agent._CLOCK_OVERHEAD_EMA_MS=40.0;agent._CLOCK_FEEDBACK_SAMPLES=0
+              if hasattr(agent,'_BOOK_POST_SEARCH_BOOSTS'):agent._BOOK_POST_SEARCH_BOOSTS=0
+              agent._HASH_KEYS.fill(np.uint64(0));agent._HASH_MOVES.fill(np.int32(-1))
+              agent._TT_TABLE.fill(np.uint64(0));agent._QUIET_HISTORY.fill(np.int16(0))
+          for line in sys.stdin:
+              try:
+                  q=json.loads(line)
+                  if q['op']=='reset':reset();ans={'ok':True}
+                  else:ans={'move':agent.get_move(q['fen'],int(q['ms']))}
+              except Exception as e: ans={'error':type(e).__name__+': '+str(e)}
+              print(json.dumps(ans),flush=True)
+          PY
+          cat >/tmp/match.py <<'PY'
+          import subprocess,sys,json,time,random,math,chess
+          from pathlib import Path
+          class W:
+            def __init__(self,d):
+              self.p=subprocess.Popen([sys.executable,'/tmp/worker.py'],cwd=d,stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env={**__import__('os').environ,'PYTHONPATH':d})
+            def ask(self,q):
+              self.p.stdin.write(json.dumps(q)+'\n');self.p.stdin.flush(); r=json.loads(self.p.stdout.readline());
+              if 'error' in r:raise RuntimeError(r['error'])
+              return r
+            def reset(self):self.ask({'op':'reset'})
+            def close(self):self.p.terminate();self.p.wait(timeout=5)
+          base=W('/tmp/base');cand=W('/tmp/cand')
+          opens=[x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')]
+          random.Random(4002026).shuffle(opens);opens=opens[:16]
+          pts=[]; recs=[]; BASE=5.0; INC=.05
+          try:
+            for pi,fen in enumerate(opens):
+              for leg in range(2):
+                base.reset();cand.reset(); b=chess.Board(fen); clocks={'base':BASE,'cand':BASE}; cand_white=(leg==0); failure=None
+                for ply in range(300):
+                  out=b.outcome(claim_draw=True)
+                  if out: break
+                  side='cand' if b.turn==cand_white else 'base'; w=cand if side=='cand' else base
+                  st=time.perf_counter();r=w.ask({'op':'move','fen':b.fen(),'ms':max(1,round(clocks[side]*1000))});dt=time.perf_counter()-st
+                  clocks[side]-=dt
+                  if clocks[side]<0: failure=side+' flag'; break
+                  m=chess.Move.from_uci(r['move'])
+                  if m not in b.legal_moves:failure=side+' illegal '+r['move'];break
+                  b.push(m);clocks[side]+=INC
+                out=b.outcome(claim_draw=True)
+                if failure:
+                  cp=0.0 if failure.startswith('cand') else 1.0
+                elif out is None or out.winner is None:cp=.5
+                else:cp=1.0 if out.winner==cand_white else 0.0
+                pts.append(cp);recs.append((pi,leg,cp,failure,clocks['cand'],clocks['base'],b.ply()))
+                print('GAME',len(pts),'/32','pair',pi,'leg',leg,'cand_points',cp,'TOTAL',sum(pts),recs[-1],flush=True)
+          finally:base.close();cand.close()
+          score=sum(pts)/len(pts);eps=1e-6;p=max(eps,min(1-eps,score));elo=400*math.log10(p/(1-p))
+          pairs=[pts[2*i]+pts[2*i+1] for i in range(16)]
+          print('FINAL games',len(pts),'points',sum(pts),'score',score,'REL_ELO',elo,'PAIR_SCORES',pairs,'FAILURES',[r for r in recs if r[3]],flush=True)
+          PY
+          python /tmp/match.py
