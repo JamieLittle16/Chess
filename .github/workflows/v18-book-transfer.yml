@@ -1,0 +1,29 @@
+name: V18 book transfer
+
+on:
+  push:
+    branches:
+      - analysis/v18-book-transfer-20260910
+
+jobs:
+  transfer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fetch GM 2001-2013 Polyglot book
+        run: curl -fL --retry 3 -o gm2001.bin https://raw.githubusercontent.com/joeyrobert/ceruleanjs_opening_books/master/gm2001.bin
+      - name: Verify asset
+        run: |
+          test -s gm2001.bin
+          python - <<'PY'
+          import hashlib, os
+          p='gm2001.bin'
+          print('bytes', os.path.getsize(p))
+          print('sha256', hashlib.sha256(open(p,'rb').read()).hexdigest())
+          PY
+      - name: Upload book
+        uses: actions/upload-artifact@v4
+        with:
+          name: v18-gm2001-book
+          path: gm2001.bin
+          retention-days: 2
