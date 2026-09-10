@@ -1,0 +1,62 @@
+name: V18 PUNCH133 evaluation decomposition
+on:
+  push:
+    branches: [analysis/v18-eval-decompose-20260910]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ci/v18-stockfish-calibration
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Reconstruct exact PUNCH133
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/engine && mkdir /tmp/engine
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          unzip -q /tmp/p150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+          curl --fail --location --retry 5 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/engine/v18_gm2001.bin
+          echo '0ab496524b077f3c8f3778634f46b2bd79ed1c44ad4d89cf96857890396d1424  /tmp/engine/agent.py' | sha256sum -c --strict
+          echo 'f74f46499cc0fdef8fba53c2ba77652414463b0a68e7a3fac1e3764f70f94032  /tmp/engine/experiments/numba_search.py' | sha256sum -c --strict
+      - name: Print evaluation-related source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          for fp in [Path('/tmp/engine/experiments/numba_core.py'), Path('/tmp/engine/experiments/numba_search.py'), Path('/tmp/engine/experiments/v14_student_single_runtime.py')]:
+              print('\n====', fp, '====')
+              lines=fp.read_text().splitlines()
+              needles=('evaluate','eval_','residual','student','h64','king','PSQT','pst','phase')
+              hits=[]
+              for i,l in enumerate(lines):
+                  if any(n.lower() in l.lower() for n in needles): hits.append(i)
+              ranges=[]
+              for i in hits:
+                  a=max(0,i-8); b=min(len(lines),i+18)
+                  if ranges and a <= ranges[-1][1]+2: ranges[-1]=(ranges[-1][0],max(ranges[-1][1],b))
+                  else: ranges.append((a,b))
+              for a,b in ranges:
+                  print(f'--- lines {a+1}-{b} ---')
+                  for j in range(a,b): print(f'{j+1:5d}: {lines[j]}')
+          PY
+      - name: Show module API names
+        shell: bash
+        run: |
+          PYTHONPATH=/tmp/engine python - <<'PY'
+          import experiments.numba_core as c, experiments.numba_search as s
+          for mod in (c,s):
+              print('\nMODULE',mod.__name__)
+              for n in sorted(dir(mod)):
+                  if any(k in n.lower() for k in ('eval','resid','student','h64','king','score')):
+                      obj=getattr(mod,n)
+                      print(n, type(obj), getattr(obj,'signatures',None))
+          PY
