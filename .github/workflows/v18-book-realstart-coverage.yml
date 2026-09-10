@@ -1,0 +1,61 @@
+name: V18 GM-book real-start coverage
+
+on:
+  push:
+    branches:
+      - analysis/v18-book-realstart-coverage-20260910
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install chess==1.11.2
+      - name: Download exact V18 GM book
+        run: |
+          curl --fail --location --retry 5 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/gm2001.bin
+          echo 'fb6e9f3f27bb19a5b2fdefcc441c88ddeae48db61d5f00ad83973abb9f939c87  /tmp/gm2001.bin' | sha256sum --check --strict
+      - name: Score historical rated starts
+        run: |
+          python - <<'PY'
+          import chess, chess.polyglot
+          starts = [
+            ('R46','Taimanov','r1bqkbnr/pp1p1ppp/2n1p3/8/3NP3/P7/1PP2PPP/RNBQKB1R b KQkq - 0 5'),
+            ('R48','Semi-Slav','r1b1k2r/pp1nqppp/2pbpn2/3p4/P1PP4/2N1PN2/1P2BPPP/R1BQ1RK1 b kq - 4 8'),
+            ('R49','Italian','r1bqk2r/1pp2ppp/1bnp1n2/pP2p3/P1B1P3/2PP1N2/5PPP/RNBQK2R b KQkq - 0 8'),
+            ('R50','London','r1bqk2r/pp3ppp/2nbpn2/2pp4/3P1B2/P1P1P3/1P1N1PPP/R2QKBNR w KQkq - 1 7'),
+            ('R51','French Classical','r1bqk2r/pp1n1ppp/2n1p3/2bpP3/5P2/2NB1N2/PPP3PP/R1BQK2R b KQkq - 1 8'),
+            ('R53','Najdorf','rnbqk2r/1p2bppp/p2ppn2/8/4PPP1/1NN5/PPP4P/R1BQKB1R b KQkq - 0 8'),
+            ('R57','Queens Indian','rn1q1rk1/pbppbppp/1p2pn2/8/2PP4/5NP1/PP2PPBP/RNBQR1K1 b - - 6 7'),
+            ('R61','English Symm','r1bq1rk1/pp1pppbp/2n2np1/2p5/2PP4/2N2NP1/PP2PPBP/R1BQ1RK1 b - - 0 7'),
+            ('R65','Sveshnikov','r1bqkb1r/1p3ppp/p1np1n2/4p3/P3P3/N1N5/1PP2PPP/R1BQKB1R b KQkq - 1 8'),
+            ('R85','French Tarrasch','rnbqkbnr/pp3ppp/8/2pp4/3P4/7P/PPPN1PP1/R1BQKBNR b KQkq - 0 5'),
+          ]
+          def entries(r,b):
+              legal=set(b.legal_moves)
+              es=[e for e in r.find_all(b) if e.move in legal and int(e.weight)>0]
+              return sorted(es,key=lambda e:(-int(e.weight),e.move.uci()))
+          def direct(es):
+              if not es: return False
+              total=sum(int(e.weight) for e in es); top=int(es[0].weight); s=top/total
+              return top>=16 and (s>=.70 or (top>=96 and s>=.60))
+          with chess.polyglot.open_reader('/tmp/gm2001.bin') as r:
+              hits=directs=0
+              for rid,name,fen in starts:
+                  b=chess.Board(fen); es=entries(r,b)
+                  if es: hits += 1
+                  d=direct(es); directs += int(d)
+                  total=sum(int(e.weight) for e in es)
+                  top=int(es[0].weight) if es else 0
+                  share=(top/total) if total else 0
+                  print(f'{rid:>3} {name:18} ply={b.ply():2d} book={bool(es)!s:5} direct={d!s:5} top={top:4d} total={total:4d} share={share:6.3f} move={(es[0].move.uci() if es else "-")}')
+              print(f'SUMMARY book_hits={hits}/{len(starts)} current_direct={directs}/{len(starts)}')
+          PY
