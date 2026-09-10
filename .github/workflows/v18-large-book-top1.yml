@@ -1,0 +1,148 @@
+name: V18 broad book top1 compression and audit
+
+on:
+  push:
+    branches: [analysis/v18-large-book-top1-20260910]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compress:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install chess==1.11.2
+      - name: Download broad source book
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://github.com/ChrisWhittington/polyglot-books/releases/download/v1.0/book.zip' \
+            -o /tmp/book.zip
+          mkdir -p /tmp/booksrc
+          unzip -q /tmp/book.zip -d /tmp/booksrc
+          BIN="$(find /tmp/booksrc -type f -name '*.bin' | head -n1)"
+          cp "$BIN" /tmp/source.bin
+          echo "source_bytes=$(stat -c%s /tmp/source.bin) source_sha=$(sha256sum /tmp/source.bin | cut -d' ' -f1)"
+      - name: Keep one strongest move per position key
+        run: |
+          mkdir -p analysis-results/v18-large-top1
+          python - <<'PY'
+          import struct, pathlib
+          S=struct.Struct('>QHHI')
+          src=pathlib.Path('/tmp/source.bin')
+          out=pathlib.Path('analysis-results/v18-large-top1/top1.bin')
+          out255=pathlib.Path('analysis-results/v18-large-top1/top1-w255.bin')
+          entries=keys=keys255=0
+          last=None; best=None
+          with src.open('rb') as f, out.open('wb') as g, out255.open('wb') as h:
+              while True:
+                  b=f.read(16)
+                  if not b: break
+                  entries += 1
+                  key,move,weight,learn=S.unpack(b)
+                  if last is None: last=key; best=(key,move,weight,learn)
+                  elif key != last:
+                      g.write(S.pack(*best)); keys += 1
+                      if best[2] == 255:
+                          h.write(S.pack(*best)); keys255 += 1
+                      last=key; best=(key,move,weight,learn)
+                  elif weight > best[2]:
+                      best=(key,move,weight,learn)
+              if best is not None:
+                  g.write(S.pack(*best)); keys += 1
+                  if best[2] == 255:
+                      h.write(S.pack(*best)); keys255 += 1
+          print({'source_entries':entries,'unique_keys':keys,'top1_bytes':out.stat().st_size,'weight255_keys':keys255,'weight255_bytes':out255.stat().st_size})
+          PY
+          sha256sum analysis-results/v18-large-top1/*.bin | tee analysis-results/v18-large-top1/sha256.txt
+          ls -lh analysis-results/v18-large-top1/*.bin
+      - name: Build UHO 5000 position suite
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /tmp/uho.zip \
+            https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          mkdir -p /tmp/m6
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir /tmp/m6
+      - name: Measure general and historical position coverage
+        run: |
+          python - <<'PY' | tee analysis-results/v18-large-top1/coverage.txt
+          import chess,chess.polyglot,pathlib
+          starts=[
+            ('R46','r1bqkbnr/pp1p1ppp/2n1p3/8/3NP3/P7/1PP2PPP/RNBQKB1R b KQkq - 0 5'),
+            ('R48','r1b1k2r/pp1nqppp/2pbpn2/3p4/P1PP4/2N1PN2/1P2BPPP/R1BQ1RK1 b kq - 4 8'),
+            ('R49','r1bqk2r/1pp2ppp/1bnp1n2/pP2p3/P1B1P3/2PP1N2/5PPP/RNBQK2R b KQkq - 0 8'),
+            ('R50','r1bqk2r/pp3ppp/2nbpn2/2pp4/3P1B2/P1P1P3/1P1N1PPP/R2QKBNR w KQkq - 1 7'),
+            ('R51','r1bqk2r/pp1n1ppp/2n1p3/2bpP3/5P2/2NB1N2/PPP3PP/R1BQK2R b KQkq - 1 8'),
+            ('R53','rnbqk2r/1p2bppp/p2ppn2/8/4PPP1/1NN5/PPP4P/R1BQKB1R b KQkq - 0 8'),
+            ('R57','rn1q1rk1/pbppbppp/1p2pn2/8/2PP4/5NP1/PP2PPBP/RNBQR1K1 b - - 6 7'),
+            ('R61','r1bq1rk1/pp1pppbp/2n2np1/2p5/2PP4/2N2NP1/PP2PPBP/R1BQ1RK1 b - - 0 7'),
+            ('R65','r1bqkb1r/1p3ppp/p1np1n2/4p3/P3P3/N1N5/1PP2PPP/R1BQKB1R b KQkq - 1 8'),
+            ('R85','rnbqkbnr/pp3ppp/8/2pp4/3P4/7P/PPPN1PP1/R1BQKBNR b KQkq - 0 5')]
+          uho=[x.strip() for x in pathlib.Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          for p in ['analysis-results/v18-large-top1/top1.bin','analysis-results/v18-large-top1/top1-w255.bin']:
+              with chess.polyglot.open_reader(p) as r:
+                  def hit(b):
+                      legal=set(b.legal_moves)
+                      return next((e for e in r.find_all(b) if e.move in legal and int(e.weight)>0),None)
+                  hh=[]
+                  for tag,fen in starts:
+                      e=hit(chess.Board(fen)); hh.append(bool(e)); print(pathlib.Path(p).name,tag,bool(e),e.move.uci() if e else '-')
+                  uh=0
+                  for line in uho:
+                      fields=line.split()
+                      b=chess.Board(' '.join(fields[:4])+' 0 1')
+                      uh += bool(hit(b))
+                  print(pathlib.Path(p).name,'historical',sum(hh),'/10','UHO',uh,'/',len(uho))
+          PY
+      - name: Download Stockfish 19
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://github.com/official-stockfish/Stockfish/releases/latest/download/stockfish-linux-x86-64-universal.tar.gz' -o /tmp/sf.tar.gz
+          mkdir -p /tmp/sf && tar -xzf /tmp/sf.tar.gz -C /tmp/sf
+          SF="$(find /tmp/sf -type f -name 'stockfish*' -perm /111 | head -n1)"
+          cp "$SF" /tmp/stockfish19 && chmod +x /tmp/stockfish19
+      - name: Audit weight-255 top moves on held-out UHO hits
+        run: |
+          python - <<'PY' | tee analysis-results/v18-large-top1/sf19-quality.txt
+          import chess,chess.polyglot,chess.engine,pathlib,statistics,random
+          lines=[x.strip() for x in pathlib.Path('/tmp/m6/m6-uho-lichess-5000-v1.epd').read_text().splitlines() if x.strip()]
+          reader=chess.polyglot.open_reader('analysis-results/v18-large-top1/top1-w255.bin')
+          hits=[]
+          for i,line in enumerate(lines):
+              b=chess.Board(' '.join(line.split()[:4])+' 0 1'); legal=set(b.legal_moves)
+              e=next((e for e in reader.find_all(b) if e.move in legal and int(e.weight)>0),None)
+              if e: hits.append((i,b.fen(),e.move.uci()))
+          random.Random(20260910).shuffle(hits); sample=hits[:120]
+          print('UHO hits',len(hits),'sample',len(sample))
+          eng=chess.engine.SimpleEngine.popen_uci('/tmp/stockfish19')
+          if 'Threads' in eng.options: eng.configure({'Threads':1})
+          if 'Hash' in eng.options: eng.configure({'Hash':64})
+          def clear():
+              if 'Clear Hash' in eng.options: eng.configure({'Clear Hash':None})
+          def cp(s,pov):
+              v=s.pov(pov).score(mate_score=100000); return int(v if v is not None else 0)
+          losses=[]; rows=[]
+          for j,(idx,fen,uci) in enumerate(sample,1):
+              b=chess.Board(fen); m=chess.Move.from_uci(uci); pov=b.turn
+              clear(); best=eng.analyse(b,chess.engine.Limit(nodes=50000)); bcp=cp(best['score'],pov)
+              clear(); forced=eng.analyse(b,chess.engine.Limit(nodes=50000),root_moves=[m]); fcp=cp(forced['score'],pov)
+              loss=max(0,bcp-fcp); losses.append(loss); rows.append((loss,idx,uci,best['pv'][0].uci(),bcp,fcp,fen))
+              if j%20==0: print('progress',j,'mean',round(statistics.mean(losses),2),'max',max(losses),flush=True)
+          print('SUMMARY n',len(losses),'mean',statistics.mean(losses),'median',statistics.median(losses),'max',max(losses),'<=10',sum(x<=10 for x in losses),'<=20',sum(x<=20 for x in losses),'<=50',sum(x<=50 for x in losses))
+          print('WORST')
+          for row in sorted(rows,reverse=True)[:15]: print(row[:-1])
+          eng.quit(); reader.close()
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v18-large-book-top1-${{ github.sha }}
+          path: analysis-results/v18-large-top1
+          retention-days: 5
