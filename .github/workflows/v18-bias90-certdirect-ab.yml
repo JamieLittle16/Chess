@@ -1,0 +1,141 @@
+name: V18 BIAS90 plus certified DIRECT A/B
+
+on:
+  push:
+    branches: [analysis/v18-bias90-certdirect-ab-20260910]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  match:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Download certified opening artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            'https://api.github.com/repos/JamieLittle16/Chess/actions/artifacts/10171021582/zip' \
+            -o /tmp/cert-art.zip
+          rm -rf /tmp/cert-art && mkdir /tmp/cert-art
+          unzip -q /tmp/cert-art.zip -d /tmp/cert-art
+          test -f /tmp/cert-art/broadcast-sf19-certified.bin
+          echo '99815ab800eaaea8e231cde9736202b3ccf6cd848d892e1d0508e310889c785f  /tmp/cert-art/broadcast-sf19-certified.bin' | sha256sum -c
+      - name: Build exact BIAS90 baseline and certified candidate
+        run: |
+          set -euo pipefail
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          for d in /tmp/base /tmp/cand; do
+            rm -rf "$d"; mkdir "$d"; unzip -q /tmp/p150.zip -d "$d"
+            sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' "$d/agent.py"
+            sed -i 's/RESIDUAL_BIAS = 61/RESIDUAL_BIAS = 90/' "$d/experiments/numba_search.py"
+            curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o "$d/v18_gm2001.bin"
+          done
+          cp /tmp/cert-art/broadcast-sf19-certified.bin /tmp/cand/v18_broadcast_sf19_certified.bin
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/cand/agent.py')
+          s=p.read_text()
+          needle='''_BOOK_READER = chess.polyglot.open_reader(_BOOK_PATH)\n_BOOK_PRIOR_MAX_PLY: Final = 22\n'''
+          repl='''_BOOK_READER = chess.polyglot.open_reader(_BOOK_PATH)\n# General 2026 master-broadcast overlay: one top continuation per position, admitted only after\n# independent Stockfish-19 verification. It can extend DIRECT coverage but never supplies a\n# score/bound and never overrides an already-qualified GM DIRECT move.\n_CERT_BOOK_PATH = Path(__file__).with_name("v18_broadcast_sf19_certified.bin")\nif not _CERT_BOOK_PATH.is_file():\n    raise ValueError("missing V18 certified opening overlay")\n_CERT_BOOK_READER = chess.polyglot.open_reader(_CERT_BOOK_PATH)\n_BOOK_PRIOR_MAX_PLY: Final = 22\n'''
+          assert needle in s
+          s=s.replace(needle,repl,1)
+          marker='''def _internal_move_from_chess(board: chess.Board, move: chess.Move) -> int:\n'''
+          insert='''def _certified_book_move(board: chess.Board) -> chess.Move | None:\n    """Return a legal SF19-certified broadcast continuation inside the DIRECT window."""\n    if board.ply() > _BOOK_DIRECT_MAX_PLY:\n        return None\n    try:\n        for entry in _CERT_BOOK_READER.find_all(board):\n            move = entry.move\n            if int(entry.weight) > 0 and move in board.legal_moves:\n                return move\n    except (IndexError, ValueError):\n        return None\n    return None\n\n\n'''+marker
+          assert marker in s
+          s=s.replace(marker,insert,1)
+          needle2='''    direct_book_move = _high_confidence_book_move(board)\n    if direct_book_move is not None:\n'''
+          repl2='''    direct_book_move = _high_confidence_book_move(board)\n    if direct_book_move is None:\n        direct_book_move = _certified_book_move(board)\n    if direct_book_move is not None:\n'''
+          assert needle2 in s
+          s=s.replace(needle2,repl2,1)
+          p.write_text(s)
+          PY
+          echo '8b0271dff9b341c63ef7d99293c8e790b7e0d49d7ebe08c1f4717b6bea9902f6  /tmp/cand/agent.py' | sha256sum -c
+          echo '77bccc20918239346b429535697b4566114a6be6cc97836ffbafeb779790f9c3  /tmp/cand/experiments/numba_search.py' | sha256sum -c
+      - name: Select deterministic certified GM-miss starts
+        run: |
+          python - <<'PY'
+          import csv, random, chess, chess.polyglot
+          rows=[]
+          with chess.polyglot.open_reader('/tmp/base/v18_gm2001.bin') as gm:
+            with open('/tmp/cert-art/audit.csv', newline='') as f:
+              for r in csv.DictReader(f):
+                if r['certified'] != 'True': continue
+                ply=int(r['ply'])
+                if not (8 <= ply <= 18): continue
+                b=chess.Board(r['fen'])
+                if any(True for _ in gm.find_all(b)): continue
+                rows.append((r['fen'],r['move'],int(r['total_count']),float(r['share']),int(r['deep_loss'])))
+          random.Random(18092026).shuffle(rows)
+          chosen=rows[:8]
+          assert len(chosen)==8
+          with open('/tmp/starts.tsv','w') as out:
+            for fen,m,c,sh,loss in chosen:
+              out.write(f'{fen}\t{m}\t{c}\t{sh:.6f}\t{loss}\n')
+          print('ELIGIBLE',len(rows))
+          for i,x in enumerate(chosen): print('START',i,*x)
+          PY
+      - name: Verify direct hits and run 16-game exact-increment A/B
+        run: |
+          cat >/tmp/worker.py <<'PY'
+          import sys,json,contextlib,numpy as np
+          with contextlib.redirect_stdout(sys.stderr): import agent
+          def reset():
+            agent._GAME_KEYS.clear();agent._PENDING_AFTER_OUR_MOVE=None;agent._LAST_CALL_TIME_LEFT_MS=None;agent._LAST_GET_MOVE_ELAPSED_MS=None
+            agent._CLOCK_OVERHEAD_EMA_MS=40.0;agent._CLOCK_FEEDBACK_SAMPLES=0
+            if hasattr(agent,'_BOOK_POST_SEARCH_BOOSTS'):agent._BOOK_POST_SEARCH_BOOSTS=0
+            agent._HASH_KEYS.fill(np.uint64(0));agent._HASH_MOVES.fill(np.int32(-1));agent._TT_TABLE.fill(np.uint64(0));agent._QUIET_HISTORY.fill(np.int16(0))
+          for line in sys.stdin:
+            try:
+              q=json.loads(line);ans={'ok':True} if q['op']=='reset' and not reset() else {'move':agent.get_move(q['fen'],int(q['ms'])),'boost':getattr(agent,'_BOOK_POST_SEARCH_BOOSTS',0)}
+            except Exception as e:ans={'error':type(e).__name__+': '+str(e)}
+            print(json.dumps(ans),flush=True)
+          PY
+          cat >/tmp/match.py <<'PY'
+          import subprocess,sys,json,time,math,chess,os
+          class W:
+            def __init__(self,d): self.p=subprocess.Popen([sys.executable,'/tmp/worker.py'],cwd=d,stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env={**os.environ,'PYTHONPATH':d})
+            def ask(self,q):
+              self.p.stdin.write(json.dumps(q)+'\n');self.p.stdin.flush();r=json.loads(self.p.stdout.readline())
+              if 'error' in r: raise RuntimeError(r['error'])
+              return r
+            def reset(self): self.ask({'op':'reset'})
+            def close(self): self.p.terminate();self.p.wait(timeout=5)
+          starts=[]
+          for line in open('/tmp/starts.tsv'):
+            fen,cert_move,count,share,loss=line.rstrip().split('\t'); starts.append((fen,cert_move))
+          base=W('/tmp/base');cand=W('/tmp/cand');pts=[];BASE=30.;INC=.5;fails=[]
+          try:
+            for pi,(fen,certmove) in enumerate(starts):
+              # Candidate must actually use the independently certified move at the start.
+              cand.reset();probe=cand.ask({'op':'move','fen':fen,'ms':30000});print('PROBE',pi,certmove,probe,flush=True);assert probe['move']==certmove and probe['boost']>=1
+              for leg in range(2):
+                base.reset();cand.reset();b=chess.Board(fen);clocks={'base':BASE,'cand':BASE};cw=(leg==0);failure=None
+                for ply in range(300):
+                  if b.outcome(claim_draw=True): break
+                  side='cand' if b.turn==cw else 'base';w=cand if side=='cand' else base
+                  st=time.perf_counter();r=w.ask({'op':'move','fen':b.fen(),'ms':max(1,round(clocks[side]*1000))});clocks[side]-=time.perf_counter()-st
+                  if clocks[side]<0: failure=side+' flag';break
+                  m=chess.Move.from_uci(r['move'])
+                  if m not in b.legal_moves: failure=side+' illegal '+r['move'];break
+                  b.push(m);clocks[side]+=INC
+                out=b.outcome(claim_draw=True)
+                cp=(0. if failure and failure.startswith('cand') else 1.) if failure else (.5 if out is None or out.winner is None else (1. if out.winner==cw else 0.))
+                pts.append(cp)
+                if failure:fails.append((pi,leg,failure))
+                print('GAME',len(pts),'/16','POINT',cp,'TOTAL',sum(pts),'CLOCKS',clocks,'FAIL',failure,flush=True)
+          finally: base.close();cand.close()
+          p=sum(pts)/len(pts);q=max(1e-6,min(1-1e-6,p));elo=400*math.log10(q/(1-q))
+          print('FINAL games',len(pts),'points',sum(pts),'score',p,'REL_ELO',elo,'FAILURES',fails,flush=True)
+          PY
+          python /tmp/match.py
