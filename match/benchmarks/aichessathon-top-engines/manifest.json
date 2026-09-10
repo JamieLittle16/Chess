@@ -17,15 +17,16 @@
   "duplicate_copies_removed": 43,
   "semantic_identity": "starting FEN + normalized mainline SAN tokens (comments/NAGs/move numbers/results ignored)",
   "top_panel_rule": "at least 10 appearances in unique games",
+  "top_panel_historical_decisions": 8230,
   "top_panel": [
-    {"engine": "Ryan Vincent", "unique_games": 17},
-    {"engine": "Lightning Tree", "unique_games": 14},
-    {"engine": "Emile Andrieu", "unique_games": 13},
-    {"engine": "what even is en passant", "unique_games": 13},
-    {"engine": "Gijs Smit", "unique_games": 12},
-    {"engine": "Opus Carlsen", "unique_games": 12},
-    {"engine": "Stonkfish", "unique_games": 11},
-    {"engine": "BetaGo", "unique_games": 10}
+    {"engine": "Ryan Vincent", "unique_games": 17, "historical_decisions": 1594},
+    {"engine": "Lightning Tree", "unique_games": 14, "historical_decisions": 751},
+    {"engine": "Emile Andrieu", "unique_games": 13, "historical_decisions": 1278},
+    {"engine": "what even is en passant", "unique_games": 13, "historical_decisions": 990},
+    {"engine": "Gijs Smit", "unique_games": 12, "historical_decisions": 1048},
+    {"engine": "Opus Carlsen", "unique_games": 12, "historical_decisions": 922},
+    {"engine": "Stonkfish", "unique_games": 11, "historical_decisions": 859},
+    {"engine": "BetaGo", "unique_games": 10, "historical_decisions": 788}
   ],
   "all_player_appearances": {
     "Ryan Vincent": 17,
