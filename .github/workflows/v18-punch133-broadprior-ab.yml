@@ -1,0 +1,164 @@
+name: V18 exact PUNCH133 vs BROAD2026 PRIOR
+
+on:
+  push:
+    branches: [analysis/v18-punch133-exact-ci-20260910]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  ab:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install competition runtime
+        run: |
+          python -m pip install 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+          python - <<'PY'
+          import sys, numba, numpy, chess
+          print(sys.version)
+          print('numba',numba.__version__,'numpy',numpy.__version__,'chess',chess.__version__)
+          PY
+      - name: Reconstruct exact PUNCH133 file set
+        env:
+          GM_URL: https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/punch133 /tmp/challenger
+          mkdir -p /tmp/punch133 /tmp/challenger
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/postbook150.zip
+          unzip -q /tmp/postbook150.zip -d /tmp/punch133
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/punch133/agent.py
+          curl --fail --location --retry 5 "$GM_URL" -o /tmp/punch133/v18_gm2001.bin
+          cd /tmp/punch133
+          cat >/tmp/punch133.sha256 <<'EOF'
+          0306e8145a453d91b9b5ac92e9980931510d9e18f8ba598a7548d08b85165c35  experiments/numba_core.py
+          e38876e2a37193639f9b8b559b02bc064d820c4cdeda44579c9f88e5bd4468b1  experiments/v14_student_h64.npz
+          7d0fc5f7a186e79317cf12a2ff285d7716c651fbd045c53d65a3cc6eb1b15319  experiments/v13_residual.i16
+          f74f46499cc0fdef8fba53c2ba77652414463b0a68e7a3fac1e3764f70f94032  experiments/numba_search.py
+          cb9540d5ea2a7074ae0c3b5894babecc2fb01de94b102420d8a65e159325ada6  experiments/v14_student_single_runtime.py
+          6422eb8eb8713e02e6d62d33ef230f37cf707188e864b575226802aead128b2f  experiments/__init__.py
+          c2cc0534a984124c5a75e250bab65f2756ade47341bbca84d6b6871fdb2977f2  v14_kpk.u8
+          0ab496524b077f3c8f3778634f46b2bd79ed1c44ad4d89cf96857890396d1424  agent.py
+          fb6e9f3f27bb19a5b2fdefcc441c88ddeae48db61d5f00ad83973abb9f939c87  v18_gm2001.bin
+          EOF
+          sha256sum -c /tmp/punch133.sha256
+          cp -a /tmp/punch133/. /tmp/challenger/
+      - name: Add exact BROAD2026 min2 book and PRIOR-only adapter
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            'https://api.github.com/repos/JamieLittle16/Chess/actions/artifacts/10169261506/zip' \
+            -o /tmp/broadcast-artifact.zip
+          unzip -p /tmp/broadcast-artifact.zip broadcast-all-min2.bin > /tmp/challenger/v18_broadcast2026_min2.bin
+          echo '1ec8cd9c4c59e396a715c82565bd9c4b4ca04a042b2bd25ffc376ff775689649  /tmp/challenger/v18_broadcast2026_min2.bin' | sha256sum -c -
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/challenger/agent.py')
+          s=p.read_text()
+          anchor='''_BOOK_READER = chess.polyglot.open_reader(_BOOK_PATH)\n_BOOK_PRIOR_MAX_PLY: Final = 22\n'''
+          repl='''_BOOK_READER = chess.polyglot.open_reader(_BOOK_PATH)\n\n# Broad recent-theory fallback.  This source is ordering-only: full search still decides.\n_BROAD_BOOK_PATH = Path(__file__).with_name("v18_broadcast2026_min2.bin")\nif not _BROAD_BOOK_PATH.is_file():\n    raise ValueError("missing V18 recent-master fallback book")\n_BROAD_BOOK_READER = chess.polyglot.open_reader(_BROAD_BOOK_PATH)\n_BOOK_PRIOR_MAX_PLY: Final = 22\n'''
+          assert anchor in s
+          s=s.replace(anchor,repl,1)
+          start=s.index('def _book_prior(board: chess.Board) -> chess.Move | None:')
+          end=s.index('\ndef _high_confidence_book_move',start)
+          new='''def _strongest_legal_book_move(reader, board: chess.Board) -> chess.Move | None:\n    best_entry = None\n    try:\n        for entry in reader.find_all(board):\n            move = entry.move\n            if move not in board.legal_moves or int(entry.weight) <= 0:\n                continue\n            if best_entry is None or int(entry.weight) > int(best_entry.weight):\n                best_entry = entry\n    except (IndexError, ValueError):\n        return None\n    return None if best_entry is None else best_entry.move\n\n\ndef _book_prior(board: chess.Board) -> chess.Move | None:\n    if board.ply() > _BOOK_PRIOR_MAX_PLY:\n        return None\n    move = _strongest_legal_book_move(_BOOK_READER, board)\n    if move is not None:\n        return move\n    return _strongest_legal_book_move(_BROAD_BOOK_READER, board)\n\n'''
+          s=s[:start]+new+s[end+1:]
+          p.write_text(s)
+          PY
+          python -m py_compile /tmp/challenger/agent.py
+          sha256sum /tmp/punch133/experiments/numba_search.py /tmp/challenger/experiments/numba_search.py
+          cmp /tmp/punch133/experiments/numba_search.py /tmp/challenger/experiments/numba_search.py
+      - name: Create paired probe
+        run: |
+          cat >/tmp/probe.py <<'PY'
+          import json, os, sys, time
+          from pathlib import Path
+          import numpy as np
+          import chess
+
+          engine_dir=Path(sys.argv[1])
+          output=Path(sys.argv[2])
+          sys.path.insert(0,str(engine_dir))
+          t0=time.perf_counter()
+          import agent
+          init_s=time.perf_counter()-t0
+
+          starts=[
+            ('R46','Taimanov','r1bqkbnr/pp1p1ppp/2n1p3/8/3NP3/P7/1PP2PPP/RNBQKB1R b KQkq - 0 5'),
+            ('R48','Semi-Slav','r1b1k2r/pp1nqppp/2pbpn2/3p4/P1PP4/2N1PN2/1P2BPPP/R1BQ1RK1 b kq - 4 8'),
+            ('R49','Italian','r1bqk2r/1pp2ppp/1bnp1n2/pP2p3/P1B1P3/2PP1N2/5PPP/RNBQK2R b KQkq - 0 8'),
+            ('R50','London','r1bqk2r/pp3ppp/2nbpn2/2pp4/3P1B2/P1P1P3/1P1N1PPP/R2QKBNR w KQkq - 1 7'),
+            ('R51','French Classical','r1bqk2r/pp1n1ppp/2n1p3/2bpP3/5P2/2NB1N2/PPP3PP/R1BQK2R b KQkq - 1 8'),
+            ('R53','Najdorf','rnbqk2r/1p2bppp/p2ppn2/8/4PPP1/1NN5/PPP4P/R1BQKB1R b KQkq - 0 8'),
+            ('R57','Queens Indian','rn1q1rk1/pbppbppp/1p2pn2/8/2PP4/5NP1/PP2PPBP/RNBQR1K1 b - - 6 7'),
+            ('R61','English Symm','r1bq1rk1/pp1pppbp/2n2np1/2p5/2PP4/2N2NP1/PP2PPBP/R1BQ1RK1 b - - 0 7'),
+            ('R65','Sveshnikov','r1bqkb1r/1p3ppp/p1np1n2/4p3/P3P3/N1N5/1PP2PPP/R1BQKB1R b KQkq - 1 8'),
+            ('R85','French Tarrasch','rnbqkbnr/pp3ppp/8/2pp4/3P4/7P/PPPN1PP1/R1BQKBNR b KQkq - 0 5'),
+          ]
+          def reset():
+              agent._GAME_KEYS.clear()
+              agent._PENDING_AFTER_OUR_MOVE=None
+              agent._LAST_CALL_TIME_LEFT_MS=None
+              agent._LAST_GET_MOVE_ELAPSED_MS=None
+              agent._CLOCK_OVERHEAD_EMA_MS=40.0
+              agent._CLOCK_FEEDBACK_SAMPLES=0
+              agent._HASH_KEYS.fill(np.uint64(0))
+              agent._HASH_MOVES.fill(np.int32(-1))
+              agent._TT_TABLE.fill(np.uint64(0))
+              agent._QUIET_HISTORY.fill(np.int16(0))
+          rows=[]
+          for rid,name,fen in starts:
+              reset()
+              b=chess.Board(fen)
+              prior=agent._book_prior(b)
+              t=time.perf_counter()
+              r=agent.search_position(b,120000,np.empty(0,dtype=np.uint64))
+              wall=time.perf_counter()-t
+              rows.append(dict(id=rid,name=name,prior=prior.uci() if prior else None,move=r.move.uci(),score=r.score,depth=r.depth,nodes=r.nodes,elapsed_ms=r.elapsed_ms,wall_s=wall))
+              print(rid,rows[-1],flush=True)
+          output.write_text(json.dumps(dict(init_s=init_s,rows=rows),indent=2))
+          print('INIT_S',init_s,flush=True)
+          PY
+      - name: Probe exact PUNCH133 control
+        run: |
+          mkdir -p artifacts/control artifacts/challenger
+          /usr/bin/time -v python /tmp/probe.py /tmp/punch133 artifacts/control/results.json 2>&1 | tee artifacts/control/run.log
+      - name: Probe BROAD2026 PRIOR challenger
+        run: |
+          /usr/bin/time -v python /tmp/probe.py /tmp/challenger artifacts/challenger/results.json 2>&1 | tee artifacts/challenger/run.log
+      - name: Compare paired results
+        run: |
+          python - <<'PY' | tee artifacts/comparison.txt
+          import json
+          a=json.load(open('artifacts/control/results.json'))
+          b=json.load(open('artifacts/challenger/results.json'))
+          print('control_init_s',a['init_s'],'challenger_init_s',b['init_s'])
+          extra_depth=same=changed=0
+          ratios=[]
+          for x,y in zip(a['rows'],b['rows']):
+              assert x['id']==y['id']
+              dd=y['depth']-x['depth']
+              extra_depth += dd>0
+              same += y['move']==x['move']
+              changed += y['move']!=x['move']
+              if x['nodes']>0: ratios.append(y['nodes']/x['nodes'])
+              print(x['id'], 'prior',y['prior'],'move',x['move'],'->',y['move'],'depth',x['depth'],'->',y['depth'],'nodes',x['nodes'],'->',y['nodes'],'score',x['score'],'->',y['score'])
+          print('SUMMARY extra_depth',extra_depth,'same_moves',same,'changed_moves',changed,'mean_node_ratio',sum(ratios)/len(ratios))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v18-punch133-broadprior-ab-${{ github.sha }}
+          path: artifacts
+          retention-days: 5
