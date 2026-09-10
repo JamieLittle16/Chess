@@ -1,0 +1,103 @@
+name: V18 PUNCH133 SF2000 loss mining
+
+on:
+  push:
+    branches: [analysis/v18-sf2000-loss-mining-20260910]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  mine:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install chess==1.11.2
+      - name: Download completed SF2000 match artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: punch133-elo2000-tc-30+0.5
+          path: /tmp/match
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34522337486
+      - name: Download Stockfish 19
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://github.com/official-stockfish/Stockfish/releases/latest/download/stockfish-linux-x86-64-universal.tar.gz' \
+            -o /tmp/sf.tar.gz
+          mkdir -p /tmp/sf
+          tar -xzf /tmp/sf.tar.gz -C /tmp/sf
+          SF="$(find /tmp/sf -type f -name 'stockfish*' -perm /111 | head -n1)"
+          cp "$SF" /tmp/stockfish19 && chmod +x /tmp/stockfish19
+      - name: Locate first serious PUNCH errors
+        run: |
+          set -euo pipefail
+          mkdir -p analysis-results/v18-sf2000-loss-mining
+          python - <<'PY' | tee analysis-results/v18-sf2000-loss-mining/report.txt
+          import glob, chess, chess.pgn, chess.engine
+
+          pgn_path = glob.glob('/tmp/match/**/games.pgn', recursive=True)[0]
+          eng = chess.engine.SimpleEngine.popen_uci('/tmp/stockfish19')
+          if 'Threads' in eng.options: eng.configure({'Threads': 1})
+          if 'Hash' in eng.options: eng.configure({'Hash': 128})
+          def clear():
+              if 'Clear Hash' in eng.options: eng.configure({'Clear Hash': None})
+          def cp(score, pov):
+              v = score.pov(pov).score(mate_score=100000)
+              return int(v if v is not None else 0)
+          rows=[]
+          with open(pgn_path, encoding='utf-8') as f:
+              gi=0
+              while True:
+                  game=chess.pgn.read_game(f)
+                  if game is None: break
+                  gi += 1
+                  lg_white = game.headers.get('White') == 'Little-Gambit-V18'
+                  result=game.headers.get('Result')
+                  lost = (lg_white and result=='0-1') or ((not lg_white) and result=='1-0')
+                  if not lost: continue
+                  board=game.board()
+                  print(f'GAME {gi} LG={"white" if lg_white else "black"} FEN={game.headers.get("FEN")}')
+                  for ply, move in enumerate(game.mainline_moves(), start=board.ply()+1):
+                      mover=board.turn
+                      is_lg = (mover == chess.WHITE) == lg_white
+                      if is_lg:
+                          clear(); best=eng.analyse(board,chess.engine.Limit(nodes=50000))
+                          best_move=best['pv'][0]; best_cp=cp(best['score'], mover)
+                          clear(); forced=eng.analyse(board,chess.engine.Limit(nodes=50000),root_moves=[move])
+                          forced_cp=cp(forced['score'], mover)
+                          loss=max(0,best_cp-forced_cp)
+                          rows.append((loss,gi,board.fullmove_number,'W' if mover else 'B',move.uci(),best_move.uci(),best_cp,forced_cp,board.fen()))
+                          if loss >= 35:
+                              print(f'  ply={ply:3d} move={move.uci():5s} best={best_move.uci():5s} bestcp={best_cp:+5d} forced={forced_cp:+5d} LOSS={loss:3d}')
+                      board.push(move)
+          print('\nTOP SHALLOW ERRORS')
+          for r in sorted(rows, reverse=True)[:12]:
+              print(r[:-1])
+
+          print('\nDEEP RECHECK TOP 10')
+          for _,gi,fm,col,m,bm,_,_,fen in sorted(rows, reverse=True)[:10]:
+              board=chess.Board(fen); mover=board.turn; move=chess.Move.from_uci(m)
+              vals=[]
+              for nodes in (200000, 500000):
+                  clear(); best=eng.analyse(board,chess.engine.Limit(nodes=nodes))
+                  bestmove=best['pv'][0]; bcp=cp(best['score'],mover)
+                  clear(); forced=eng.analyse(board,chess.engine.Limit(nodes=nodes),root_moves=[move])
+                  fcp=cp(forced['score'],mover)
+                  vals.append((nodes,bestmove.uci(),bcp,fcp,max(0,bcp-fcp)))
+              print(f'game={gi} move={fm}{col} played={m} {vals}')
+          eng.quit()
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v18-sf2000-loss-mining-${{ github.sha }}
+          path: analysis-results/v18-sf2000-loss-mining
+          retention-days: 5
