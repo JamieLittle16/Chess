@@ -1,0 +1,2 @@
+Full SF19-certified overlay: 7215 entries, 115440 bytes, SHA256 99815ab800eaaea8e231cde9736202b3ccf6cd848d892e1d0508e310889c785f.
+GM-miss-only subset: 3962 entries, 63392 bytes, zero Polyglot-key overlap with gm2001.bin.
