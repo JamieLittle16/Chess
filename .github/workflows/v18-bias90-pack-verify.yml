@@ -1,0 +1,42 @@
+name: V18 BIAS90 package verification
+
+on:
+  push:
+    branches: [analysis/v18-bias90-verify-pack-20260910]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Reconstruct exact BIAS90 candidate and verify structure
+        run: |
+          set -euo pipefail
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          rm -rf /tmp/cand && mkdir /tmp/cand && unzip -q /tmp/p150.zip -d /tmp/cand
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/cand/agent.py
+          sed -i 's/RESIDUAL_BIAS = 61/RESIDUAL_BIAS = 90/' /tmp/cand/experiments/numba_search.py
+          curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/cand/v18_gm2001.bin
+          python -m py_compile /tmp/cand/agent.py /tmp/cand/experiments/*.py
+          grep -n 'RESIDUAL_BIAS\|_BOOK_POST_SEARCH_BOOST_MULT' /tmp/cand/experiments/numba_search.py /tmp/cand/agent.py | head
+          (cd /tmp/cand && zip -qr /tmp/bias90-ci.zip .)
+          unzip -t /tmp/bias90-ci.zip | tail -2
+          sha256sum /tmp/cand/agent.py /tmp/cand/experiments/numba_search.py /tmp/cand/experiments/v14_student_h64.npz /tmp/cand/experiments/v13_residual.i16 /tmp/cand/v14_kpk.u8 /tmp/cand/v18_gm2001.bin
+      - name: Cold import and smoke move
+        run: |
+          set -euo pipefail
+          cd /tmp/cand
+          /usr/bin/time -v python - <<'PY'
+          import agent
+          move=agent.get_move('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',120000)
+          print('SMOKE_MOVE',move)
+          print('READY')
+          PY
