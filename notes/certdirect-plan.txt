@@ -1,0 +1,4 @@
+Candidate: exact PUNCH133 + RESIDUAL_BIAS 90 + GM-miss-only 2026 broadcast SF19-certified DIRECT overlay.
+Overlay source full: 7215 positions certified by SF19 <=8cp; filtered to 3962 Polyglot keys absent from gm2001.bin.
+Policy: existing GM high-confidence DIRECT retains precedence; overlay only applies if GM DIRECT does not fire, ply<=18, legal move only.
+Qualification: fixed-node parity on non-hit roots; direct-hit legality; timed A/B vs BIAS90 only if structural gate passes.
