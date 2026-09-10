@@ -1,0 +1,108 @@
+name: V18 certified recent book direct
+on:
+  push:
+    branches: [analysis/v18-certified-book-direct-20260910]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ci/v18-stockfish-calibration
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Reconstruct PUNCH133 and fetch certified book artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          for d in /tmp/base /tmp/cand; do
+            rm -rf "$d"; mkdir "$d"; unzip -q /tmp/p150.zip -d "$d"
+            sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' "$d/agent.py"
+            curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o "$d/v18_gm2001.bin"
+          done
+          gh api -H 'Accept: application/vnd.github+json' /repos/JamieLittle16/Chess/actions/artifacts/10171021582/zip > /tmp/cert.zip
+          rm -rf /tmp/cert && mkdir /tmp/cert && unzip -q /tmp/cert.zip -d /tmp/cert
+          cp /tmp/cert/broadcast-sf19-certified.bin /tmp/cand/v18_broadcast2026_sf19.bin
+          test "$(sha256sum /tmp/cand/v18_broadcast2026_sf19.bin | cut -d' ' -f1)" = '99815ab800eaaea8e231cde9736202b3ccf6cd848d892e1d0508e310889c785f'
+      - name: Add GM-miss-only certified direct layer
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/cand/agent.py'); t=p.read_text()
+          anchor='_BOOK_READER = chess.polyglot.open_reader(_BOOK_PATH)\n'
+          insert='''_BOOK_READER = chess.polyglot.open_reader(_BOOK_PATH)\n_CERT_BOOK_PATH = Path(__file__).with_name("v18_broadcast2026_sf19.bin")\nif not _CERT_BOOK_PATH.is_file():\n    raise ValueError("missing V18 SF19-certified recent opening book")\n_CERT_BOOK_READER = chess.polyglot.open_reader(_CERT_BOOK_PATH)\n_CERT_BOOK_DIRECT_MAX_PLY: Final = 18\n'''
+          assert t.count(anchor)==1; t=t.replace(anchor,insert,1)
+          marker='def _internal_move_from_chess(board: chess.Board, move: chess.Move) -> int:\n'
+          helper='''def _certified_recent_book_move(board: chess.Board) -> chess.Move | None:\n    \"\"\"Return the single SF19-certified recent move, only for GM-book misses.\n\n    The offline certification admitted only standard-chess positions whose broadcast-consensus\n    move lost at most 8 cp to Stockfish 19 at the deep certification pass.  Runtime still checks\n    legality and degrades to normal search on any malformed entry.\n    \"\"\"\n    if board.ply() > _CERT_BOOK_DIRECT_MAX_PLY:\n        return None\n    try:\n        for entry in _CERT_BOOK_READER.find_all(board):\n            move = entry.move\n            if move in board.legal_moves and int(entry.weight) > 0:\n                return move\n    except (IndexError, ValueError):\n        return None\n    return None\n\n\n'''
+          assert marker in t; t=t.replace(marker,helper+marker,1)
+          old='''    direct_book_move = _high_confidence_book_move(board)\n    if direct_book_move is not None:\n'''
+          new='''    direct_book_move = _high_confidence_book_move(board)\n    if direct_book_move is None and _book_prior(board) is None:\n        direct_book_move = _certified_recent_book_move(board)\n    if direct_book_move is not None:\n'''
+          assert t.count(old)==1; t=t.replace(old,new,1)
+          p.write_text(t)
+          PY
+          python -m py_compile /tmp/cand/agent.py
+      - name: Coverage on frozen 100-UHO suite
+        run: |
+          env PYTHONPATH=/tmp/cand python - <<'PY'
+          from pathlib import Path
+          import chess, agent
+          rows=[x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')][:100]
+          gm=cert_new=gm_direct=0; hits=[]
+          for i,fen in enumerate(rows):
+              b=chess.Board(fen)
+              prior=agent._book_prior(b); direct=agent._high_confidence_book_move(b)
+              if prior is not None: gm += 1
+              if direct is not None: gm_direct += 1
+              c=agent._certified_recent_book_move(b)
+              if prior is None and c is not None:
+                  cert_new += 1; hits.append((i,b.fen(),c.uci()))
+          print('UHO100 GM_HIT',gm,'GM_DIRECT',gm_direct,'CERT_NEW_DIRECT',cert_new)
+          for x in hits: print('CERT_HIT',*x)
+          PY
+      - name: Deep SF19 audit of every new UHO certified hit
+        run: |
+          curl --fail --location --retry 5 -sS 'https://github.com/official-stockfish/Stockfish/releases/latest/download/stockfish-linux-x86-64-universal.tar.gz' -o /tmp/sf.tar.gz
+          mkdir /tmp/sf && tar -xzf /tmp/sf.tar.gz -C /tmp/sf
+          SF="$(find /tmp/sf -type f -name 'stockfish*' -perm /111 | head -n1)"; cp "$SF" /tmp/sf19; chmod +x /tmp/sf19
+          env PYTHONPATH=/tmp/cand python - <<'PY'
+          from pathlib import Path
+          import chess,chess.engine,agent,statistics
+          rows=[x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')][:100]
+          sf=chess.engine.SimpleEngine.popen_uci('/tmp/sf19');sf.configure({'Threads':1,'Hash':64})
+          losses=[]
+          def cp(s,p):
+              v=s.pov(p).score(mate_score=100000);return int(v if v is not None else 0)
+          for i,fen in enumerate(rows):
+              b=chess.Board(fen)
+              if agent._book_prior(b) is not None: continue
+              mv=agent._certified_recent_book_move(b)
+              if mv is None: continue
+              if 'Clear Hash' in sf.options: sf.configure({'Clear Hash':None})
+              best=sf.analyse(b,chess.engine.Limit(nodes=250000));bc=cp(best['score'],b.turn)
+              if 'Clear Hash' in sf.options: sf.configure({'Clear Hash':None})
+              got=sf.analyse(b,chess.engine.Limit(nodes=250000),root_moves=[mv]);mc=cp(got['score'],b.turn)
+              loss=max(0,bc-mc);losses.append(loss)
+              print('DEEP',i,mv.uci(),'best',best['pv'][0].uci(),'loss',loss)
+          sf.quit()
+          print('DEEP_SUMMARY n',len(losses),'mean',statistics.mean(losses) if losses else 0,'median',statistics.median(losses) if losses else 0,'max',max(losses) if losses else 0)
+          PY
+      - name: Fresh startup and package candidate
+        run: |
+          /usr/bin/time -f 'BASE_WALL=%e BASE_RSS=%M' env PYTHONPATH=/tmp/base python -c 'import agent; print(agent._INIT_COMPILE_ELAPSED_MS,agent._INIT_READY_DEPTH,agent._INIT_READY_NODES)'
+          /usr/bin/time -f 'CAND_WALL=%e CAND_RSS=%M' env PYTHONPATH=/tmp/cand python -c 'import agent; print(agent._INIT_COMPILE_ELAPSED_MS,agent._INIT_READY_DEPTH,agent._INIT_READY_NODES)'
+          cd /tmp/cand && zip -qr /tmp/Little-Gambit-V18-PUNCH133-CERT2026-DIRECT-CANDIDATE.zip .
+          unzip -t /tmp/Little-Gambit-V18-PUNCH133-CERT2026-DIRECT-CANDIDATE.zip
+          sha256sum /tmp/Little-Gambit-V18-PUNCH133-CERT2026-DIRECT-CANDIDATE.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v18-punch133-cert2026-direct-${{ github.sha }}
+          path: /tmp/Little-Gambit-V18-PUNCH133-CERT2026-DIRECT-CANDIDATE.zip
+          retention-days: 7
