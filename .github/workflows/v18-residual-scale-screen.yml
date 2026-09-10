@@ -1,0 +1,114 @@
+name: V18 residual scale screen
+on:
+  push:
+    branches: [analysis/v18-residual-scale-screen-20260910]
+permissions:
+  contents: read
+jobs:
+  screen:
+    strategy:
+      fail-fast: false
+      matrix:
+        divisor: [6, 5, 4, 3]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ci/v18-stockfish-calibration
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Reconstruct exact PUNCH133 and patch residual scale
+        env:
+          DIVISOR: ${{ matrix.divisor }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/engine && mkdir /tmp/engine
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          unzip -q /tmp/p150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+          curl --fail --location --retry 5 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/engine/v18_gm2001.bin
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path('/tmp/engine/experiments/numba_search.py')
+          text=p.read_text()
+          old='correction = correction // 6'
+          assert text.count(old)==2, text.count(old)
+          div=int(os.environ['DIVISOR'])
+          if div != 6:
+              text=text.replace(old, f'correction = correction // {div}')
+              p.write_text(text)
+          print('residual_divisor',div,'patched_occurrences',2 if div != 6 else 0)
+          PY
+          grep -n 'correction = correction //' /tmp/engine/experiments/numba_search.py
+      - name: Decompose critical child evaluations
+        env:
+          NUMBA_DISABLE_JIT: '1'
+          DIVISOR: ${{ matrix.divisor }}
+          PYTHONPATH: /tmp/engine
+        run: |
+          python - <<'PY'
+          import chess, numpy as np, os
+          from experiments.numba_core import encode_position
+          import experiments.numba_search as s
+          from experiments.v14_student_single_runtime import infer_absolute768_student_cp, trunc_div_scalar
+          WHITE=1
+          cases=[
+            ('castle_safe','r2q1rk1/1b1n1pbp/pp1ppnp1/8/PPPNPP2/2NBB2P/2Q3P1/R3K2R w KQ - 1 14','e1g1',WHITE),
+            ('castle_bad','r2q1rk1/1b1n1pbp/pp1ppnp1/8/PPPNPP2/2NBB2P/2Q3P1/R3K2R w KQ - 1 14','e1c1',WHITE),
+            ('dxe4_bad','r1bqk1nr/3n1pbp/3pp1p1/1B1p4/4P3/2N1B3/PP1QNPPP/R3K2R b KQkq - 0 11','d5e4',-WHITE),
+            ('ne7_alt','r1bqk1nr/3n1pbp/3pp1p1/1B1p4/4P3/2N1B3/PP1QNPPP/R3K2R b KQkq - 0 11','g8e7',-WHITE),
+            ('nf6_sf','r1bqk1nr/3n1pbp/3pp1p1/1B1p4/4P3/2N1B3/PP1QNPPP/R3K2R b KQkq - 0 11','g8f6',-WHITE),
+            ('a3a2_bad','r5k1/2q1bppp/p1p5/3p1P2/P1P3n1/QB1n4/1P1BNPPP/R4K1R w - - 0 20','a3a2',WHITE),
+            ('c4c5_sf','r5k1/2q1bppp/p1p5/3p1P2/P1P3n1/QB1n4/1P1BNPPP/R4K1R w - - 0 20','c4c5',WHITE),
+          ]
+          div=int(os.environ['DIVISOR'])
+          print('DIVISOR',div)
+          for name,fen,uci,pov in cases:
+              b=chess.Board(fen); m=chess.Move.from_uci(uci); assert m in b.legal_moves
+              b.push(m); enc=encode_position(b)
+              st=np.empty(s.EVAL_WIDTH,dtype=np.int32); s._build_eval_state_into(enc.board,st)
+              classical=int(s._evaluate_state_classical(pov,st))
+              raw=(int(st[s.EVAL_RESIDUAL_WHITE])-int(st[s.EVAL_RESIDUAL_BLACK])) if pov==WHITE else (int(st[s.EVAL_RESIDUAL_BLACK])-int(st[s.EVAL_RESIDUAL_WHITE]))
+              biased=raw+s.RESIDUAL_BIAS
+              clamped=max(-s.RESIDUAL_CLAMP,min(s.RESIDUAL_CLAMP,biased)) if s.RESIDUAL_CLAMP>0 else biased
+              residual=clamped//div
+              hraw=int(infer_absolute768_student_cp(st[s.STUDENT_OFFSET:s.EVAL_WIDTH],s.STUDENT_OUTPUT_WEIGHTS,s.STUDENT_OUTPUT_BIAS))
+              if pov != WHITE: hraw=-hraw
+              hscaled=int(trunc_div_scalar(hraw*s.STUDENT_SCALE_NUM,s.STUDENT_SCALE_DEN))
+              total=classical+residual+hscaled
+              print(f'{name:12s} move={uci} classical={classical:+5d} rawR={raw:+5d} biased={biased:+5d} clamp={clamped:+4d} R/{div}={residual:+4d} Hraw={hraw:+5d} H/12={hscaled:+4d} TOTAL={total:+5d}')
+          PY
+      - name: Fixed-node critical screen
+        env:
+          DIVISOR: ${{ matrix.divisor }}
+          PYTHONPATH: /tmp/engine
+        run: |
+          python - <<'PY'
+          import time
+          t0=time.perf_counter()
+          import chess, numpy as np
+          from experiments.numba_core import encode_position, move_to_uci
+          from experiments.numba_search import iterative_search_stateful
+          print('IMPORT_COMPILE_S',round(time.perf_counter()-t0,3),flush=True)
+          cases=[
+            ('castle','r2q1rk1/1b1n1pbp/pp1ppnp1/8/PPPNPP2/2NBB2P/2Q3P1/R3K2R w KQ - 1 14'),
+            ('dxe4','r1bqk1nr/3n1pbp/3pp1p1/1B1p4/4P3/2N1B3/PP1QNPPP/R3K2R b KQkq - 0 11'),
+            ('Qb3','rnb1kb1r/2q2ppp/p1pp1n2/1p2p3/2PPP3/2NBB3/PP2NPPP/R2QK2R w KQkq - 0 8'),
+            ('a4','rnb1k2r/2q1bppp/p1pp1n2/1p2p3/2PPP3/1QNBB3/PP2NPPP/R3K2R w KQkq - 2 9'),
+            ('a3a2','r5k1/2q1bppp/p1p5/3p1P2/P1P3n1/QB1n4/1P1BNPPP/R4K1R w - - 0 20'),
+          ]
+          budgets=(200_000,1_000_000,4_000_000)
+          h=np.empty(0,dtype=np.uint64)
+          for name,fen in cases:
+              b=chess.Board(fen); enc=encode_position(b)
+              print('\nPOSITION',name,flush=True)
+              for n in budgets:
+                  board=enc.board.copy(); t=time.perf_counter()
+                  m,sc,d,nodes=iterative_search_stateful(board,enc.side,enc.castling,enc.ep_square,b.halfmove_clock,h,0,n)
+                  dt=time.perf_counter()-t
+                  print(f'nodes_cap={n:8d} move={move_to_uci(m):5s} score={sc:+6d} depth={d:2d} nodes={nodes:8d} sec={dt:.3f} nps={nodes/max(dt,1e-9):.0f}',flush=True)
+          PY
