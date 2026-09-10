@@ -1,0 +1,103 @@
+name: V18 BIAS90 vs Stockfish 2200 at 120+0.5
+
+on:
+  push:
+    branches: [analysis/v18-bias90-sf2200-prodclock-20260910]
+
+permissions:
+  contents: read
+
+jobs:
+  match:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Reconstruct exact BIAS90
+        run: |
+          set -euo pipefail
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          rm -rf /tmp/engine; mkdir /tmp/engine; unzip -q /tmp/p150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+          sed -i 's/RESIDUAL_BIAS = 61/RESIDUAL_BIAS = 90/' /tmp/engine/experiments/numba_search.py
+          curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/engine/v18_gm2001.bin
+          echo '77bccc20918239346b429535697b4566114a6be6cc97836ffbafeb779790f9c3  /tmp/engine/experiments/numba_search.py' | sha256sum -c
+      - name: Download Stockfish 19
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 -sS 'https://github.com/official-stockfish/Stockfish/releases/latest/download/stockfish-linux-x86-64-universal.tar.gz' -o /tmp/sf.tar.gz
+          mkdir -p /tmp/sf && tar -xzf /tmp/sf.tar.gz -C /tmp/sf
+          SF="$(find /tmp/sf -type f -name 'stockfish*' -perm /111 | head -n1)"
+          cp "$SF" /tmp/sf19; chmod +x /tmp/sf19
+      - name: Eight color-swapped games at 120+0.5
+        run: |
+          cat >/tmp/worker.py <<'PY'
+          import sys,json,contextlib,numpy as np
+          with contextlib.redirect_stdout(sys.stderr): import agent
+          def reset():
+            agent._GAME_KEYS.clear();agent._PENDING_AFTER_OUR_MOVE=None;agent._LAST_CALL_TIME_LEFT_MS=None;agent._LAST_GET_MOVE_ELAPSED_MS=None
+            agent._CLOCK_OVERHEAD_EMA_MS=40.0;agent._CLOCK_FEEDBACK_SAMPLES=0
+            if hasattr(agent,'_BOOK_POST_SEARCH_BOOSTS'):agent._BOOK_POST_SEARCH_BOOSTS=0
+            agent._HASH_KEYS.fill(np.uint64(0));agent._HASH_MOVES.fill(np.int32(-1));agent._TT_TABLE.fill(np.uint64(0));agent._QUIET_HISTORY.fill(np.int16(0))
+          for line in sys.stdin:
+            try:
+              q=json.loads(line);ans={'ok':True} if q['op']=='reset' and not reset() else {'move':agent.get_move(q['fen'],int(q['ms']))}
+            except Exception as e:ans={'error':type(e).__name__+': '+str(e)}
+            print(json.dumps(ans),flush=True)
+          PY
+          cat >/tmp/match.py <<'PY'
+          import subprocess,sys,json,time,chess,chess.engine,os,math
+          class W:
+            def __init__(self,d): self.p=subprocess.Popen([sys.executable,'/tmp/worker.py'],cwd=d,stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env={**os.environ,'PYTHONPATH':d})
+            def ask(self,q):
+              self.p.stdin.write(json.dumps(q)+'\n');self.p.stdin.flush();r=json.loads(self.p.stdout.readline())
+              if 'error' in r: raise RuntimeError(r['error'])
+              return r
+            def reset(self): self.ask({'op':'reset'})
+            def close(self): self.p.terminate();self.p.wait(timeout=5)
+          starts=[
+            ('Taimanov','r1bqkbnr/pp1p1ppp/2n1p3/8/3NP3/P7/1PP2PPP/RNBQKB1R b KQkq - 0 5'),
+            ('Semi-Slav','r1b1k2r/pp1nqppp/2pbpn2/3p4/P1PP4/2N1PN2/1P2BPPP/R1BQ1RK1 b kq - 4 8'),
+            ('Najdorf','rnbqk2r/1p2bppp/p2ppn2/8/4PPP1/1NN5/PPP4P/R1BQKB1R b KQkq - 0 8'),
+            ('French Tarrasch','rnbqkbnr/pp3ppp/8/2pp4/3P4/7P/PPPN1PP1/R1BQKBNR b KQkq - 0 5'),
+          ]
+          bot=W('/tmp/engine');sf=chess.engine.SimpleEngine.popen_uci('/tmp/sf19')
+          sf.configure({'Threads':1,'Hash':64,'UCI_LimitStrength':True,'UCI_Elo':2200})
+          BASE=120.0;INC=.5;pts=[];fails=[]
+          try:
+            for oi,(name,fen) in enumerate(starts):
+              for leg in range(2):
+                bot.reset();sf.configure({'Clear Hash':None}) if 'Clear Hash' in sf.options else None
+                b=chess.Board(fen); bot_white=(leg==0); clocks={'bot':BASE,'sf':BASE};failure=None
+                for ply in range(300):
+                  if b.outcome(claim_draw=True): break
+                  bot_turn=(b.turn==chess.WHITE)==bot_white
+                  if bot_turn:
+                    st=time.perf_counter();r=bot.ask({'op':'move','fen':b.fen(),'ms':max(1,round(clocks['bot']*1000))});elapsed=time.perf_counter()-st;clocks['bot']-=elapsed
+                    if clocks['bot']<0: failure='bot flag';break
+                    m=chess.Move.from_uci(r['move'])
+                    if m not in b.legal_moves: failure='bot illegal '+r['move'];break
+                    b.push(m);clocks['bot']+=INC
+                  else:
+                    # Give Stockfish the real two-sided clocks so its own limited-strength time management is normal.
+                    limit=chess.engine.Limit(
+                      white_clock=(clocks['bot'] if bot_white else clocks['sf']),
+                      black_clock=(clocks['sf'] if bot_white else clocks['bot']),
+                      white_inc=INC,black_inc=INC)
+                    st=time.perf_counter();res=sf.play(b,limit);elapsed=time.perf_counter()-st;clocks['sf']-=elapsed
+                    if clocks['sf']<0: failure='sf flag';break
+                    if res.move not in b.legal_moves: failure='sf illegal';break
+                    b.push(res.move);clocks['sf']+=INC
+                out=b.outcome(claim_draw=True)
+                point=(0. if failure=='bot flag' or (failure and failure.startswith('bot illegal')) else 1.) if failure else (.5 if out is None or out.winner is None else (1. if out.winner==bot_white else 0.))
+                pts.append(point)
+                if failure:fails.append((name,leg,failure))
+                print('GAME',len(pts),'/8',name,'leg',leg,'BOTPOINT',point,'TOTAL',sum(pts),'CLOCKS',clocks,'PLY',b.ply(),'FAIL',failure,flush=True)
+          finally:
+            bot.close();sf.quit()
+          p=sum(pts)/len(pts);q=max(1e-6,min(1-1e-6,p));offset=400*math.log10(q/(1-q));print('FINAL points',sum(pts),'games',len(pts),'score',p,'VS2200_OFFSET',offset,'IMPLIED',2200+offset,'FAILURES',fails,flush=True)
+          PY
+          python /tmp/match.py
