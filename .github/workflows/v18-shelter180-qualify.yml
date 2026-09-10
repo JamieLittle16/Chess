@@ -1,0 +1,186 @@
+name: V18 SHELTER180 qualification
+on:
+  push:
+    branches: [analysis/v18-shelter180-qualify-20260910]
+permissions:
+  contents: read
+jobs:
+  fixed-quality:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ci/v18-stockfish-calibration
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Reconstruct baseline and candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          for d in /tmp/base /tmp/cand; do
+            rm -rf "$d"; mkdir "$d"; unzip -q /tmp/p150.zip -d "$d"
+            sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' "$d/agent.py"
+            curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o "$d/v18_gm2001.bin"
+          done
+          python - <<'PY'
+          import numpy as np, hashlib
+          p='/tmp/cand/experiments/v13_residual.i16'; w=np.fromfile(p,dtype=np.int16).astype(np.int32)
+          coeff={(1,0):100,(1,1):85,(1,2):25,(2,0):55,(2,1):45,(2,2):15,(3,0):10,(3,1):8}
+          for kr in (0,):
+            for kf in (1,2):
+              bucket=kr*4+kf
+              for pr in range(8):
+                dr=pr-kr
+                for pf in range(8):
+                  c=coeff.get((dr,abs(pf-kf)),0)
+                  if c: w[bucket*768 + pr*8 + pf] += (180*c+50)//100
+          assert w.min()>=-32768 and w.max()<=32767
+          w.astype(np.int16).tofile(p)
+          print('candidate residual sha',hashlib.sha256(open(p,'rb').read()).hexdigest())
+          PY
+          cmp /tmp/base/experiments/numba_search.py /tmp/cand/experiments/numba_search.py
+          cmp /tmp/base/agent.py /tmp/cand/agent.py
+      - name: Build test position set
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          src=[x.strip() for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')]
+          crit=[
+          'r2q1rk1/1b1n1pbp/pp1ppnp1/8/PPPNPP2/2NBB2P/2Q3P1/R3K2R w KQ - 1 14',
+          'r1bqk1nr/3n1pbp/3pp1p1/1B1p4/4P3/2N1B3/PP1QNPPP/R3K2R b KQkq - 0 11',
+          'rnb1kb1r/2q2ppp/p1pp1n2/1p2p3/2PPP3/2NBB3/PP2NPPP/R2QK2R w KQkq - 0 8',
+          'rnb1k2r/2q1bppp/p1pp1n2/1p2p3/2PPP3/1QNBB3/PP2NPPP/R3K2R w KQkq - 2 9',
+          'r5k1/2q1bppp/p1p5/3p1P2/P1P3n1/QB1n4/1P1BNPPP/R4K1R w - - 0 20']
+          Path('/tmp/positions.txt').write_text('\n'.join(src[:50]+crit)+'\n')
+          print('positions',len(src[:50]+crit))
+          PY
+      - name: Fixed-node baseline and candidate
+        run: |
+          cat >/tmp/run_fixed.py <<'PY'
+          import sys,json,time,chess,numpy as np
+          engine=sys.argv[1]; inp=sys.argv[2]; out=sys.argv[3]
+          sys.path.insert(0,engine); t=time.perf_counter(); import agent
+          from experiments.numba_core import encode_position,move_to_uci
+          from experiments.numba_search import iterative_search_stateful
+          print('INIT',engine,time.perf_counter()-t,flush=True)
+          def reset():
+            agent._GAME_KEYS.clear(); agent._PENDING_AFTER_OUR_MOVE=None
+            agent._LAST_CALL_TIME_LEFT_MS=None; agent._LAST_GET_MOVE_ELAPSED_MS=None
+            agent._CLOCK_OVERHEAD_EMA_MS=40.0; agent._CLOCK_FEEDBACK_SAMPLES=0
+            if hasattr(agent,'_BOOK_POST_SEARCH_BOOSTS'): agent._BOOK_POST_SEARCH_BOOSTS=0
+            agent._HASH_KEYS.fill(np.uint64(0)); agent._HASH_MOVES.fill(np.int32(-1))
+            agent._TT_TABLE.fill(np.uint64(0)); agent._QUIET_HISTORY.fill(np.int16(0))
+          rows=[]; h=np.empty(0,dtype=np.uint64)
+          for i,line in enumerate(open(inp)):
+            line=line.strip();
+            if not line: continue
+            b=chess.Board(line); enc=encode_position(b); reset(); t=time.perf_counter()
+            m,s,d,n=iterative_search_stateful(enc.board.copy(),enc.side,enc.castling,enc.ep_square,b.halfmove_clock,h,0,500000)
+            rows.append({'i':i,'fen':b.fen(),'move':move_to_uci(m),'score':int(s),'depth':int(d),'nodes':int(n),'sec':time.perf_counter()-t})
+          open(out,'w').write('\n'.join(json.dumps(r) for r in rows)+'\n')
+          print('DONE',out,'n',len(rows),'secs',sum(r['sec'] for r in rows),flush=True)
+          PY
+          python /tmp/run_fixed.py /tmp/base /tmp/positions.txt /tmp/base.jsonl
+          python /tmp/run_fixed.py /tmp/cand /tmp/positions.txt /tmp/cand.jsonl
+      - name: Download Stockfish 19 and compare changed roots
+        run: |
+          curl --fail --location --retry 5 -sS 'https://github.com/official-stockfish/Stockfish/releases/latest/download/stockfish-linux-x86-64-universal.tar.gz' -o /tmp/sf.tar.gz
+          mkdir /tmp/sf; tar -xzf /tmp/sf.tar.gz -C /tmp/sf
+          SF="$(find /tmp/sf -type f -name 'stockfish*' -perm /111 | head -n1)"; cp "$SF" /tmp/sf19; chmod +x /tmp/sf19
+          python - <<'PY'
+          import json,chess,chess.engine,statistics
+          A=[json.loads(x) for x in open('/tmp/base.jsonl')]; B=[json.loads(x) for x in open('/tmp/cand.jsonl')]
+          sf=chess.engine.SimpleEngine.popen_uci('/tmp/sf19'); sf.configure({'Threads':1,'Hash':64})
+          def clear():
+            if 'Clear Hash' in sf.options: sf.configure({'Clear Hash':None})
+          def cp(sc,pov):
+            v=sc.pov(pov).score(mate_score=100000); return int(v if v is not None else 0)
+          diffs=[]; improved=worse=tied=0; delta_sum=0
+          for a,b in zip(A,B):
+            if a['move']==b['move']: continue
+            board=chess.Board(a['fen']); pov=board.turn
+            clear(); best=sf.analyse(board,chess.engine.Limit(nodes=100000)); bestcp=cp(best['score'],pov)
+            vals={}
+            for tag,row in [('base',a),('cand',b)]:
+              mv=chess.Move.from_uci(row['move']); clear(); q=sf.analyse(board,chess.engine.Limit(nodes=100000),root_moves=[mv]); vals[tag]=cp(q['score'],pov)
+            lb=max(0,bestcp-vals['base']); lc=max(0,bestcp-vals['cand']); delta=lb-lc; delta_sum+=delta
+            if delta>5: improved+=1
+            elif delta<-5: worse+=1
+            else: tied+=1
+            diffs.append((a['i'],a['move'],b['move'],best['pv'][0].uci(),bestcp,lb,lc,delta))
+          sf.quit()
+          print('ROOT_DIFFERENCES',len(diffs),'improved',improved,'worse',worse,'near_tied',tied,'NET_CP_SAVED',delta_sum)
+          for x in diffs: print('DIFF',x)
+          print('BASE_MEAN_SEARCH_S',statistics.mean(x['sec'] for x in A),'CAND_MEAN_SEARCH_S',statistics.mean(x['sec'] for x in B))
+          PY
+  sf2000:
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [baseline, shelter180]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ci/v18-stockfish-calibration
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Build engine
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/engine /tmp/out; mkdir /tmp/engine /tmp/out
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip; unzip -q /tmp/p150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+          curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/engine/v18_gm2001.bin
+          if [ "$VARIANT" = shelter180 ]; then
+            python - <<'PY'
+          import numpy as np
+          p='/tmp/engine/experiments/v13_residual.i16'; w=np.fromfile(p,dtype=np.int16).astype(np.int32)
+          coeff={(1,0):100,(1,1):85,(1,2):25,(2,0):55,(2,1):45,(2,2):15,(3,0):10,(3,1):8}
+          for kf in (1,2):
+            bucket=kf
+            for pr in range(8):
+              for pf in range(8):
+                c=coeff.get((pr,abs(pf-kf)),0)
+                if c: w[bucket*768+pr*8+pf]+=(180*c+50)//100
+          w.astype(np.int16).tofile(p)
+          PY
+          fi
+          sha256sum /tmp/engine/experiments/v13_residual.i16
+      - name: Robust reset in calibration harness
+        run: |
+          cp scripts/v18_stockfish_calibration.py /tmp/cal.py
+          python - <<'PY'
+          p='/tmp/cal.py'; t=open(p).read(); needle='    agent._CLOCK_FEEDBACK_SAMPLES = 0\n'; assert needle in t
+          t=t.replace(needle,needle+"    if hasattr(agent, '_BOOK_POST_SEARCH_BOOSTS'):\n        agent._BOOK_POST_SEARCH_BOOSTS = 0\n")
+          open(p,'w').write(t)
+          PY
+      - name: Download Stockfish 19
+        run: |
+          curl --fail --location --retry 5 -sS 'https://github.com/official-stockfish/Stockfish/releases/latest/download/stockfish-linux-x86-64-universal.tar.gz' -o /tmp/sf.tar.gz
+          mkdir /tmp/sf; tar -xzf /tmp/sf.tar.gz -C /tmp/sf
+          SF="$(find /tmp/sf -type f -name 'stockfish*' -perm /111 | head -n1)"; cp "$SF" /tmp/sf19; chmod +x /tmp/sf19
+      - name: Same-seed SF2000 match 30+0.5
+        run: |
+          python /tmp/cal.py --engine-dir /tmp/engine --stockfish /tmp/sf19 --openings match/openings/m3-uho-lichess-100-v1.epd --elo 2000 --games 8 --tc '30+0.5' --seed 2000305 --max-plies 300 --output-dir /tmp/out
+          cat /tmp/out/summary.json
+      - name: Package exact candidate
+        if: matrix.variant == 'shelter180'
+        run: |
+          (cd /tmp/engine && zip -qr /tmp/Little-Gambit-V18-PUNCH133-SHELTER180-CANDIDATE.zip .)
+          sha256sum /tmp/Little-Gambit-V18-PUNCH133-SHELTER180-CANDIDATE.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shelter180-${{ matrix.variant }}
+          path: |
+            /tmp/out
+            /tmp/Little-Gambit-V18-PUNCH133-SHELTER180-CANDIDATE.zip
+          if-no-files-found: ignore
+          retention-days: 5
