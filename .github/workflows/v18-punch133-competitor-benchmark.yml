@@ -1,0 +1,84 @@
+name: V18 PUNCH133 competitor move benchmark
+
+on:
+  push:
+    branches: [analysis/v18-punch133-competitor-benchmark-20260911]
+    paths: [.github/workflows/v18-punch133-competitor-benchmark.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ['Ryan Vincent', 'Emile Andrieu', 'Lightning Tree']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+
+      - name: Reconstruct benchmark corpus
+        run: |
+          set -euo pipefail
+          cat match/benchmarks/top-engine-recent-20260911/chunk_*.b64 | base64 -d | gzip -dc > /tmp/top-engines.pgn
+          echo 'dbac26e0f2b451eb7bf80994ca48fdd6b1abbc9f133e528d3e968f007f7aa264  /tmp/top-engines.pgn' | sha256sum -c -
+          grep -c '^\[Event ' /tmp/top-engines.pgn
+
+      - name: Reconstruct exact PUNCH133
+        run: |
+          set -euo pipefail
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          rm -rf /tmp/engine && mkdir /tmp/engine && unzip -q /tmp/p150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+          curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/engine/v18_gm2001.bin
+          test "$(sha256sum /tmp/engine/v18_gm2001.bin | cut -d' ' -f1)" = 'fb6e9f3f27bb19a5b2fdefcc441c88ddeae48db61d5f00ad83973abb9f939c87'
+          python -m py_compile /tmp/engine/agent.py /tmp/engine/experiments/*.py
+          (cd /tmp/engine && zip -qr /tmp/p133-check.zip .)
+          echo ENGINE_MEMBERS
+          find /tmp/engine -maxdepth 2 -type f -printf '%P %s\n' | sort
+
+      - name: Fetch and verify Stockfish 19
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/sf19
+          curl -L --fail --retry 3 --retry-delay 2 -o /tmp/stockfish-19.tar.gz https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  /tmp/stockfish-19.tar.gz' | sha256sum -c -
+          tar -xzf /tmp/stockfish-19.tar.gz -C /tmp/sf19
+          SF=$(find /tmp/sf19 -type f -name 'stockfish*' | head -n1); chmod +x "$SF"; echo "STOCKFISH=$SF" >> "$GITHUB_ENV"
+
+      - name: Benchmark exact PUNCH133 vs ${{ matrix.target }}
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          slug=$(printf '%s' "$TARGET" | tr '[:upper:] ' '[:lower:]-')
+          mkdir -p "/tmp/out-$slug"
+          PYTHONPATH=scripts python scripts/v18_competitor_move_benchmark.py \
+            --pgn /tmp/top-engines.pgn \
+            --engine-dir /tmp/engine \
+            --stockfish "$STOCKFISH" \
+            --target "$TARGET" \
+            --positions 24 \
+            --nodes 200000 \
+            --threads 1 \
+            --hash-mb 64 \
+            --pairwise-margin-cp 8 \
+            --seed 20260911 \
+            --output-dir "/tmp/out-$slug"
+          echo BENCHMARK_SUMMARY_BEGIN
+          cat "/tmp/out-$slug/summary.json"
+          echo BENCHMARK_SUMMARY_END
+
+      - name: Upload benchmark result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: punch133-${{ matrix.target }}-benchmark
+          path: /tmp/out-*/
+          if-no-files-found: warn
