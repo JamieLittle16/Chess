@@ -1,0 +1,59 @@
+name: V18 dxe4 search ablation
+on:
+  push:
+    branches: [analysis/v18-dxe4-ablation-20260910]
+permissions:
+  contents: read
+jobs:
+  ablate:
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [baseline, no_rfp_lqf, no_lqf, no_null, no_lmr]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ci/v18-stockfish-calibration
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Reconstruct and patch
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/engine; mkdir /tmp/engine
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip; unzip -q /tmp/p150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+          curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/engine/v18_gm2001.bin
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          v=os.environ['VARIANT']; p=Path('/tmp/engine/experiments/numba_search.py'); t=p.read_text()
+          if v=='no_rfp_lqf':
+              old='''        depth <= 3\n        and beta == alpha + 1\n'''; new='''        depth <= -1\n        and beta == alpha + 1\n'''; assert t.count(old)==1; t=t.replace(old,new,1)
+          elif v=='no_lqf':
+              old='''        futility_candidate = (\n            pruning_static_eval != INFINITY\n'''; new='''        futility_candidate = (\n            False\n            and pruning_static_eval != INFINITY\n'''; assert t.count(old)==1; t=t.replace(old,new,1)
+          elif v=='no_null':
+              old='''        depth >= NULL_MIN_DEPTH\n        and scout_node\n'''; new='''        depth >= 99\n        and scout_node\n'''; assert t.count(old)==1; t=t.replace(old,new,1)
+          elif v=='no_lmr':
+              old='''        reduction = (\n            _history_adjusted_lmr_reduction(depth, index, move_history_score)\n            if lmr_candidate else 0\n        )\n'''; new='''        reduction = 0\n'''; assert t.count(old)==1; t=t.replace(old,new,1)
+          p.write_text(t); print('VARIANT',v)
+          PY
+      - name: Search dxe4 position
+        env:
+          PYTHONPATH: /tmp/engine
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          python - <<'PY'
+          import os,time,chess,numpy as np
+          from experiments.numba_core import encode_position,move_to_uci
+          from experiments.numba_search import iterative_search_stateful
+          fen='r1bqk1nr/3n1pbp/3pp1p1/1B1p4/4P3/2N1B3/PP1QNPPP/R3K2R b KQkq - 0 11'
+          b=chess.Board(fen);e=encode_position(b);h=np.empty(0,dtype=np.uint64)
+          for n in (200000,500000,1000000,2000000,4000000):
+            t=time.perf_counter();m,s,d,nodes=iterative_search_stateful(e.board.copy(),e.side,e.castling,e.ep_square,b.halfmove_clock,h,0,n);dt=time.perf_counter()-t
+            print(os.environ['VARIANT'],n,move_to_uci(m),int(s),int(d),int(nodes),round(dt,3),flush=True)
+          PY
