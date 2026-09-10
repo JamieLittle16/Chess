@@ -1,0 +1,73 @@
+name: V18 dxe4 diagnostic
+on:
+  push:
+    branches: [analysis/v18-dxe4-diagnostic-20260910]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ci/v18-stockfish-calibration
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Reconstruct exact PUNCH133
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/engine; mkdir /tmp/engine
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          unzip -q /tmp/p150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+          curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/engine/v18_gm2001.bin
+      - name: Download Stockfish 19
+        run: |
+          curl --fail --location --retry 5 -sS 'https://github.com/official-stockfish/Stockfish/releases/latest/download/stockfish-linux-x86-64-universal.tar.gz' -o /tmp/sf.tar.gz
+          mkdir /tmp/sf; tar -xzf /tmp/sf.tar.gz -C /tmp/sf
+          SF="$(find /tmp/sf -type f -name 'stockfish*' -perm /111 | head -n1)"; cp "$SF" /tmp/sf19; chmod +x /tmp/sf19
+      - name: Trace Stockfish refutation and PUNCH responses
+        env:
+          PYTHONPATH: /tmp/engine
+        run: |
+          python - <<'PY'
+          import chess,chess.engine,numpy as np,time
+          import agent
+          from experiments.numba_core import encode_position,move_to_uci
+          import experiments.numba_search as s
+          from experiments.numba_search import iterative_search_stateful
+          from experiments.v14_student_single_runtime import infer_absolute768_student_cp,trunc_div_scalar
+          FEN='r1bqk1nr/3n1pbp/3pp1p1/1B1p4/4P3/2N1B3/PP1QNPPP/R3K2R b KQkq - 0 11'
+          sf=chess.engine.SimpleEngine.popen_uci('/tmp/sf19'); sf.configure({'Threads':1,'Hash':128,'MultiPV':5})
+          b=chess.Board(FEN); pov=b.turn
+          def cp(sc,pov):
+            v=sc.pov(pov).score(mate_score=100000); return int(v if v is not None else 0)
+          infos=sf.analyse(b,chess.engine.Limit(nodes=500000),multipv=5)
+          print('SF ROOT')
+          for x in infos: print(cp(x['score'],pov),[m.uci() for m in x['pv'][:12]])
+          bad=chess.Move.from_uci('d5e4')
+          forced=sf.analyse(b,chess.engine.Limit(nodes=1000000),root_moves=[bad])
+          pv=forced['pv']; print('SF FORCED DXE4',cp(forced['score'],pov),[m.uci() for m in pv[:20]])
+          def reset():
+            agent._HASH_KEYS.fill(np.uint64(0)); agent._HASH_MOVES.fill(np.int32(-1)); agent._TT_TABLE.fill(np.uint64(0)); agent._QUIET_HISTORY.fill(np.int16(0))
+          def static(board,rootpov):
+            enc=encode_position(board); st=np.empty(s.EVAL_WIDTH,dtype=np.int32); s._build_eval_state_into(enc.board,st)
+            c=int(s._evaluate_state_classical(rootpov,st))
+            raw=(int(st[s.EVAL_RESIDUAL_WHITE])-int(st[s.EVAL_RESIDUAL_BLACK])) if rootpov==1 else (int(st[s.EVAL_RESIDUAL_BLACK])-int(st[s.EVAL_RESIDUAL_WHITE]))
+            r=max(-s.RESIDUAL_CLAMP,min(s.RESIDUAL_CLAMP,raw+s.RESIDUAL_BIAS))//6
+            h=int(infer_absolute768_student_cp(st[s.STUDENT_OFFSET:s.EVAL_WIDTH],s.STUDENT_OUTPUT_WEIGHTS,s.STUDENT_OUTPUT_BIAS)); h=h if rootpov==1 else -h
+            hs=int(trunc_div_scalar(h*s.STUDENT_SCALE_NUM,s.STUDENT_SCALE_DEN)); return c,r,hs,c+r+hs
+          walk=chess.Board(FEN)
+          for ply,m in enumerate(pv[:14]):
+            if m not in walk.legal_moves: break
+            print('\nPLY',ply,'side',('W' if walk.turn else 'B'),'SFmove',m.uci(),'fen',walk.fen())
+            print('STATIC root-black',static(walk,-1))
+            enc=encode_position(walk); h=np.empty(0,dtype=np.uint64)
+            for n in (100000,500000):
+              reset(); t=time.perf_counter(); bm,sc,d,nodes=iterative_search_stateful(enc.board.copy(),enc.side,enc.castling,enc.ep_square,walk.halfmove_clock,h,0,n)
+              print('PUNCH',n,move_to_uci(bm),int(sc),int(d),int(nodes),round(time.perf_counter()-t,3))
+            walk.push(m)
+          sf.quit()
+          PY
