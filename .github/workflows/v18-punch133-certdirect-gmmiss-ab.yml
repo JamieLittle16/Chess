@@ -87,7 +87,7 @@ jobs:
 
       - name: Coverage and structural qualification
         run: |
-          cat >/tmp/coverage.py <<'PY'
+          cat >/tmp/book_coverage_probe.py <<'PY'
           import csv,glob,random,sys,contextlib,chess,chess.polyglot
           sys.path.insert(0,'/tmp/cand')
           with contextlib.redirect_stdout(sys.stderr): import agent
@@ -120,7 +120,7 @@ jobs:
               for fen,*_ in rows:f.write(fen+'\n')
           assert len(rows)==16
           PY
-          python /tmp/coverage.py
+          python /tmp/book_coverage_probe.py
 
       - name: 32-game paired exact-increment activation test
         run: |
