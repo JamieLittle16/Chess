@@ -1,0 +1,73 @@
+name: V18 trim large book to opening tree
+
+on:
+  push:
+    branches: [analysis/v18-book-large-trim-20260910]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  trim:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install chess==1.11.2
+      - name: Download large source
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://github.com/ChrisWhittington/polyglot-books/releases/download/v1.0/book.zip' \
+            -o /tmp/book.zip
+          mkdir -p /tmp/book
+          unzip -q /tmp/book.zip -d /tmp/book
+          BIN="$(find /tmp/book -type f -name '*.bin' | head -n1)"
+          cp "$BIN" /tmp/book.bin
+          echo "source_sha=$(sha256sum /tmp/book.bin | cut -d' ' -f1) source_bytes=$(stat -c%s /tmp/book.bin)"
+      - name: Trim reachable tree through ply 22
+        run: |
+          set -euo pipefail
+          mkdir -p analysis-results/v18-large-trim
+          python scripts/trim_polyglot_opening_tree.py \
+            --input /tmp/book.bin \
+            --output analysis-results/v18-large-trim/book-ply22.bin \
+            --max-ply 22 \
+            | tee analysis-results/v18-large-trim/trim.log
+          sha256sum analysis-results/v18-large-trim/book-ply22.bin | tee analysis-results/v18-large-trim/sha256.txt
+      - name: Recheck historical Chessathon coverage after trimming
+        run: |
+          python - <<'PY' | tee analysis-results/v18-large-trim/coverage.log
+          import chess, chess.polyglot
+          starts = [
+            ('R46','Taimanov','r1bqkbnr/pp1p1ppp/2n1p3/8/3NP3/P7/1PP2PPP/RNBQKB1R b KQkq - 0 5'),
+            ('R48','Semi-Slav','r1b1k2r/pp1nqppp/2pbpn2/3p4/P1PP4/2N1PN2/1P2BPPP/R1BQ1RK1 b kq - 4 8'),
+            ('R49','Italian','r1bqk2r/1pp2ppp/1bnp1n2/pP2p3/P1B1P3/2PP1N2/5PPP/RNBQK2R b KQkq - 0 8'),
+            ('R50','London','r1bqk2r/pp3ppp/2nbpn2/2pp4/3P1B2/P1P1P3/1P1N1PPP/R2QKBNR w KQkq - 1 7'),
+            ('R51','French Classical','r1bqk2r/pp1n1ppp/2n1p3/2bpP3/5P2/2NB1N2/PPP3PP/R1BQK2R b KQkq - 1 8'),
+            ('R53','Najdorf','rnbqk2r/1p2bppp/p2ppn2/8/4PPP1/1NN5/PPP4P/R1BQKB1R b KQkq - 0 8'),
+            ('R57','Queens Indian','rn1q1rk1/pbppbppp/1p2pn2/8/2PP4/5NP1/PP2PPBP/RNBQR1K1 b - - 6 7'),
+            ('R61','English Symm','r1bq1rk1/pp1pppbp/2n2np1/2p5/2PP4/2N2NP1/PP2PPBP/R1BQ1RK1 b - - 0 7'),
+            ('R65','Sveshnikov','r1bqkb1r/1p3ppp/p1np1n2/4p3/P3P3/N1N5/1PP2PPP/R1BQKB1R b KQkq - 1 8'),
+            ('R85','French Tarrasch','rnbqkbnr/pp3ppp/8/2pp4/3P4/7P/PPPN1PP1/R1BQKBNR b KQkq - 0 5'),
+          ]
+          with chess.polyglot.open_reader('analysis-results/v18-large-trim/book-ply22.bin') as r:
+              hits=0
+              for rid,name,fen in starts:
+                  b=chess.Board(fen); legal=set(b.legal_moves)
+                  es=[e for e in r.find_all(b) if e.move in legal and int(e.weight)>0]
+                  es.sort(key=lambda e:(-int(e.weight), e.move.uci()))
+                  hits += bool(es)
+                  print(rid, name, bool(es), es[0].move.uci() if es else '-')
+              print(f'SUMMARY hits={hits}/{len(starts)} bytes={__import__("os").path.getsize("analysis-results/v18-large-trim/book-ply22.bin")}')
+          PY
+      - name: Upload trimmed evidence and candidate book
+        uses: actions/upload-artifact@v4
+        with:
+          name: v18-large-book-ply22-${{ github.sha }}
+          path: analysis-results/v18-large-trim
+          retention-days: 7
