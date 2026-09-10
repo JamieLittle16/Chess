@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "source_archives": [
+    {
+      "name": "aichessathon-round-.zip",
+      "sha256": "d96bf695892378d3698fb0999fe2d7770b3261919f2f5064ad7c9e7ecec10123",
+      "pgn_entries": 46
+    },
+    {
+      "name": "aichessathon-round-N2.zip",
+      "sha256": "a50fe024b2a5df09c3003b336b4903edaec1b3c41b97061f70185d7c53572dac",
+      "pgn_entries": 68
+    }
+  ],
+  "downloaded_pgn_entries": 114,
+  "unique_semantic_games": 71,
+  "duplicate_copies_removed": 43,
+  "semantic_identity": "starting FEN + normalized mainline SAN tokens (comments/NAGs/move numbers/results ignored)",
+  "top_panel_rule": "at least 10 appearances in unique games",
+  "top_panel": [
+    {"engine": "Ryan Vincent", "unique_games": 17},
+    {"engine": "Lightning Tree", "unique_games": 14},
+    {"engine": "Emile Andrieu", "unique_games": 13},
+    {"engine": "what even is en passant", "unique_games": 13},
+    {"engine": "Gijs Smit", "unique_games": 12},
+    {"engine": "Opus Carlsen", "unique_games": 12},
+    {"engine": "Stonkfish", "unique_games": 11},
+    {"engine": "BetaGo", "unique_games": 10}
+  ],
+  "all_player_appearances": {
+    "Ryan Vincent": 17,
+    "Lightning Tree": 14,
+    "Emile Andrieu": 13,
+    "what even is en passant": 13,
+    "Gijs Smit": 12,
+    "Opus Carlsen": 12,
+    "Stonkfish": 11,
+    "BetaGo": 10,
+    "ms": 7,
+    "OMI": 7,
+    "JBG fam": 5,
+    "Sobriety": 4,
+    "DGS ELO": 3,
+    "Danya's Disciple": 3,
+    "Lubina": 3,
+    "THE ROOOOOKKK!!!!": 2,
+    "catfish": 2,
+    "e=π=2": 1,
+    "slopfish": 1,
+    "FuzzyBot": 1,
+    "pheanup": 1
+  },
+  "deduplicated_pgn_sha256": "81c44dee067b39db09938f159e3192245abc5c4c52896b986b71f53b1cce5187"
+}
