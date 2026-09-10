@@ -1,0 +1,88 @@
+name: V18 GM-book Stockfish 19 audit
+
+on:
+  push:
+    branches:
+      - analysis/v18-book-sf19-audit-20260910
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install exact book-analysis runtime
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install chess==1.11.2
+
+      - name: Download and verify exact V18 GM book
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' \
+            --output /tmp/gm2001.bin
+          echo 'fb6e9f3f27bb19a5b2fdefcc441c88ddeae48db61d5f00ad83973abb9f939c87  /tmp/gm2001.bin' \
+            | sha256sum --check --strict
+
+      - name: Download Stockfish 19 universal Linux binary
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://github.com/official-stockfish/Stockfish/releases/latest/download/stockfish-linux-x86-64-universal.tar.gz' \
+            --output /tmp/stockfish19.tar.gz
+          rm -rf /tmp/stockfish19
+          mkdir -p /tmp/stockfish19
+          tar -xzf /tmp/stockfish19.tar.gz -C /tmp/stockfish19
+          SF="$(find /tmp/stockfish19 -type f -name 'stockfish*' -perm /111 | head -n 1)"
+          test -n "$SF"
+          cp "$SF" /tmp/stockfish19-bin
+          chmod +x /tmp/stockfish19-bin
+          printf 'uci\nquit\n' | /tmp/stockfish19-bin | head -n 8
+
+      - name: Audit all reachable opening-book positions through ply 18
+        run: |
+          set -euo pipefail
+          rm -rf analysis-results/v18-book-sf19
+          python scripts/v18_book_sf19_audit.py \
+            --book /tmp/gm2001.bin \
+            --engine /tmp/stockfish19-bin \
+            --output-dir analysis-results/v18-book-sf19 \
+            --max-ply 18 \
+            --shallow-nodes 20000 \
+            --deep-nodes 120000 \
+            --min-audit-weight 4 \
+            | tee analysis-results/v18-book-sf19/run.log
+
+      - name: Record provenance
+        if: always()
+        run: |
+          mkdir -p analysis-results/v18-book-sf19
+          {
+            echo 'purpose=V18 DIRECT book safety and coverage expansion audit'
+            echo 'book=gm2001.bin'
+            echo 'book_sha256=fb6e9f3f27bb19a5b2fdefcc441c88ddeae48db61d5f00ad83973abb9f939c87'
+            echo 'teacher=Stockfish 19 official universal Linux release'
+            echo 'threads=1 hash_mb=128'
+            echo 'shallow_nodes=20000 deep_nodes=120000'
+            echo 'direct_window=ply<=18'
+            echo 'production_policy=blacklist clearly bad current DIRECT hits; whitelist only strongly verified extra book hits'
+          } > analysis-results/v18-book-sf19/provenance.txt
+
+      - name: Upload full audit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v18-book-sf19-audit-${{ github.sha }}
+          path: analysis-results/v18-book-sf19
+          if-no-files-found: error
+          retention-days: 7
