@@ -26,12 +26,12 @@ jobs:
           import json,numpy as np,hashlib
           p='/tmp/cand/experiments/v13_residual.i16'
           w=np.fromfile(p,dtype=np.int16).astype(np.int32)
-          for i,d in json.load(open('ci/v13-gestalt-delta180.json')): w[i]+=d
+          for i,d in json.load(open('ci/v13-gestalt-delta400.json')): w[i]+=d
           assert w.min()>=-32768 and w.max()<=32767
           w.astype(np.int16).tofile(p)
           print('BASE',hashlib.sha256(open('/tmp/base/experiments/v13_residual.i16','rb').read()).hexdigest())
           print('CAND',hashlib.sha256(open(p,'rb').read()).hexdigest())
-          print('CHANGED',sum(1 for i,d in json.load(open('ci/v13-gestalt-delta180.json')) if d))
+          print('CHANGED',sum(1 for i,d in json.load(open('ci/v13-gestalt-delta400.json')) if d))
           PY
       - name: Build qualification positions
         run: |
@@ -82,7 +82,7 @@ jobs:
           python /tmp/roots.py /tmp/base /tmp/base.jsonl
           python /tmp/roots.py /tmp/cand /tmp/cand.jsonl
           python - <<'PY'
-          import json,statistics
+          import json
           A=[json.loads(x) for x in open('/tmp/base.jsonl')];B=[json.loads(x) for x in open('/tmp/cand.jsonl')]
           D=[(a['i'],a['move'],b['move'],a['score'],b['score']) for a,b in zip(A,B) if a['move']!=b['move']]
           print('ROOT_DIFFS',len(D));[print('DIFF',x) for x in D]
