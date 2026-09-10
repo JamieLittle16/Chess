@@ -1,0 +1,35 @@
+name: Diagnostic V18 exact runtime wheels
+
+on:
+  push:
+    branches: [diagnostic/v18-gmbook-upload-test]
+    paths: ['.github/workflows/diagnostic-v18-exact-runtime-wheels.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  wheels:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download exact competition wheels
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir wheels
+          python -m pip download --disable-pip-version-check --only-binary=:all: -d wheels \
+            chess==1.11.2 numpy==2.5.2 numba==0.67.0
+          ls -lh wheels
+          python - <<'PY'
+          import hashlib, pathlib
+          for p in sorted(pathlib.Path('wheels').iterdir()):
+              print(hashlib.sha256(p.read_bytes()).hexdigest(), p.name)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v18-exact-runtime-wheels
+          path: wheels/
+          retention-days: 1
