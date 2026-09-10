@@ -1,0 +1,1 @@
+Do not promote certified overlay on structural evidence alone. First promote BIAS90 only if independent timed confirmation remains non-negative; then compare BIAS90+overlay directly against BIAS90 on paired games. Reject overlay if flat/negative or if any legality/startup regression appears.
