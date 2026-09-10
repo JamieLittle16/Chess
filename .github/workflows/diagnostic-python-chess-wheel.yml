@@ -1,0 +1,28 @@
+name: Diagnostic python-chess wheel
+
+on:
+  push:
+    branches: [diagnostic/v18-gmbook-upload-test]
+    paths: ['.github/workflows/diagnostic-python-chess-wheel.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wheel:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Fetch exact pure-Python chess wheel
+        run: |
+          mkdir -p wheelhouse
+          python -m pip wheel --disable-pip-version-check --no-deps chess==1.11.2 -w wheelhouse
+          sha256sum wheelhouse/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chess-1.11.2-wheel
+          path: wheelhouse/
+          retention-days: 1
