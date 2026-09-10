@@ -1,0 +1,93 @@
+name: V18 soft-deadline critical 120s probe
+
+on:
+  push:
+    branches: [analysis/v18-soft-critical120-20260911]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: base
+            soft: '0.58'
+            quiet: '0.64'
+          - label: moderate
+            soft: '0.64'
+            quiet: '0.70'
+          - label: upper
+            soft: '0.68'
+            quiet: '0.74'
+          - label: aggressive
+            soft: '0.76'
+            quiet: '0.82'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Reconstruct exact PUNCH133 arm
+        env:
+          SOFT: ${{ matrix.soft }}
+          QUIET: ${{ matrix.quiet }}
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/engine && mkdir /tmp/engine
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          unzip -q /tmp/p150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+          curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/engine/v18_gm2001.bin
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path('/tmp/engine/agent.py');s=p.read_text()
+          s=s.replace('soft_fraction = 0.58',f"soft_fraction = {os.environ['SOFT']}",1)
+          s=s.replace('soft_fraction = 0.64',f"soft_fraction = {os.environ['QUIET']}",1)
+          p.write_text(s)
+          PY
+      - name: Download exact SF2000 loss-match PGN
+        uses: actions/download-artifact@v4
+        with:
+          name: punch133-elo2000-tc-30+0.5
+          path: /tmp/match
+          github-token: ${{ github.token }}
+          repository: JamieLittle16/Chess
+          run-id: 34522337486
+      - name: Probe eight audited failure positions at 120 seconds
+        env:
+          LABEL: ${{ matrix.label }}
+        run: |
+          cd /tmp
+          PYTHONPATH=/tmp/engine python - <<'PY'
+          import glob, chess, chess.pgn, time, os
+          import agent
+          targets={(1,14,'W'),(2,11,'B'),(2,23,'B'),(2,32,'B'),(7,8,'W'),(7,9,'W'),(7,13,'W'),(7,20,'W')}
+          pgn=glob.glob('/tmp/match/**/games.pgn',recursive=True)[0]
+          positions=[]
+          with open(pgn,encoding='utf-8') as f:
+            gi=0
+            while True:
+              g=chess.pgn.read_game(f)
+              if g is None: break
+              gi+=1;b=g.board()
+              for m in g.mainline_moves():
+                key=(gi,b.fullmove_number,'W' if b.turn else 'B')
+                if key in targets: positions.append((key,b.fen(),m.uci()))
+                b.push(m)
+          def reset():
+            agent._GAME_KEYS.clear();agent._PENDING_AFTER_OUR_MOVE=None;agent._LAST_CALL_TIME_LEFT_MS=None;agent._LAST_GET_MOVE_ELAPSED_MS=None
+            agent._CLOCK_OVERHEAD_EMA_MS=40.0;agent._CLOCK_FEEDBACK_SAMPLES=0;agent._BOOK_POST_SEARCH_BOOSTS=0
+            agent._HASH_KEYS.fill(0);agent._HASH_MOVES.fill(-1);agent._TT_TABLE.fill(0);agent._QUIET_HISTORY.fill(0)
+          print('ARM',os.environ['LABEL'],'TARGETS',len(positions))
+          for key,fen,actual in positions:
+            reset();t=time.perf_counter();move=agent.get_move(fen,120000);dt=time.perf_counter()-t
+            print('RESULT',key,'actual',actual,'move',move,'elapsed',round(dt,3),'fen',fen,flush=True)
+          PY
