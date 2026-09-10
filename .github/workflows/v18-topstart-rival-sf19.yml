@@ -1,0 +1,81 @@
+name: V18 SF19 certify top-engine start moves
+
+on:
+  push:
+    branches: [analysis/v18-top36-opening-coverage-20260911]
+    paths: [.github/workflows/v18-topstart-rival-sf19.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  certify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'chess==1.11.2'
+      - name: Fetch and verify Stockfish 19
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/sf19
+          curl -L --fail --retry 3 --retry-delay 2 \
+            -o /tmp/stockfish-19.tar.gz \
+            https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  /tmp/stockfish-19.tar.gz' | sha256sum -c -
+          tar -xzf /tmp/stockfish-19.tar.gz -C /tmp/sf19
+          SF=$(find /tmp/sf19 -type f -name 'stockfish*' | head -n 1)
+          chmod +x "$SF"
+          printf 'uci\nquit\n' | "$SF" | grep 'Stockfish 19'
+          echo "STOCKFISH=$SF" >> "$GITHUB_ENV"
+      - name: Certify observed near-instant moves
+        run: |
+          cat >/tmp/rival.tsv <<'EOF'
+          Emile Andrieu	O-O	2	rnbqk2r/pp2ppbp/3p1np1/8/3NP3/2N1B2P/PPP2PP1/R2QKB1R b KQkq - 2 7
+          Ryan Vincent	c5	2	rnbqk2r/ppp1ppbp/6p1/8/3PP3/2P5/P4PPP/1RBQKBNR b Kkq - 2 7
+          Ryan Vincent	O-O	2	rnbqk2r/pp2ppbp/3p1np1/8/3NP3/2N1B2P/PPP2PP1/R2QKB1R b KQkq - 2 7
+          Emile Andrieu	c6	2	rnbqk2r/ppp2ppp/3b4/3p4/2PPn3/5N2/PP2BPPP/RNBQK2R b KQkq - 0 7
+          Emile Andrieu	Nd4	2	r1bqk2r/pppp1ppp/2n2n2/1B2p3/1b2P3/2NP1N2/PPP2PPP/R1BQK2R b KQkq - 0 5
+          Emile Andrieu	O-O	3	rnbqk2r/ppp1bppp/4pn2/3p4/2P5/P4NP1/1P1PPPBP/RNBQK2R b KQkq - 0 5
+          Emile Andrieu	d6	2	r1bqkbnr/pp1p1ppp/2n1p3/1N6/4P3/8/PPP2PPP/RNBQKB1R b KQkq - 2 5
+          Lightning Tree	O-O	3	r1bqk2r/ppp1bppp/2np1n2/4p3/P1B1P3/2NP1N2/1PP2PPP/R1BQK2R b KQkq - 0 6
+          Emile Andrieu	e5	2	rnbq1rk1/ppp1ppbp/3p1np1/8/3PP3/2N2N2/PPP1BPPP/R1BQ1RK1 b - - 5 6
+          Ryan Vincent	Be7	2	rn1qkb1r/1p3ppp/p2pbn2/4p3/4P3/1NN1B3/PPPQ1PPP/R3KB1R b KQkq - 3 8
+          Lightning Tree	Nc3	2	r1bqkb1r/ppp2ppp/2n2n2/3p4/3NP3/5P2/PPP3PP/RNBQKB1R w KQkq - 0 6
+          Lightning Tree	Nf3	4	r1bqk1nr/pp3pbp/2npp1p1/2p5/4PP2/2NP2P1/PPP3BP/R1BQK1NR w KQkq - 0 7
+          Ryan Vincent	Nge7	2	1rbqk1nr/pp3pbp/2npp1p1/2p5/4PP2/2NPBNP1/PPP3BP/R2QK2R b KQk - 3 8
+          Ryan Vincent	c5	2	rnbqr1k1/ppp2pbp/3p1np1/8/2PNP3/2N1B3/PPQ1BPPP/R3K2R b KQ - 2 9
+          Ryan Vincent	Bc5	2	r1bqk2r/pppp1ppp/2n2n2/1B6/1b1NP3/2P5/PP3PPP/RNBQK2R b KQkq - 0 6
+          Emile Andrieu	Ngf3	2	rnbqkb1r/pp3ppp/5n2/2pp4/3P4/8/PPPNBPPP/R1BQK1NR w KQkq - 2 6
+          Ryan Vincent	Bd6	2	rnbqk1nr/1p3ppp/p7/2bp4/P7/1N6/1PP2PPP/R1BQKBNR b KQkq - 1 7
+          Emile Andrieu	c5	2	rnbq1rk1/ppp2ppp/4pn2/8/1bBP4/2N1P2P/PP3PP1/R1BQK1NR b KQ - 0 7
+          Lightning Tree	c6	7	rnbq1rk1/ppp1bppp/4pn2/3p4/2PP4/N4NP1/PP2PPBP/R1BQK2R b KQ - 0 6
+          EOF
+          sed -i 's/^          //' /tmp/rival.tsv
+          python - <<'PY'
+          import os, chess, chess.engine
+          sf=os.environ['STOCKFISH']; eng=chess.engine.SimpleEngine.popen_uci(sf)
+          eng.configure({'Threads':1,'Hash':64})
+          rows=[]
+          try:
+              for raw in open('/tmp/rival.tsv'):
+                  player,san,ms,fen=raw.rstrip('\n').split('\t',3)
+                  b=chess.Board(fen); move=b.parse_san(san)
+                  best=eng.analyse(b,chess.engine.Limit(nodes=300000))
+                  forced=eng.analyse(b,chess.engine.Limit(nodes=300000),root_moves=[move])
+                  pov=b.turn
+                  bs=best['score'].pov(pov).score(mate_score=100000)
+                  fs=forced['score'].pov(pov).score(mate_score=100000)
+                  loss=max(0,bs-fs)
+                  bm=best['pv'][0].uci()
+                  print(f'ROW player={player!r} think_ms={ms} san={san} uci={move.uci()} sf_best={bm} best_cp={bs} played_cp={fs} loss_cp={loss} exact={move.uci()==bm} FEN={fen}',flush=True)
+                  rows.append((player,int(ms),move.uci(),bm,loss,move.uci()==bm,fen))
+          finally: eng.quit()
+          print('SUMMARY n',len(rows),'exact',sum(r[5] for r in rows),'le5',sum(r[4]<=5 for r in rows),'le10',sum(r[4]<=10 for r in rows),'le20',sum(r[4]<=20 for r in rows),'mean_loss',sum(r[4] for r in rows)/len(rows),'max_loss',max(r[4] for r in rows))
+          for p in sorted({r[0] for r in rows}):
+              z=[r for r in rows if r[0]==p]
+              print('PLAYER',p,'n',len(z),'exact',sum(r[5] for r in z),'mean_loss',sum(r[4] for r in z)/len(z),'max_loss',max(r[4] for r in z))
+          PY
