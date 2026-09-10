@@ -1,0 +1,78 @@
+name: V18 root-only castle safety screen
+on:
+  push:
+    branches: [analysis/v18-root-castle-safety-20260910]
+permissions:
+  contents: read
+jobs:
+  screen:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ci/v18-stockfish-calibration
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Build baseline and root-safety candidate
+        run: |
+          set -euo pipefail
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          for d in /tmp/base /tmp/cand; do
+            rm -rf "$d"; mkdir "$d"; unzip -q /tmp/p150.zip -d "$d"
+            sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' "$d/agent.py"
+            curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o "$d/v18_gm2001.bin"
+          done
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/cand/experiments/numba_search.py'); t=p.read_text()
+          marker='@njit(cache=False)\ndef _root(\n'
+          assert marker in t
+          helper='''@njit(cache=False)\ndef _root_exposed_castle_penalty(board: np.ndarray, side: int, move: int) -> int:\n    # Root-only guard against castling into an already-destroyed pawn shield.\n    # Ordinary intact/decent shelter scores zero, so normal castling is unchanged.\n    if (move & FLAG_CASTLE) == 0:\n        return 0\n    king_sq = move_to(move)\n    king_file = king_sq & 7\n    badness = 0\n    for file in range(max(0, king_file - 1), min(7, king_file + 1) + 1):\n        nearest = 8\n        for sq in range(64):\n            if int(board[sq]) != side * PAWN or (sq & 7) != file:\n                continue\n            rank = sq >> 3\n            rel = rank if side == WHITE else 7 - rank\n            if rel > 0 and rel < nearest:\n                nearest = rel\n        if nearest <= 1:\n            lane = 0\n        elif nearest == 2:\n            lane = 10\n        elif nearest == 3:\n            lane = 25\n        elif nearest < 8:\n            lane = 40\n        else:\n            lane = 45\n        badness += lane\n    excess = badness - 45\n    return 2 * excess if excess > 0 else 0\n\n\n'''
+          t=t.replace(marker,helper+marker)
+          old='''        child_castling, child_ep, captured_piece, captured_square = make_move_inplace(\n            board, side, castling, ep_square, move\n        )\n'''
+          new=old+'''        root_castle_penalty = _root_exposed_castle_penalty(board, side, move)\n'''
+          assert t.count(old)>=2
+          # Only patch the root occurrence: locate after def _root.
+          pos=t.index('def _root('); tail=t[pos:]; assert old in tail
+          tail=tail.replace(old,new,1); t=t[:pos]+tail
+          old2='''        score = -score\n        if score > best_score:\n'''
+          new2='''        score = -score - root_castle_penalty\n        if score > best_score:\n'''
+          assert old2 in t[pos:]
+          pos=t.index('def _root('); tail=t[pos:].replace(old2,new2,1); t=t[:pos]+tail
+          p.write_text(t)
+          PY
+          grep -n 'root_exposed_castle\|root_castle_penalty\|score = -score -' /tmp/cand/experiments/numba_search.py
+      - name: Critical sweep and 50-root parity count
+        run: |
+          cat >/tmp/run.py <<'PY'
+          import sys,json,time,chess,numpy as np
+          from pathlib import Path
+          sys.path.insert(0,sys.argv[1]);import agent
+          from experiments.numba_core import encode_position,move_to_uci
+          from experiments.numba_search import iterative_search_stateful
+          crit=[('castle','r2q1rk1/1b1n1pbp/pp1ppnp1/8/PPPNPP2/2NBB2P/2Q3P1/R3K2R w KQ - 1 14'),('dxe4','r1bqk1nr/3n1pbp/3pp1p1/1B1p4/4P3/2N1B3/PP1QNPPP/R3K2R b KQkq - 0 11'),('Qb3','rnb1kb1r/2q2ppp/p1pp1n2/1p2p3/2PPP3/2NBB3/PP2NPPP/R2QK2R w KQkq - 0 8'),('a4','rnb1k2r/2q1bppp/p1pp1n2/1p2p3/2PPP3/1QNBB3/PP2NPPP/R3K2R w KQkq - 2 9'),('a3a2','r5k1/2q1bppp/p1p5/3p1P2/P1P3n1/QB1n4/1P1BNPPP/R4K1R w - - 0 20')]
+          H=np.empty(0,dtype=np.uint64)
+          rows=[]
+          for name,fen in crit:
+            b=chess.Board(fen);e=encode_position(b); print('CRIT',name)
+            for n in (200000,500000,1000000,4000000):
+              agent._TT_TABLE.fill(0);agent._QUIET_HISTORY.fill(0);agent._HASH_KEYS.fill(0);agent._HASH_MOVES.fill(-1)
+              m,s,d,nn=iterative_search_stateful(e.board.copy(),e.side,e.castling,e.ep_square,b.halfmove_clock,H,0,n)
+              print(n,move_to_uci(m),int(s),int(d),flush=True)
+          lines=[x for x in Path('match/openings/m3-uho-lichess-100-v1.epd').read_text().splitlines() if x.strip() and not x.startswith('#')][:50]
+          for i,line in enumerate(lines):
+            b=chess.Board(line);e=encode_position(b);agent._TT_TABLE.fill(0);agent._QUIET_HISTORY.fill(0);agent._HASH_KEYS.fill(0);agent._HASH_MOVES.fill(-1)
+            m,s,d,n=iterative_search_stateful(e.board.copy(),e.side,e.castling,e.ep_square,b.halfmove_clock,H,0,500000)
+            rows.append((i,b.fen(),move_to_uci(m),int(s),int(d),int(n)))
+          open(sys.argv[2],'w').write('\n'.join(json.dumps(x) for x in rows)+'\n')
+          PY
+          echo BASE; python /tmp/run.py /tmp/base /tmp/base.jsonl
+          echo CAND; python /tmp/run.py /tmp/cand /tmp/cand.jsonl
+          python - <<'PY'
+          import json
+          A=[json.loads(x) for x in open('/tmp/base.jsonl')];B=[json.loads(x) for x in open('/tmp/cand.jsonl')]
+          D=[(a[0],a[2],b[2],a[3],b[3]) for a,b in zip(A,B) if a[2]!=b[2]]
+          print('NEUTRAL_ROOT_DIFFS',len(D));[print('DIFF',x) for x in D]
+          PY
