@@ -1,0 +1,1 @@
+BIAS90 verification must preserve PUNCH133 search architecture. No search heuristic, book logic, H64 tensor, V13 table, KPK data, or time-management change is permitted in this candidate.
