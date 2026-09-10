@@ -1,0 +1,121 @@
+name: V18 two-corpus agreement SF19 audit
+
+on:
+  push:
+    branches: [analysis/v18-two-corpus-agree-sf19-20260910]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install chess==1.11.2 zstandard
+      - name: Download Jan-Jul 2026 broadcasts and exact GM book
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/broadcast
+          for m in 01 02 03 04 05 06 07; do
+            curl --fail --location --retry 5 "https://database.lichess.org/broadcast/lichess_db_broadcast_2026-${m}.pgn.zst" -o "/tmp/broadcast/2026-${m}.pgn.zst"
+          done
+          curl --fail --location --retry 5 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/gm.bin
+          echo 'fb6e9f3f27bb19a5b2fdefcc441c88ddeae48db61d5f00ad83973abb9f939c87  /tmp/gm.bin' | sha256sum -c -
+      - name: Download Stockfish 19
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 'https://github.com/official-stockfish/Stockfish/releases/latest/download/stockfish-linux-x86-64-universal.tar.gz' -o /tmp/sf.tar.gz
+          mkdir -p /tmp/sf && tar -xzf /tmp/sf.tar.gz -C /tmp/sf
+          SF="$(find /tmp/sf -type f -name 'stockfish*' -perm /111 | head -n1)"
+          cp "$SF" /tmp/sf19 && chmod +x /tmp/sf19
+      - name: Build agreement population and stratified sample
+        run: |
+          mkdir -p analysis-results/v18-two-corpus
+          python - <<'PY' | tee analysis-results/v18-two-corpus/audit.log
+          import csv, json, random, statistics, struct
+          from pathlib import Path
+          import chess, chess.engine, chess.polyglot
+          from scripts.certify_broadcast_book_sf19 import collect, analyse, raw_polyglot_move
+
+          stats=collect(sorted(Path('/tmp/broadcast').glob('*.pgn.zst')),18)
+          eligible=[]
+          with chess.polyglot.open_reader('/tmp/gm.bin') as gm:
+              for key,stat in stats.items():
+                  total=sum(stat.move_counts.values())
+                  br_move,br_count=sorted(stat.move_counts.items(),key=lambda kv:(-kv[1],kv[0]))[0]
+                  br_share=br_count/total
+                  board=chess.Board(stat.fen); legal=set(board.legal_moves)
+                  ges=[e for e in gm.find_all(board) if e.move in legal and int(e.weight)>0]
+                  ges.sort(key=lambda e:(-int(e.weight),e.move.uci()))
+                  if not ges: continue
+                  gm_total=sum(int(e.weight) for e in ges); ge=ges[0]
+                  gm_share=int(ge.weight)/gm_total
+                  if ge.move.uci()!=br_move: continue
+                  if int(ge.weight)<8 or gm_share<0.55: continue
+                  if br_count<4 or br_share<0.55: continue
+                  eligible.append(dict(key=key,fen=stat.fen,ply=stat.ply,move=br_move,
+                    gm_weight=int(ge.weight),gm_total=gm_total,gm_share=gm_share,
+                    br_count=br_count,br_total=total,br_share=br_share,
+                    confidence=min(gm_share,br_share)))
+          eligible.sort(key=lambda r:(r['confidence'],r['gm_weight'],r['br_count'],r['key']))
+          print('ELIGIBLE',len(eligible))
+          weakest=eligible[:150]
+          rest=eligible[150:]
+          rng=random.Random(20260910)
+          random_part=rng.sample(rest,min(350,len(rest)))
+          sample=weakest+random_part
+          # Deduplicate while preserving deliberate weak-tail oversampling.
+          seen=set(); sample=[r for r in sample if not (r['key'] in seen or seen.add(r['key']))]
+          print('SAMPLE',len(sample),'weakest_conf',sample[0]['confidence'] if sample else None)
+
+          eng=chess.engine.SimpleEngine.popen_uci('/tmp/sf19')
+          if 'Threads' in eng.options: eng.configure({'Threads':1})
+          if 'Hash' in eng.options: eng.configure({'Hash':128})
+          rows=[]
+          try:
+              for i,r in enumerate(sample,1):
+                  b=chess.Board(r['fen']); m=chess.Move.from_uci(r['move'])
+                  sb,sbcp,smcp,sloss=analyse(eng,b,m,20000)
+                  db,dbcp,dmcp,dloss=analyse(eng,b,m,100000)
+                  q=dict(r,shallow_best=sb,shallow_loss=sloss,deep_best=db,deep_loss=dloss)
+                  rows.append(q)
+                  if i%50==0: print('AUDIT',i,'max',max(x['deep_loss'] for x in rows),'mean',statistics.mean(x['deep_loss'] for x in rows),flush=True)
+          finally:
+              eng.quit()
+          losses=[r['deep_loss'] for r in rows]
+          losses_sorted=sorted(losses)
+          def pct(p): return losses_sorted[min(len(losses_sorted)-1,int(p*(len(losses_sorted)-1)))] if losses_sorted else None
+          summary=dict(
+            eligible=len(eligible),sample=len(rows),mean_loss=statistics.mean(losses) if losses else None,
+            median_loss=statistics.median(losses) if losses else None,p90=pct(.90),p95=pct(.95),p99=pct(.99),
+            max_loss=max(losses) if losses else None,within8=sum(x<=8 for x in losses),within12=sum(x<=12 for x in losses),
+            within20=sum(x<=20 for x in losses),over30=sum(x>30 for x in losses),over50=sum(x>50 for x in losses))
+          print('SUMMARY',json.dumps(summary,sort_keys=True))
+          Path('analysis-results/v18-two-corpus/summary.json').write_text(json.dumps(summary,indent=2,sort_keys=True)+'\n')
+          with open('analysis-results/v18-two-corpus/sample.csv','w',newline='') as f:
+              if rows:
+                  w=csv.DictWriter(f,fieldnames=rows[0].keys()); w.writeheader(); w.writerows(rows)
+
+          # Also materialize the full agreement population so it can become a candidate instantly
+          # if the stratified SF tail is clean enough.
+          entries=[]
+          for r in eligible:
+              b=chess.Board(r['fen']); m=chess.Move.from_uci(r['move'])
+              entries.append((r['key'],raw_polyglot_move(b,m),65535,0))
+          entries.sort(key=lambda x:(x[0],x[1]))
+          with open('analysis-results/v18-two-corpus/two-corpus-agree-direct.bin','wb') as f:
+              for e in entries: f.write(struct.pack('>QHHI',*e))
+          print('BOOK_BYTES',len(entries)*16)
+          PY
+          sha256sum analysis-results/v18-two-corpus/two-corpus-agree-direct.bin | tee analysis-results/v18-two-corpus/sha256.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v18-two-corpus-agree-${{ github.sha }}
+          path: analysis-results/v18-two-corpus
+          retention-days: 7
