@@ -1,0 +1,65 @@
+name: V18 large-book real-start coverage
+
+on:
+  push:
+    branches: [analysis/v18-book-large-coverage-20260910]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        asset: [book, uho-pohl]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install chess==1.11.2
+      - name: Download large source book
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            "https://github.com/ChrisWhittington/polyglot-books/releases/download/v1.0/${{ matrix.asset }}.zip" \
+            -o /tmp/book.zip
+          rm -rf /tmp/book && mkdir /tmp/book
+          unzip -q /tmp/book.zip -d /tmp/book
+          BIN="$(find /tmp/book -type f -name '*.bin' | head -n1)"
+          test -n "$BIN"
+          cp "$BIN" /tmp/book.bin
+          echo "asset=${{ matrix.asset }} zip_sha=$(sha256sum /tmp/book.zip | cut -d' ' -f1) bin_sha=$(sha256sum /tmp/book.bin | cut -d' ' -f1) bin_bytes=$(stat -c%s /tmp/book.bin)"
+      - name: Score historical rated starts
+        run: |
+          python - <<'PY'
+          import chess, chess.polyglot
+          starts = [
+            ('R46','Taimanov','r1bqkbnr/pp1p1ppp/2n1p3/8/3NP3/P7/1PP2PPP/RNBQKB1R b KQkq - 0 5'),
+            ('R48','Semi-Slav','r1b1k2r/pp1nqppp/2pbpn2/3p4/P1PP4/2N1PN2/1P2BPPP/R1BQ1RK1 b kq - 4 8'),
+            ('R49','Italian','r1bqk2r/1pp2ppp/1bnp1n2/pP2p3/P1B1P3/2PP1N2/5PPP/RNBQK2R b KQkq - 0 8'),
+            ('R50','London','r1bqk2r/pp3ppp/2nbpn2/2pp4/3P1B2/P1P1P3/1P1N1PPP/R2QKBNR w KQkq - 1 7'),
+            ('R51','French Classical','r1bqk2r/pp1n1ppp/2n1p3/2bpP3/5P2/2NB1N2/PPP3PP/R1BQK2R b KQkq - 1 8'),
+            ('R53','Najdorf','rnbqk2r/1p2bppp/p2ppn2/8/4PPP1/1NN5/PPP4P/R1BQKB1R b KQkq - 0 8'),
+            ('R57','Queens Indian','rn1q1rk1/pbppbppp/1p2pn2/8/2PP4/5NP1/PP2PPBP/RNBQR1K1 b - - 6 7'),
+            ('R61','English Symm','r1bq1rk1/pp1pppbp/2n2np1/2p5/2PP4/2N2NP1/PP2PPBP/R1BQ1RK1 b - - 0 7'),
+            ('R65','Sveshnikov','r1bqkb1r/1p3ppp/p1np1n2/4p3/P3P3/N1N5/1PP2PPP/R1BQKB1R b KQkq - 1 8'),
+            ('R85','French Tarrasch','rnbqkbnr/pp3ppp/8/2pp4/3P4/7P/PPPN1PP1/R1BQKBNR b KQkq - 0 5'),
+          ]
+          def entries(r,b):
+              legal=set(b.legal_moves)
+              es=[e for e in r.find_all(b) if e.move in legal and int(e.weight)>0]
+              return sorted(es,key=lambda e:(-int(e.weight),e.move.uci()))
+          with chess.polyglot.open_reader('/tmp/book.bin') as r:
+              hits=0
+              for rid,name,fen in starts:
+                  b=chess.Board(fen); es=entries(r,b); hits += bool(es)
+                  total=sum(int(e.weight) for e in es); top=int(es[0].weight) if es else 0
+                  share=top/total if total else 0.0
+                  print(f'{rid} {name:18} hit={bool(es)!s:5} top={top:7d} total={total:9d} share={share:.3f} move={(es[0].move.uci() if es else "-")}')
+              print(f'BOOK=${{ matrix.asset }} SUMMARY hits={hits}/{len(starts)}')
+          PY
