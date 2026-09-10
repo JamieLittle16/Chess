@@ -1,8 +1,9 @@
-name: V18 stable-root soft deadline A/B
+name: V18 SOFT6470 independent confirmation
 
 on:
   push:
-    branches: [analysis/v18-soft-deadline-20260910]
+    branches: [analysis/v18-soft6470-confirm-20260911]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -10,6 +11,7 @@ permissions:
 jobs:
   match:
     runs-on: ubuntu-24.04
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -18,22 +20,12 @@ jobs:
             quiet: '0.70'
             base: '30.0'
             pairs: '8'
-            seed: '17102026'
-          - soft: '0.68'
-            quiet: '0.74'
-            base: '30.0'
-            pairs: '8'
-            seed: '18102026'
+            seed: '27092026'
           - soft: '0.64'
             quiet: '0.70'
             base: '60.0'
             pairs: '4'
-            seed: '19102026'
-          - soft: '0.68'
-            quiet: '0.74'
-            base: '60.0'
-            pairs: '4'
-            seed: '20102026'
+            seed: '28092026'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -58,6 +50,7 @@ jobs:
           s=s.replace('soft_fraction = 0.58',f'soft_fraction = {soft}',1)
           s=s.replace('soft_fraction = 0.64',f'soft_fraction = {quiet}',1)
           p.write_text(s)
+          assert 'soft_fraction = 0.64' in s and 'soft_fraction = 0.70' in s
           print('soft',soft,'quiet',quiet)
           PY
       - name: Paired exact +0.5 games
