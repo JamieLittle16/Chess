@@ -1,0 +1,59 @@
+name: V18 BIAS90 vs Rust
+on:
+  push:
+    branches: [analysis/v18-bias90-vs-rust-20260910]
+permissions:
+  contents: read
+jobs:
+  match:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: analysis/v13-best-residual-ladder-20260907
+          path: lab-tools
+      - uses: dtolnay/rust-toolchain@master
+        with: {toolchain: '1.98.1'}
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: |
+          python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+          sudo apt-get update -qq && sudo apt-get install -y stockfish >/dev/null
+      - name: Reconstruct exact BIAS90
+        run: |
+          set -euo pipefail
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          rm -rf /tmp/bias90; mkdir /tmp/bias90; unzip -q /tmp/p150.zip -d /tmp/bias90
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/bias90/agent.py
+          sed -i 's/RESIDUAL_BIAS = 61/RESIDUAL_BIAS = 90/' /tmp/bias90/experiments/numba_search.py
+          curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/bias90/v18_gm2001.bin
+          python -m py_compile /tmp/bias90/agent.py /tmp/bias90/experiments/numba_core.py /tmp/bias90/experiments/numba_search.py
+      - name: Build current Rust head
+        run: cargo build --release -p chess-uci
+      - name: Cold API smoke
+        run: |
+          /usr/bin/time -f 'init_wall_s=%e maxrss_kb=%M' -o /tmp/init.txt timeout 90s python lab-tools/tools/v9_agent_runner.py /tmp/bias90 <<'EOF' >/tmp/smoke.json
+          {"fen":"r2q1rk1/1bp1bppp/p2p1n2/np2p3/4P3/1BNP1N1P/PPP2PP1/R1BQR1K1 w - - 1 11","time_left_ms":120000}
+          EOF
+          cat /tmp/init.txt; cat /tmp/smoke.json
+          grep -q '"ready": true' /tmp/smoke.json
+          grep -q '"move":' /tmp/smoke.json
+      - name: 20-game paired match vs Rust
+        run: |
+          STOCKFISH="$(command -v stockfish || true)"; [ -n "$STOCKFISH" ] || STOCKFISH=/usr/games/stockfish
+          mkdir -p /tmp/out
+          python lab-tools/tools/v9_rust_diagnostic.py \
+            --agent /tmp/bias90 \
+            --runner lab-tools/tools/v9_agent_runner.py \
+            --engine target/release/chess-uci \
+            --stockfish "$STOCKFISH" \
+            --openings match/openings/m3-uho-lichess-100-v1.epd \
+            --opening-start 0 \
+            --opening-count 10 \
+            --base-ms 5000 \
+            --increment-ms 100 \
+            --analysis-nodes 10000 \
+            --out-dir /tmp/out | tee /tmp/run.log
+          cat /tmp/out/summary.json
