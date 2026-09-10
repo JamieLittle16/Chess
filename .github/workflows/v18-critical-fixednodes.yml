@@ -1,0 +1,56 @@
+name: V18 PUNCH133 critical fixed-node sweep
+
+on:
+  push:
+    branches: [analysis/v18-critical-fixednodes-20260910]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  sweep:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ci/v18-stockfish-calibration
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Reconstruct exact PUNCH133
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/engine && mkdir /tmp/engine
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          unzip -q /tmp/p150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+          curl --fail --location --retry 5 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/engine/v18_gm2001.bin
+          echo 'f74f46499cc0fdef8fba53c2ba77652414463b0a68e7a3fac1e3764f70f94032  /tmp/engine/experiments/numba_search.py' | sha256sum -c --strict
+      - name: Sweep fixed-node search
+        run: |
+          PYTHONPATH=/tmp/engine python - <<'PY'
+          import chess, numpy as np
+          from experiments.numba_core import encode_position, move_to_uci
+          from experiments.numba_search import iterative_search_stateful
+
+          positions = [
+            ('castle', 'r2q1rk1/1b1n1pbp/pp1ppnp1/8/PPPNPP2/2NBB2P/2Q3P1/R3K2R w KQ - 1 14'),
+            ('dxe4', 'r1bqk1nr/3n1pbp/3pp1p1/1B1p4/4P3/2N1B3/PP1QNPPP/R3K2R b KQkq - 0 11'),
+            ('Qb3', 'rnb1kb1r/2q2ppp/p1pp1n2/1p2p3/2PPP3/2NBB3/PP2NPPP/R2QK2R w KQkq - 0 8'),
+            ('a4', 'rnb1k2r/2q1bppp/p1pp1n2/1p2p3/2PPP3/1QNBB3/PP2NPPP/R3K2R w KQkq - 2 9'),
+            ('a3a2', 'r5k1/2q1bppp/p1p5/3p1P2/P1P3n1/QB1n4/1P1BNPPP/R4K1R w - - 0 20'),
+          ]
+          budgets=(50_000,200_000,500_000,1_000_000,2_000_000,4_000_000)
+          h=np.empty(0,dtype=np.uint64)
+          for name,fen in positions:
+              b=chess.Board(fen); enc=encode_position(b)
+              print('\nPOSITION',name,fen)
+              for n in budgets:
+                  board=enc.board.copy()
+                  m,s,d,nodes=iterative_search_stateful(board,enc.side,enc.castling,enc.ep_square,b.halfmove_clock,h,0,n)
+                  print(f'nodes_cap={n:8d} move={move_to_uci(m):5s} score={s:+6d} depth={d:2d} nodes={nodes:8d}',flush=True)
+          PY
