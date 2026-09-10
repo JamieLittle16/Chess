@@ -1,0 +1,1 @@
+BIAS90 is frozen at 90 during confirmation. No adaptive per-phase/per-depth variants will be introduced unless the fixed 90 constant fails the independent timed gates.
