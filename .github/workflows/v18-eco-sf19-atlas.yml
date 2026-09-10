@@ -1,0 +1,101 @@
+name: V18 ECO Stockfish 19 opening atlas
+
+on:
+  push:
+    branches: [analysis/v18-eco-sf19-atlas-20260910]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  atlas:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact runtime
+        run: python -m pip install chess==1.11.2
+      - name: Download canonical Lichess ECO data
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/eco
+          for volume in a b c d e; do
+            curl --fail --location --retry 5 \
+              "https://raw.githubusercontent.com/lichess-org/chess-openings/master/${volume}.tsv" \
+              -o "/tmp/eco/${volume}.tsv"
+          done
+          wc -l /tmp/eco/*.tsv
+          sha256sum /tmp/eco/*.tsv
+      - name: Download Stockfish 19
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://github.com/official-stockfish/Stockfish/releases/latest/download/stockfish-linux-x86-64-universal.tar.gz' \
+            -o /tmp/sf.tar.gz
+          mkdir -p /tmp/sf
+          tar -xzf /tmp/sf.tar.gz -C /tmp/sf
+          SF="$(find /tmp/sf -type f -name 'stockfish*' -perm /111 | head -n1)"
+          test -n "$SF"
+          cp "$SF" /tmp/stockfish19
+          chmod +x /tmp/stockfish19
+          printf 'uci\nquit\n' | /tmp/stockfish19 | head -n 8
+      - name: Build certified canonical-opening atlas
+        run: |
+          set -euo pipefail
+          mkdir -p analysis-results/v18-eco-sf19
+          python scripts/build_eco_sf19_opening_atlas.py \
+            --tsv /tmp/eco/a.tsv /tmp/eco/b.tsv /tmp/eco/c.tsv /tmp/eco/d.tsv /tmp/eco/e.tsv \
+            --engine /tmp/stockfish19 \
+            --output-dir analysis-results/v18-eco-sf19 \
+            --min-ply 4 \
+            --max-ply 18 \
+            --shallow-nodes 10000 \
+            --deep-nodes 80000 \
+            | tee analysis-results/v18-eco-sf19/build.log
+          sha256sum analysis-results/v18-eco-sf19/*.bin > analysis-results/v18-eco-sf19/sha256.txt
+          ls -lh analysis-results/v18-eco-sf19/*.bin
+      - name: Measure historical Chessathon start coverage
+        run: |
+          python - <<'PY' | tee analysis-results/v18-eco-sf19/coverage.log
+          import os
+          import chess
+          import chess.polyglot
+
+          starts = [
+            ('R46','Taimanov','r1bqkbnr/pp1p1ppp/2n1p3/8/3NP3/P7/1PP2PPP/RNBQKB1R b KQkq - 0 5'),
+            ('R48','Semi-Slav','r1b1k2r/pp1nqppp/2pbpn2/3p4/P1PP4/2N1PN2/1P2BPPP/R1BQ1RK1 b kq - 4 8'),
+            ('R49','Italian','r1bqk2r/1pp2ppp/1bnp1n2/pP2p3/P1B1P3/2PP1N2/5PPP/RNBQK2R b KQkq - 0 8'),
+            ('R50','London','r1bqk2r/pp3ppp/2nbpn2/2pp4/3P1B2/P1P1P3/1P1N1PPP/R2QKBNR w KQkq - 1 7'),
+            ('R51','French Classical','r1bqk2r/pp1n1ppp/2n1p3/2bpP3/5P2/2NB1N2/PPP3PP/R1BQK2R b KQkq - 1 8'),
+            ('R53','Najdorf','rnbqk2r/1p2bppp/p2ppn2/8/4PPP1/1NN5/PPP4P/R1BQKB1R b KQkq - 0 8'),
+            ('R57','Queens Indian','rn1q1rk1/pbppbppp/1p2pn2/8/2PP4/5NP1/PP2PPBP/RNBQR1K1 b - - 6 7'),
+            ('R61','English Symm','r1bq1rk1/pp1pppbp/2n2np1/2p5/2PP4/2N2NP1/PP2PPBP/R1BQ1RK1 b - - 0 7'),
+            ('R65','Sveshnikov','r1bqkb1r/1p3ppp/p1np1n2/4p3/P3P3/N1N5/1PP2PPP/R1BQKB1R b KQkq - 1 8'),
+            ('R85','French Tarrasch','rnbqkbnr/pp3ppp/8/2pp4/3P4/7P/PPPN1PP1/R1BQKBNR b KQkq - 0 5'),
+          ]
+          for label,path in [
+            ('eco-prior','analysis-results/v18-eco-sf19/eco-sf19-prior.bin'),
+            ('eco-stable-direct','analysis-results/v18-eco-sf19/eco-sf19-stable-direct.bin'),
+          ]:
+              hits=0
+              print('\n'+label, 'bytes', os.path.getsize(path))
+              with chess.polyglot.open_reader(path) as reader:
+                  for rid,name,fen in starts:
+                      board=chess.Board(fen)
+                      legal=set(board.legal_moves)
+                      entries=[e for e in reader.find_all(board) if e.move in legal]
+                      entries.sort(key=lambda e:(-int(e.weight),e.move.uci()))
+                      hits += bool(entries)
+                      print(rid, f'{name:18}', bool(entries), entries[0].move.uci() if entries else '-')
+              print('SUMMARY', hits, '/10')
+          PY
+      - name: Upload atlas evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: v18-eco-sf19-${{ github.sha }}
+          path: analysis-results/v18-eco-sf19
+          retention-days: 7
