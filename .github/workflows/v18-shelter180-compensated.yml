@@ -23,21 +23,19 @@ jobs:
           for d in /tmp/base /tmp/cand; do
             rm -rf "$d"; mkdir "$d"; unzip -q /tmp/p150.zip -d "$d"
             sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' "$d/agent.py"
+            curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o "$d/v18_gm2001.bin"
           done
           python - <<'PY'
           import numpy as np,hashlib
           p='/tmp/cand/experiments/v13_residual.i16'; w=np.fromfile(p,dtype=np.int16).astype(np.int32)
           scale=180
           coeff={(1,0):100,(1,1):85,(1,2):25,(2,0):55,(2,1):45,(2,2):15,(3,0):10,(3,1):8}
-          # Reward actual own-pawn shelter exactly as SHELTER180.
           for kf in (1,2):
             bucket=kf
             for pr in range(8):
               for pf in range(8):
                 c=coeff.get((pr,abs(pf-kf)),0)
                 if c: w[bucket*768 + pr*8 + pf] += (scale*c+50)//100
-            # Compensate the bucket with the value of an intact three-pawn second-rank shield:
-            # center pawn 100%, two adjacent pawns 85% each = 270% of scale.
             king_idx=bucket*768 + 5*64 + kf
             w[king_idx] -= (scale*270+50)//100
           assert w.min()>=-32768 and w.max()<=32767
