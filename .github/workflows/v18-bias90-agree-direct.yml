@@ -53,7 +53,7 @@ jobs:
           sha256sum /tmp/agreed/two-corpus-agree-direct.bin /tmp/cand/v18_two_corpus_agree.bin
       - name: Root coverage audit
         run: |
-          cat >/tmp/coverage.py <<'PY'
+          cat >/tmp/bookcov.py <<'PY'
           import sys,chess
           from pathlib import Path
           sys.path.insert(0,sys.argv[1]);import agent
@@ -66,8 +66,8 @@ jobs:
             if x is not None: rows.append((i,b.ply(),x.uci()))
           print('STRICT_ROOTS',strict,'EXTRA_ROOTS',extra,'TOTAL',len(lines));print('EXTRA_ROWS',rows)
           PY
-          python /tmp/coverage.py /tmp/base
-          python /tmp/coverage.py /tmp/cand
+          python /tmp/bookcov.py /tmp/base
+          python /tmp/bookcov.py /tmp/cand
       - name: 32-game paired timed A/B
         run: |
           cat >/tmp/worker.py <<'PY'
