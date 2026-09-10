@@ -1,0 +1,146 @@
+name: V18 PUNCH133 certified-DIRECT5 qualification
+
+on:
+  push:
+    branches: [analysis/v18-direct5-qual-20260910]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Reconstruct exact PUNCH133 and overlay challenger
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/control /tmp/challenger
+          mkdir -p /tmp/control /tmp/challenger
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/postbook150.zip
+          unzip -q /tmp/postbook150.zip -d /tmp/control
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/control/agent.py
+          curl --fail --location --retry 5 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/control/v18_gm2001.bin
+          cd /tmp/control
+          cat >/tmp/control.sha256 <<'EOF'
+          0306e8145a453d91b9b5ac92e9980931510d9e18f8ba598a7548d08b85165c35  experiments/numba_core.py
+          e38876e2a37193639f9b8b559b02bc064d820c4cdeda44579c9f88e5bd4468b1  experiments/v14_student_h64.npz
+          7d0fc5f7a186e79317cf12a2ff285d7716c651fbd045c53d65a3cc6eb1b15319  experiments/v13_residual.i16
+          f74f46499cc0fdef8fba53c2ba77652414463b0a68e7a3fac1e3764f70f94032  experiments/numba_search.py
+          cb9540d5ea2a7074ae0c3b5894babecc2fb01de94b102420d8a65e159325ada6  experiments/v14_student_single_runtime.py
+          6422eb8eb8713e02e6d62d33ef230f37cf707188e864b575226802aead128b2f  experiments/__init__.py
+          c2cc0534a984124c5a75e250bab65f2756ade47341bbca84d6b6871fdb2977f2  v14_kpk.u8
+          0ab496524b077f3c8f3778634f46b2bd79ed1c44ad4d89cf96857890396d1424  agent.py
+          fb6e9f3f27bb19a5b2fdefcc441c88ddeae48db61d5f00ad83973abb9f939c87  v18_gm2001.bin
+          EOF
+          sha256sum -c /tmp/control.sha256
+          cp -a /tmp/control/. /tmp/challenger/
+
+          curl --fail --location --retry 5 \
+            -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+            'https://api.github.com/repos/JamieLittle16/Chess/actions/artifacts/10169910862/zip' \
+            -o /tmp/direct5-artifact.zip
+          unzip -p /tmp/direct5-artifact.zip chessathon-knownstart-sf19-direct.bin > /tmp/challenger/v18_chessathon_sf19_direct.bin
+          echo 'c756a13a1d3e1726509c5a260b84855cf9fb877caf82a346678259ee0e333392  /tmp/challenger/v18_chessathon_sf19_direct.bin' | sha256sum -c -
+
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/challenger/agent.py')
+          s=p.read_text()
+          old='_BOOK_READER = chess.polyglot.open_reader(_BOOK_PATH)\n_BOOK_PRIOR_MAX_PLY: Final = 22\n'
+          new='_BOOK_READER = chess.polyglot.open_reader(_BOOK_PATH)\n\n_CERT_DIRECT_PATH = Path(__file__).with_name("v18_chessathon_sf19_direct.bin")\nif not _CERT_DIRECT_PATH.is_file():\n    raise ValueError("missing V18 certified tournament opening overlay")\n_CERT_DIRECT_READER = chess.polyglot.open_reader(_CERT_DIRECT_PATH)\n_BOOK_PRIOR_MAX_PLY: Final = 22\n'
+          assert old in s
+          s=s.replace(old,new,1)
+          marker='def _internal_move_from_chess(board: chess.Board, move: chess.Move) -> int:\n'
+          helper='''def _certified_direct_book_move(board: chess.Board) -> chess.Move | None:\n    if board.ply() > _BOOK_DIRECT_MAX_PLY:\n        return None\n    best_entry = None\n    try:\n        for entry in _CERT_DIRECT_READER.find_all(board):\n            move = entry.move\n            if move not in board.legal_moves:\n                continue\n            weight = int(entry.weight)\n            if weight <= 0:\n                continue\n            if best_entry is None or weight > int(best_entry.weight):\n                best_entry = entry\n    except (IndexError, ValueError):\n        return None\n    return None if best_entry is None else best_entry.move\n\n\n'''
+          assert marker in s
+          s=s.replace(marker,helper+marker,1)
+          old2='    direct_book_move = _high_confidence_book_move(board)\n    if direct_book_move is not None:\n'
+          new2='    direct_book_move = _high_confidence_book_move(board)\n    if direct_book_move is None:\n        direct_book_move = _certified_direct_book_move(board)\n    if direct_book_move is not None:\n'
+          assert old2 in s
+          p.write_text(s.replace(old2,new2,1))
+          PY
+          python -m py_compile /tmp/challenger/agent.py
+          cmp /tmp/control/experiments/numba_search.py /tmp/challenger/experiments/numba_search.py
+          sha256sum /tmp/challenger/agent.py /tmp/challenger/experiments/numba_search.py /tmp/challenger/v18_chessathon_sf19_direct.bin
+
+      - name: Verify startup, direct hits and non-hit equivalence
+        run: |
+          mkdir -p artifacts
+          cat >/tmp/qual.py <<'PY'
+          import json, sys, time
+          from pathlib import Path
+          import chess, numpy as np
+
+          mode=sys.argv[1]
+          d=Path(sys.argv[2])
+          sys.path.insert(0,str(d))
+          t=time.perf_counter(); import agent; init=time.perf_counter()-t
+          hits=[
+            ('R49','r1bqk2r/1pp2ppp/1bnp1n2/pP2p3/P1B1P3/2PP1N2/5PPP/RNBQK2R b KQkq - 0 8','c6e7'),
+            ('R51','r1bqk2r/pp1n1ppp/2n1p3/2bpP3/5P2/2NB1N2/PPP3PP/R1BQK2R b KQkq - 1 8','a7a6'),
+            ('R57','rn1q1rk1/pbppbppp/1p2pn2/8/2PP4/5NP1/PP2PPBP/RNBQR1K1 b - - 6 7','d7d5'),
+            ('R61','r1bq1rk1/pp1pppbp/2n2np1/2p5/2PP4/2N2NP1/PP2PPBP/R1BQ1RK1 b - - 0 7','c5d4'),
+            ('R65','r1bqkb1r/1p3ppp/p1np1n2/4p3/P3P3/N1N5/1PP2PPP/R1BQKB1R b KQkq - 1 8','c8g4'),
+          ]
+          misses=[
+            ('R46','r1bqkbnr/pp1p1ppp/2n1p3/8/3NP3/P7/1PP2PPP/RNBQKB1R b KQkq - 0 5'),
+            ('R48','r1b1k2r/pp1nqppp/2pbpn2/3p4/P1PP4/2N1PN2/1P2BPPP/R1BQ1RK1 b kq - 4 8'),
+            ('R50','r1bqk2r/pp3ppp/2nbpn2/2pp4/3P1B2/P1P1P3/1P1N1PPP/R2QKBNR w KQkq - 1 7'),
+            ('R53','rnbqk2r/1p2bppp/p2ppn2/8/4PPP1/1NN5/PPP4P/R1BQKB1R b KQkq - 0 8'),
+            ('R85','rnbqkbnr/pp3ppp/8/2pp4/3P4/7P/PPPN1PP1/R1BQKBNR b KQkq - 0 5'),
+          ]
+          def reset():
+              agent._GAME_KEYS.clear(); agent._PENDING_AFTER_OUR_MOVE=None
+              agent._LAST_CALL_TIME_LEFT_MS=None; agent._LAST_GET_MOVE_ELAPSED_MS=None
+              agent._CLOCK_OVERHEAD_EMA_MS=40.0; agent._CLOCK_FEEDBACK_SAMPLES=0
+              agent._BOOK_POST_SEARCH_BOOSTS=0
+              agent._HASH_KEYS.fill(np.uint64(0)); agent._HASH_MOVES.fill(np.int32(-1))
+              agent._TT_TABLE.fill(np.uint64(0)); agent._QUIET_HISTORY.fill(np.int16(0))
+          out={'mode':mode,'init_s':init,'hits':[],'misses':[]}
+          if mode=='challenger':
+              for rid,fen,want in hits:
+                  reset(); b=chess.Board(fen)
+                  assert agent._high_confidence_book_move(b) is None
+                  got=agent._certified_direct_book_move(b)
+                  assert got is not None and got.uci()==want,(rid,got,want)
+                  t=time.perf_counter(); u=agent.get_move(fen,120000); dt=time.perf_counter()-t
+                  assert u==want,(rid,u,want)
+                  assert agent._BOOK_POST_SEARCH_BOOSTS==1,(rid,agent._BOOK_POST_SEARCH_BOOSTS)
+                  out['hits'].append([rid,u,dt])
+          for rid,fen in misses:
+              reset(); b=chess.Board(fen)
+              if mode=='challenger': assert agent._certified_direct_book_move(b) is None
+              t=time.perf_counter(); r=agent.search_position(b,120000,np.empty(0,dtype=np.uint64)); dt=time.perf_counter()-t
+              out['misses'].append([rid,r.move.uci(),r.score,r.depth,r.nodes,dt])
+          print(json.dumps(out,indent=2)); Path(sys.argv[3]).write_text(json.dumps(out,indent=2))
+          PY
+          /usr/bin/time -v python /tmp/qual.py control /tmp/control artifacts/control.json 2>&1 | tee artifacts/control.log
+          /usr/bin/time -v python /tmp/qual.py challenger /tmp/challenger artifacts/challenger.json 2>&1 | tee artifacts/challenger.log
+          python - <<'PY' | tee artifacts/compare.txt
+          import json
+          a=json.load(open('artifacts/control.json')); b=json.load(open('artifacts/challenger.json'))
+          print('init control/challenger',a['init_s'],b['init_s'])
+          assert len(b['hits'])==5
+          for row in b['hits']: print('DIRECT',row)
+          for x,y in zip(a['misses'],b['misses']):
+              assert x[0]==y[0]
+              print('MISS',x[0],x[1:5],y[1:5])
+              assert x[1:5]==y[1:5],(x,y)
+          print('PASS: 5/5 direct hits and exact non-hit move/score/depth/node parity')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v18-direct5-qual-${{ github.sha }}
+          path: artifacts
+          retention-days: 5
