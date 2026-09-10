@@ -1,0 +1,61 @@
+name: V18 DIRECT5 Stockfish delta
+
+on:
+  push:
+    branches: [analysis/v18-direct5-sf-delta-20260910]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install chess==1.11.2
+      - name: Download Stockfish 19
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 'https://github.com/official-stockfish/Stockfish/releases/latest/download/stockfish-linux-x86-64-universal.tar.gz' -o /tmp/sf.tar.gz
+          mkdir -p /tmp/sf && tar -xzf /tmp/sf.tar.gz -C /tmp/sf
+          SF="$(find /tmp/sf -type f -name 'stockfish*' -perm /111 | head -n1)"
+          cp "$SF" /tmp/sf19 && chmod +x /tmp/sf19
+      - name: Compare original and certified moves
+        run: |
+          python - <<'PY'
+          import chess, chess.engine
+          rows=[
+            ('R51','r1bqk2r/pp1n1ppp/2n1p3/2bpP3/5P2/2NB1N2/PPP3PP/R1BQK2R b KQkq - 1 8','f7f6','a7a6'),
+            ('R57','rn1q1rk1/pbppbppp/1p2pn2/8/2PP4/5NP1/PP2PPBP/RNBQR1K1 b - - 6 7','c7c5','d7d5'),
+            ('R65','r1bqkb1r/1p3ppp/p1np1n2/4p3/P3P3/N1N5/1PP2PPP/R1BQKB1R b KQkq - 1 8','c8e6','c8g4'),
+          ]
+          eng=chess.engine.SimpleEngine.popen_uci('/tmp/sf19')
+          if 'Threads' in eng.options: eng.configure({'Threads':1})
+          if 'Hash' in eng.options: eng.configure({'Hash':256})
+          def clear():
+              if 'Clear Hash' in eng.options: eng.configure({'Clear Hash':None})
+          def cp(info,turn):
+              x=info['score'].pov(turn).score(mate_score=100000); return int(x if x is not None else 0)
+          try:
+              total=0
+              for rid,fen,old,new in rows:
+                  b=chess.Board(fen)
+                  scores={}
+                  for uci in (old,new):
+                      m=chess.Move.from_uci(uci); assert m in b.legal_moves
+                      vals=[]
+                      for _ in range(3):
+                          clear(); info=eng.analyse(b,chess.engine.Limit(nodes=1_000_000),root_moves=[m]); vals.append(cp(info,b.turn))
+                      scores[uci]=min(vals)
+                  delta=scores[new]-scores[old]
+                  total+=delta
+                  print(rid,'PUNCH133',old,scores[old],'DIRECT5',new,scores[new],'delta',delta,'cp',flush=True)
+              print('TOTAL_DELTA',total,'cp')
+          finally:
+              eng.quit()
+          PY
