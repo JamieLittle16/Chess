@@ -1,0 +1,88 @@
+name: V18 known-start certified DIRECT overlay
+
+on:
+  push:
+    branches: [analysis/v18-knownstart-direct-20260910]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install chess==1.11.2
+      - name: Download Stockfish 19
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 'https://github.com/official-stockfish/Stockfish/releases/latest/download/stockfish-linux-x86-64-universal.tar.gz' -o /tmp/sf.tar.gz
+          mkdir -p /tmp/sf && tar -xzf /tmp/sf.tar.gz -C /tmp/sf
+          SF="$(find /tmp/sf -type f -name 'stockfish*' -perm /111 | head -n1)"
+          cp "$SF" /tmp/stockfish19 && chmod +x /tmp/stockfish19
+      - name: Reverify and build five-entry Polyglot overlay
+        run: |
+          mkdir -p analysis-results/v18-knownstart-direct
+          python - <<'PY' | tee analysis-results/v18-knownstart-direct/audit.log
+          import struct, json
+          import chess, chess.engine, chess.polyglot
+
+          rows=[
+            ('R49','Italian','r1bqk2r/1pp2ppp/1bnp1n2/pP2p3/P1B1P3/2PP1N2/5PPP/RNBQK2R b KQkq - 0 8','c6e7'),
+            ('R51','French Classical','r1bqk2r/pp1n1ppp/2n1p3/2bpP3/5P2/2NB1N2/PPP3PP/R1BQK2R b KQkq - 1 8','a7a6'),
+            ('R57','Queens Indian','rn1q1rk1/pbppbppp/1p2pn2/8/2PP4/5NP1/PP2PPBP/RNBQR1K1 b - - 6 7','d7d5'),
+            ('R61','English Symm','r1bq1rk1/pp1pppbp/2n2np1/2p5/2PP4/2N2NP1/PP2PPBP/R1BQ1RK1 b - - 0 7','c5d4'),
+            ('R65','Sveshnikov','r1bqkb1r/1p3ppp/p1np1n2/4p3/P3P3/N1N5/1PP2PPP/R1BQKB1R b KQkq - 1 8','c8g4'),
+          ]
+          def cp(score,turn):
+              x=score.pov(turn).score(mate_score=100000); return int(x if x is not None else 0)
+          def clear(e):
+              if 'Clear Hash' in e.options: e.configure({'Clear Hash':None})
+          def raw(board,move):
+              to=move.to_square
+              if board.is_castling(move):
+                  if move.from_square==chess.E1: to=chess.H1 if move.to_square==chess.G1 else chess.A1
+                  elif move.from_square==chess.E8: to=chess.H8 if move.to_square==chess.G8 else chess.A8
+              promo=0 if move.promotion is None else int(move.promotion)-1
+              return int(to)|(int(move.from_square)<<6)|(promo<<12)
+
+          eng=chess.engine.SimpleEngine.popen_uci('/tmp/stockfish19')
+          if 'Threads' in eng.options: eng.configure({'Threads':1})
+          if 'Hash' in eng.options: eng.configure({'Hash':128})
+          entries=[]; report=[]
+          try:
+              for rid,name,fen,uci in rows:
+                  b=chess.Board(fen); m=chess.Move.from_uci(uci); assert m in b.legal_moves
+                  clear(eng); best=eng.analyse(b,chess.engine.Limit(nodes=500000))
+                  bestm=best['pv'][0]; bestcp=cp(best['score'],b.turn)
+                  vals=[]
+                  for _ in range(2):
+                      clear(eng); info=eng.analyse(b,chess.engine.Limit(nodes=500000),root_moves=[m])
+                      vals.append(cp(info['score'],b.turn))
+                  forced=min(vals); loss=max(0,bestcp-forced)
+                  ok=loss<=12
+                  print(rid,name,'candidate',uci,'SFbest',bestm.uci(),'bestcp',bestcp,'forced',vals,'loss',loss,'OK',ok)
+                  assert ok, (rid,loss)
+                  key=int(chess.polyglot.zobrist_hash(b))
+                  entries.append((key,raw(b,m),65535,0))
+                  report.append(dict(id=rid,name=name,fen=fen,move=uci,key_hex=f'{key:016x}',best=bestm.uci(),best_cp=bestcp,forced=vals,loss_cp=loss))
+          finally:
+              eng.quit()
+          entries.sort(key=lambda x:(x[0],x[1]))
+          out='analysis-results/v18-knownstart-direct/chessathon-knownstart-sf19-direct.bin'
+          with open(out,'wb') as f:
+              for e in entries: f.write(struct.pack('>QHHI',*e))
+          open('analysis-results/v18-knownstart-direct/audit.json','w').write(json.dumps(report,indent=2)+'\n')
+          print('entries',len(entries),'bytes',__import__('os').path.getsize(out))
+          PY
+          sha256sum analysis-results/v18-knownstart-direct/chessathon-knownstart-sf19-direct.bin | tee analysis-results/v18-knownstart-direct/sha256.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v18-knownstart-direct-${{ github.sha }}
+          path: analysis-results/v18-knownstart-direct
+          retention-days: 7
