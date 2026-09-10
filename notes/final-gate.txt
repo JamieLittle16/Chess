@@ -1,0 +1,1 @@
+Promotion gate: independent timed A/B must be non-negative, exact +0.5 increment sample must not contradict, package verification must pass cold import/smoke/integrity. Only then may BIAS90 replace PUNCH133 as provisional leader.
