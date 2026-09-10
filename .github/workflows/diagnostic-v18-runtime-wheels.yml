@@ -1,0 +1,28 @@
+name: Diagnostic V18 runtime wheels
+
+on:
+  push:
+    branches: [diagnostic/v18-gmbook-upload-test]
+    paths: ['.github/workflows/diagnostic-v18-runtime-wheels.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wheels:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Fetch runtime wheels
+        run: |
+          mkdir -p wheelhouse
+          python -m pip download --disable-pip-version-check --only-binary=:all: --no-deps numpy==2.5.2 numba==0.67.0 llvmlite==0.49.0 -d wheelhouse
+          sha256sum wheelhouse/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v18-runtime-wheels-py313
+          path: wheelhouse/
+          retention-days: 1
