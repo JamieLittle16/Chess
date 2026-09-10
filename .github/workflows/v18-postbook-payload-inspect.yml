@@ -1,0 +1,33 @@
+name: Inspect V18 postbook payload
+
+on:
+  push:
+    branches: [analysis/v18-postbook-payload-inspect-20260910]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reconstruct stored postbook payload
+        run: |
+          set -euo pipefail
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/postbook.bin
+          file /tmp/postbook.bin
+          sha256sum /tmp/postbook.bin
+          stat -c 'bytes=%s' /tmp/postbook.bin
+          if unzip -t /tmp/postbook.bin; then
+            echo 'ZIP_OK=1'
+            unzip -l /tmp/postbook.bin | tail -n +1
+          else
+            echo 'ZIP_OK=0'
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reconstructed-v18-postbook
+          path: /tmp/postbook.bin
+          retention-days: 2
