@@ -1,0 +1,35 @@
+name: Vendor exact V18 Python runtime
+
+on:
+  push:
+    branches: [diagnostic/v18-gmbook-upload-test]
+    paths:
+      - '.github/workflows/vendor-v18-python-runtime.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  vendor:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install exact runtime into portable target
+        run: |
+          python -m pip install --disable-pip-version-check --target vendor chess==1.11.2 numpy==2.5.2 numba==0.67.0
+          PYTHONPATH=vendor python - <<'PY'
+          import chess, numpy, numba
+          print(chess.__version__, numpy.__version__, numba.__version__)
+          assert chess.__version__ == '1.11.2'
+          assert numpy.__version__ == '2.5.2'
+          assert numba.__version__ == '0.67.0'
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v18-python-runtime-py313
+          path: vendor/
+          retention-days: 1
