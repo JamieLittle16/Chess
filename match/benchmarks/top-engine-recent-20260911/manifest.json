@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "captured_date": "2026-09-11",
+  "source": "user-provided aichessathon-round-.zip",
+  "source_pgn_files": 46,
+  "unique_games_by_file_sha256": 37,
+  "corpus_encoding": "gzip-compressed PGN, then base64 split across chunk_*.b64",
+  "reconstructed_pgn_sha256": "dbac26e0f2b451eb7bf80994ca48fdd6b1abbc9f133e528d3e968f007f7aa264",
+  "benchmark_targets": [
+    "Ryan Vincent",
+    "Emile Andrieu",
+    "Lightning Tree"
+  ],
+  "default_positions_per_target": 48,
+  "selection_seed": 20260911,
+  "selection": "candidate-blind deterministic phase-balanced sample; duplicate target FENs collapse to the latest corpus occurrence",
+  "oracle": {
+    "engine": "Stockfish 19 full strength",
+    "threads": 1,
+    "hash_mb": 64,
+    "nodes_per_root_analysis": 200000,
+    "method": "equal fixed-node unrestricted/root-restricted searches for best, historical and candidate moves"
+  },
+  "competition_clock": "historical pre-move clock reconstructed from %clk comments; first move by each colour starts at 120000 ms",
+  "pairwise_noise_margin_cp": 8,
+  "offline_only": true,
+  "notes": [
+    "The benchmark corpus and Stockfish labels are research artifacts and must not be copied into a competition submission.",
+    "This is a static move-choice accuracy gate, not a replacement for real-clock head-to-head Elo testing.",
+    "A rival move that is already Stockfish-optimal cannot be strictly outplayed; ties are therefore treated as correct pairwise outcomes inside an 8 cp oracle-noise band."
+  ]
+}
