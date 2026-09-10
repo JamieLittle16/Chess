@@ -1,0 +1,63 @@
+name: V18 residual weaken screen
+on:
+  push:
+    branches: [analysis/v18-residual-weaken-screen-20260910]
+permissions:
+  contents: read
+jobs:
+  screen:
+    strategy:
+      fail-fast: false
+      matrix:
+        divisor: [8, 10, 12, 24, 9999]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ci/v18-stockfish-calibration
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Reconstruct exact PUNCH133 and patch divisor
+        env:
+          DIVISOR: ${{ matrix.divisor }}
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/engine && mkdir /tmp/engine
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          unzip -q /tmp/p150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+          curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/engine/v18_gm2001.bin
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path('/tmp/engine/experiments/numba_search.py'); t=p.read_text(); old='correction = correction // 6'
+          assert t.count(old)==2
+          d=int(os.environ['DIVISOR']); p.write_text(t.replace(old,f'correction = correction // {d}'))
+          print('DIVISOR',d)
+          PY
+      - name: Fixed-node screen
+        env:
+          PYTHONPATH: /tmp/engine
+          DIVISOR: ${{ matrix.divisor }}
+        run: |
+          python - <<'PY'
+          import time, chess, numpy as np
+          t0=time.perf_counter()
+          from experiments.numba_core import encode_position, move_to_uci
+          from experiments.numba_search import iterative_search_stateful
+          print('IMPORT_COMPILE_S',round(time.perf_counter()-t0,3),flush=True)
+          cases=[
+            ('castle','r2q1rk1/1b1n1pbp/pp1ppnp1/8/PPPNPP2/2NBB2P/2Q3P1/R3K2R w KQ - 1 14'),
+            ('dxe4','r1bqk1nr/3n1pbp/3pp1p1/1B1p4/4P3/2N1B3/PP1QNPPP/R3K2R b KQkq - 0 11'),
+            ('Qb3','rnb1kb1r/2q2ppp/p1pp1n2/1p2p3/2PPP3/2NBB3/PP2NPPP/R2QK2R w KQkq - 0 8'),
+            ('a4','rnb1k2r/2q1bppp/p1pp1n2/1p2p3/2PPP3/1QNBB3/PP2NPPP/R3K2R w KQkq - 2 9'),
+            ('a3a2','r5k1/2q1bppp/p1p5/3p1P2/P1P3n1/QB1n4/1P1BNPPP/R4K1R w - - 0 20')]
+          h=np.empty(0,dtype=np.uint64)
+          for name,fen in cases:
+              b=chess.Board(fen); enc=encode_position(b); print('\nPOSITION',name,flush=True)
+              for n in (200_000,1_000_000,4_000_000):
+                  t=time.perf_counter(); m,s,d,nodes=iterative_search_stateful(enc.board.copy(),enc.side,enc.castling,enc.ep_square,b.halfmove_clock,h,0,n); dt=time.perf_counter()-t
+                  print(f'nodes={n:8d} move={move_to_uci(m):5s} score={s:+6d} depth={d:2d} sec={dt:.3f}',flush=True)
+          PY
