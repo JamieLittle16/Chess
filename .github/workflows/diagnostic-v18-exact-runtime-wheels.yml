@@ -14,14 +14,16 @@ jobs:
     steps:
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-      - name: Download exact competition wheels
+          python-version: '3.13'
+      - name: Download numeric runtime wheels for local executable test
         shell: bash
         run: |
           set -euo pipefail
           mkdir wheels
+          # python-chess is pure Python and was already captured separately as chess-1.11.2.
+          # Fetch the exact Numpy/Numba versions for the sandbox's CPython 3.13 ABI.
           python -m pip download --disable-pip-version-check --only-binary=:all: -d wheels \
-            chess==1.11.2 numpy==2.5.2 numba==0.67.0
+            numpy==2.5.2 numba==0.67.0
           ls -lh wheels
           python - <<'PY'
           import hashlib, pathlib
@@ -30,6 +32,6 @@ jobs:
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: v18-exact-runtime-wheels
+          name: v18-cp313-numeric-runtime-wheels
           path: wheels/
           retention-days: 1
