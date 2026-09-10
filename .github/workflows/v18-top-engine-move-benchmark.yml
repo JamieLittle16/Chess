@@ -1,0 +1,223 @@
+name: V18 recent top-engine move benchmark
+
+on:
+  push:
+    branches: [analysis/v18-top-engine-move-benchmark-20260911]
+    paths:
+      - '.github/workflows/v18-top-engine-move-benchmark.yml'
+      - 'scripts/v18_competitor_move_benchmark.py'
+      - 'scripts/stockfish_lab.py'
+      - 'match/benchmarks/top-engine-recent-20260911/**'
+      - 'ci/v18_postbook_payload/**'
+  workflow_dispatch:
+    inputs:
+      positions:
+        description: 'Maximum phase-balanced positions per opponent'
+        required: false
+        default: '48'
+      nodes:
+        description: 'Full-strength Stockfish nodes per root analysis'
+        required: false
+        default: '200000'
+
+permissions:
+  contents: read
+
+env:
+  BENCH_POSITIONS: ${{ github.event_name == 'workflow_dispatch' && inputs.positions || '48' }}
+  BENCH_NODES: ${{ github.event_name == 'workflow_dispatch' && inputs.nodes || '200000' }}
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: 'Ryan Vincent'
+            slug: ryan-vincent
+          - target: 'Emile Andrieu'
+            slug: emile-andrieu
+          - target: 'Lightning Tree'
+            slug: lightning-tree
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install exact competition runtime
+        run: python -m pip install 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+
+      - name: Verify benchmark runner syntax
+        run: python -m py_compile scripts/v18_competitor_move_benchmark.py scripts/stockfish_lab.py
+
+      - name: Reconstruct frozen recent-game corpus
+        run: |
+          set -euo pipefail
+          cat match/benchmarks/top-engine-recent-20260911/chunk_*.b64 \
+            | base64 -d \
+            | gzip -dc > /tmp/top-engine-recent.pgn
+          printf '%s  %s\n' \
+            'dbac26e0f2b451eb7bf80994ca48fdd6b1abbc9f133e528d3e968f007f7aa264' \
+            '/tmp/top-engine-recent.pgn' | sha256sum -c -
+
+      - name: Reconstruct exact PUNCH133 engine
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/engine /tmp/bench
+          mkdir -p /tmp/engine /tmp/bench/${{ matrix.slug }}
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/postbook150.zip
+          unzip -q /tmp/postbook150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+          curl --fail --location --retry 5 \
+            'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' \
+            -o /tmp/engine/v18_gm2001.bin
+          cat >/tmp/exact.sha256 <<'EOF'
+          0306e8145a453d91b9b5ac92e9980931510d9e18f8ba598a7548d08b85165c35  /tmp/engine/experiments/numba_core.py
+          e38876e2a37193639f9b8b559b02bc064d820c4cdeda44579c9f88e5bd4468b1  /tmp/engine/experiments/v14_student_h64.npz
+          7d0fc5f7a186e79317cf12a2ff285d7716c651fbd045c53d65a3cc6eb1b15319  /tmp/engine/experiments/v13_residual.i16
+          f74f46499cc0fdef8fba53c2ba77652414463b0a68e7a3fac1e3764f70f94032  /tmp/engine/experiments/numba_search.py
+          cb9540d5ea2a7074ae0c3b5894babecc2fb01de94b102420d8a65e159325ada6  /tmp/engine/experiments/v14_student_single_runtime.py
+          6422eb8eb8713e02e6d62d33ef230f37cf707188e864b575226802aead128b2f  /tmp/engine/experiments/__init__.py
+          c2cc0534a984124c5a75e250bab65f2756ade47341bbca84d6b6871fdb2977f2  /tmp/engine/v14_kpk.u8
+          0ab496524b077f3c8f3778634f46b2bd79ed1c44ad4d89cf96857890396d1424  /tmp/engine/agent.py
+          fb6e9f3f27bb19a5b2fdefcc441c88ddeae48db61d5f00ad83973abb9f939c87  /tmp/engine/v18_gm2001.bin
+          EOF
+          sha256sum -c /tmp/exact.sha256
+          grep -q '_INCREMENT_MS: Final = 500.0' /tmp/engine/agent.py
+          grep -q '_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33' /tmp/engine/agent.py
+
+      - name: Download Stockfish 19
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://github.com/official-stockfish/Stockfish/releases/latest/download/stockfish-linux-x86-64-universal.tar.gz' \
+            -o /tmp/sf.tar.gz
+          mkdir -p /tmp/sf
+          tar -xzf /tmp/sf.tar.gz -C /tmp/sf
+          SF="$(find /tmp/sf -type f -name 'stockfish*' -perm /111 | head -n1)"
+          cp "$SF" /tmp/stockfish19
+          chmod +x /tmp/stockfish19
+          /tmp/stockfish19 compiler
+
+      - name: Score PUNCH133 against ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          python scripts/v18_competitor_move_benchmark.py \
+            --pgn /tmp/top-engine-recent.pgn \
+            --engine-dir /tmp/engine \
+            --stockfish /tmp/stockfish19 \
+            --target '${{ matrix.target }}' \
+            --positions "$BENCH_POSITIONS" \
+            --nodes "$BENCH_NODES" \
+            --threads 1 \
+            --hash-mb 64 \
+            --pairwise-margin-cp 8 \
+            --seed 20260911 \
+            --output-dir /tmp/bench/${{ matrix.slug }}
+          cat /tmp/bench/${{ matrix.slug }}/summary.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: top-engine-${{ matrix.slug }}
+          path: /tmp/bench/${{ matrix.slug }}
+          retention-days: 7
+
+  aggregate:
+    runs-on: ubuntu-24.04
+    needs: benchmark
+    if: always()
+    steps:
+      - name: Download Ryan Vincent result
+        uses: actions/download-artifact@v4
+        with:
+          name: top-engine-ryan-vincent
+          path: bench/ryan-vincent
+
+      - name: Download Emile Andrieu result
+        uses: actions/download-artifact@v4
+        with:
+          name: top-engine-emile-andrieu
+          path: bench/emile-andrieu
+
+      - name: Download Lightning Tree result
+        uses: actions/download-artifact@v4
+        with:
+          name: top-engine-lightning-tree
+          path: bench/lightning-tree
+
+      - name: Aggregate opponent gates
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          paths = sorted(Path('bench').glob('*/summary.json'))
+          if len(paths) != 3:
+              raise SystemExit(f'expected 3 summaries, found {len(paths)}: {paths}')
+          summaries = [json.loads(path.read_text()) for path in paths]
+          overall_pass = all(item['gate_pass'] for item in summaries)
+          total_positions = sum(item['positions'] for item in summaries)
+          weighted_hist = sum(item['historical']['mean_cp_loss'] * item['positions'] for item in summaries) / total_positions
+          weighted_cand = sum(item['candidate']['mean_cp_loss'] * item['positions'] for item in summaries) / total_positions
+          weighted_pair = sum(item['pairwise']['score'] * item['positions'] for item in summaries) / total_positions
+
+          payload = {
+              'schema_version': 1,
+              'overall_pass': overall_pass,
+              'targets_passed': sum(bool(item['gate_pass']) for item in summaries),
+              'targets_total': len(summaries),
+              'positions_total': total_positions,
+              'weighted_historical_mean_cp_loss': round(weighted_hist, 3),
+              'weighted_candidate_mean_cp_loss': round(weighted_cand, 3),
+              'weighted_mean_cp_loss_reduction': round(weighted_hist - weighted_cand, 3),
+              'weighted_pairwise_score': round(weighted_pair, 6),
+              'targets': summaries,
+          }
+          Path('benchmark-summary.json').write_text(json.dumps(payload, indent=2, sort_keys=True) + '\n')
+          Path('gate.txt').write_text('PASS\n' if overall_pass else 'FAIL\n')
+
+          lines = [
+              '# V18 recent top-engine move benchmark',
+              '',
+              '| Opponent | N | Opponent mean CPL | PUNCH133 mean CPL | CPL gain | Pair W-T-L | Pair score | SF-best match opponent -> ours | Gate |',
+              '|---|---:|---:|---:|---:|---:|---:|---:|:---:|',
+          ]
+          for item in sorted(summaries, key=lambda x: x['target']):
+              p = item['pairwise']
+              hist = item['historical']
+              cand = item['candidate']
+              lines.append(
+                  f"| {item['target']} | {item['positions']} | {hist['mean_cp_loss']:.1f} | "
+                  f"{cand['mean_cp_loss']:.1f} | {p['mean_cp_loss_reduction']:+.1f} | "
+                  f"{p['wins']}-{p['ties']}-{p['losses']} | {p['score']:.3f} | "
+                  f"{100*hist['best_move_match_rate']:.1f}% -> {100*cand['best_move_match_rate']:.1f}% | "
+                  f"{'PASS' if item['gate_pass'] else 'FAIL'} |"
+              )
+          lines += [
+              '',
+              f"**Overall:** {'PASS' if overall_pass else 'FAIL'} — "
+              f"weighted mean CPL {weighted_hist:.1f} -> {weighted_cand:.1f} "
+              f"({weighted_hist-weighted_cand:+.1f}); pairwise score {weighted_pair:.3f}.",
+          ]
+          Path('benchmark-summary.md').write_text('\n'.join(lines) + '\n')
+          print(Path('benchmark-summary.md').read_text())
+          PY
+          cat benchmark-summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: top-engine-benchmark-summary
+          path: |
+            benchmark-summary.json
+            benchmark-summary.md
+            gate.txt
+          retention-days: 7
+
+      - name: Enforce benchmark gate
+        run: test "$(cat gate.txt)" = PASS
