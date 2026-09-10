@@ -1,0 +1,35 @@
+name: V18 eval state update inspect
+on:
+  push:
+    branches: [analysis/v18-eval-state-update-inspect-20260910]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ci/v18-stockfish-calibration
+      - name: Extract exact source regions
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/engine
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          unzip -q /tmp/p150.zip -d /tmp/engine
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/engine/experiments/numba_search.py'); L=p.read_text().splitlines()
+          needles=['def _build_eval_state_into','def _update_eval','def _apply_eval','def _make_move','EVAL_KING_WHITE','EVAL_KING_BLACK','EVAL_V13_WIDTH','EVAL_WIDTH','_residual_piece_contribution']
+          hits=[]
+          for i,l in enumerate(L):
+              if any(n in l for n in needles): hits.append(i)
+          ranges=[]
+          for i in hits:
+              a=max(0,i-15); b=min(len(L),i+100)
+              if ranges and a<=ranges[-1][1]: ranges[-1]=(ranges[-1][0],max(ranges[-1][1],b))
+              else:ranges.append((a,b))
+          for a,b in ranges:
+              print(f'--- {a+1}-{b} ---')
+              for j in range(a,b):print(f'{j+1:5d}: {L[j]}')
+          PY
