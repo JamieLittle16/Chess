@@ -15,6 +15,7 @@ search-trace = []
 
 [dependencies]
 chess-core = { path = "../chess-core" }
+safe_arch = "=1.2.0"
 
 [lints]
 workspace = true

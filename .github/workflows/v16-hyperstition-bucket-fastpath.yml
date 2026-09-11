@@ -1,0 +1,147 @@
+name: V16 Hyperstition bucket fastpath
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    if: github.head_ref == 'v16/hyperstition-bucket-fastpath'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RUSTFLAGS: -C target-cpu=x86-64-v3
+      HYPER_URL: https://github.com/cosmobobak/viridithas-networks/releases/download/v92/hyperstition-b400.nnue.zst
+      HYPER_RAW_SHA256: 36bcc6b3354ecbdb88fb95a341e494558b052223143f38ff6e6387aed99ab193
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: Strict certified-baseline gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/hyper-bucket .qualification/bin
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --all-features --release
+
+      - name: Download exact Hyperstition v92 network
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 "$HYPER_URL" \
+            --output .qualification/hyper-bucket/hyperstition-b400.nnue.zst
+          if ! command -v zstd >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y zstd
+          fi
+          zstd --decompress --force \
+            .qualification/hyper-bucket/hyperstition-b400.nnue.zst \
+            -o .qualification/hyper-bucket/hyperstition-b400.nnue
+          test "$(stat -c%s .qualification/hyper-bucket/hyperstition-b400.nnue)" = '50616896'
+          echo "$HYPER_RAW_SHA256  .qualification/hyper-bucket/hyperstition-b400.nnue" | sha256sum --check --strict
+
+      - name: Benchmark current materialized evaluator
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release -p chess-eval --example hyperstition_tail_bench
+          cp target/release/examples/hyperstition_tail_bench .qualification/bin/baseline-tail
+          chmod +x .qualification/bin/baseline-tail
+          for run in 1 2 3 4 5; do
+            .qualification/bin/baseline-tail .qualification/hyper-bucket/hyperstition-b400.nnue 300000 \
+              | tee ".qualification/hyper-bucket/baseline-${run}.txt"
+          done
+
+      - name: Apply aggregate occupancy candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/apply_hyperstition_bucket_fastpath_probe.py
+          cargo fmt --all
+          git diff --check
+          git diff -- crates/chess-eval/src/hyperstition.rs > .qualification/hyper-bucket/candidate.patch
+          test -s .qualification/hyper-bucket/candidate.patch
+          sha256sum scripts/apply_hyperstition_bucket_fastpath_probe.py > .qualification/hyper-bucket/patcher.sha256
+
+      - name: Strict candidate correctness gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --all-features --release
+          cargo build --release -p chess-eval --example hyperstition_tail_bench
+          cp target/release/examples/hyperstition_tail_bench .qualification/bin/candidate-tail
+          chmod +x .qualification/bin/candidate-tail
+
+      - name: Benchmark aggregate occupancy candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          for run in 1 2 3 4 5; do
+            .qualification/bin/candidate-tail .qualification/hyper-bucket/hyperstition-b400.nnue 300000 \
+              | tee ".qualification/hyper-bucket/candidate-${run}.txt"
+          done
+
+      - name: Require exact scores and a one-percent median win
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' | tee .qualification/hyper-bucket/performance-summary.txt
+          import re
+          import statistics
+          from pathlib import Path
+
+          def read(prefix):
+              times = []
+              identities = []
+              for run in range(1, 6):
+                  text = Path(f'.qualification/hyper-bucket/{prefix}-{run}.txt').read_text()
+                  scores = re.search(r'^scores=(.+)$', text, re.MULTILINE)
+                  summary = re.search(r'^summary .*ns_per_eval=([0-9.]+) checksum=(-?[0-9]+)$', text, re.MULTILINE)
+                  if not scores or not summary:
+                      raise SystemExit(f'could not parse {prefix} run {run}')
+                  identities.append((scores.group(1), summary.group(2)))
+                  times.append(float(summary.group(1)))
+              if len(set(identities)) != 1:
+                  raise SystemExit(f'{prefix} output identity varied: {identities}')
+              return times, identities[0]
+
+          baseline, base_id = read('baseline')
+          candidate, cand_id = read('candidate')
+          if base_id != cand_id:
+              raise SystemExit(f'evaluator output changed: baseline={base_id} candidate={cand_id}')
+          base_med = statistics.median(baseline)
+          cand_med = statistics.median(candidate)
+          ratio = cand_med / base_med
+          print(f'baseline_runs_ns={baseline}')
+          print(f'candidate_runs_ns={candidate}')
+          print(f'baseline_median_ns={base_med:.3f}')
+          print(f'candidate_median_ns={cand_med:.3f}')
+          print(f'time_ratio={ratio:.4f}x')
+          print(f'speedup={base_med / cand_med:.4f}x')
+          print(f'identity={base_id}')
+          if ratio > 0.99:
+              raise SystemExit(f'candidate failed 1% speedup gate: ratio={ratio:.4f}')
+          PY
+
+      - name: Upload evidence without network bytes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v16-hyperstition-bucket-fastpath-${{ github.sha }}
+          path: |
+            .qualification/hyper-bucket/baseline-*.txt
+            .qualification/hyper-bucket/candidate-*.txt
+            .qualification/hyper-bucket/candidate.patch
+            .qualification/hyper-bucket/patcher.sha256
+            .qualification/hyper-bucket/performance-summary.txt
+          retention-days: 30
