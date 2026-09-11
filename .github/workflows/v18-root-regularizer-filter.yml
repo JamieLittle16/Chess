@@ -3,7 +3,9 @@ name: V18 root static regularizer filter
 on:
   push:
     branches: [analysis/v18-root-quality-fastfilter-20260911]
-    paths: ['.github/workflows/v18-root-regularizer-filter.yml']
+    paths:
+      - '.github/workflows/v18-root-regularizer-filter.yml'
+      - 'scripts/apply_v18_root_static_regularizer.py'
   workflow_dispatch:
 
 permissions:
