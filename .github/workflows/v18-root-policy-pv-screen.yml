@@ -1,0 +1,69 @@
+name: V18 root-policy and PV-selectivity screen
+
+on:
+  push:
+    branches: [analysis/v18-benchmark-driven-search-audit-20260911]
+    paths: [.github/workflows/v18-root-policy-pv-screen.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [root_value4, root_value16, pv_lmr, check_ext3]
+        target: ['Ryan Vincent', 'Emile Andrieu', 'Lightning Tree']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Reconstruct repaired corpus and candidate
+        env:
+          VARIANT: '${{ matrix.variant }}'
+        run: |
+          set -euo pipefail
+          (for f in match/benchmarks/top-engine-recent-20260911/chunk_*.b64; do base64 -d "$f"; done) | gzip -dc > /tmp/top.pgn
+          echo 'dbac26e0f2b451eb7bf80994ca48fdd6b1abbc9f133e528d3e968f007f7aa264  /tmp/top.pgn' | sha256sum -c -
+          rm -rf /tmp/engine; mkdir /tmp/engine
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          unzip -q /tmp/p150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+          curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/engine/v18_gm2001.bin
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path('/tmp/engine/experiments/numba_search.py'); s=p.read_text(); v=os.environ['VARIANT']
+          root='''    _order_moves_with_killers(\n        board, moves, count, preferred, score_stack[0], -1, -1, side, -1, quiet_history\n    )\n\n    _pick_next_scored_move(moves, score_stack[0], 0, count)'''
+          if v.startswith('root_value'):
+              scale=int(v.removeprefix('root_value'))
+              repl=f'''    _order_moves_with_killers(\n        board, moves, count, preferred, score_stack[0], -1, -1, side, -1, quiet_history\n    )\n    # V18 experiment: use the already-loaded learned value model as a cheap root policy.\n    # Tactical/preferred bands retain priority; only ordinary quiets are re-ranked.\n    root_static = _evaluate_state(side, eval_stack[0])\n    for policy_index in range(count):\n        packed_policy = int(score_stack[0, policy_index])\n        if (packed_policy & 2) == 0 and int(moves[policy_index]) != preferred:\n            policy_move = int(moves[policy_index])\n            _advance_eval_state_into(board, side, policy_move, eval_stack[0], eval_stack[1])\n            child_static = -_evaluate_state(-side, eval_stack[1])\n            policy_delta = child_static - root_static\n            if policy_delta > 300:\n                policy_delta = 300\n            elif policy_delta < -300:\n                policy_delta = -300\n            score_stack[0, policy_index] = ((packed_policy >> 2) + policy_delta * {scale}) * 4 + (packed_policy & 3)\n\n    _pick_next_scored_move(moves, score_stack[0], 0, count)'''
+              assert s.count(root)==1; s=s.replace(root,repl,1)
+          elif v=='pv_lmr':
+              old='''        reduction = (\n            _history_adjusted_lmr_reduction(depth, index, move_history_score)\n            if lmr_candidate else 0\n        )\n        futility_candidate = ('''
+              new='''        reduction = (\n            _history_adjusted_lmr_reduction(depth, index, move_history_score)\n            if lmr_candidate else 0\n        )\n        # Preserve more depth only on full-window/PV work; scout-node selectivity is unchanged.\n        if not scout_node and reduction > 0:\n            reduction -= 1\n        futility_candidate = ('''
+              assert s.count(old)==1; s=s.replace(old,new,1)
+          elif v=='check_ext3':
+              old='''        if gives_check:\n            reduction = 0\n        reduce = reduction > 0\n        search_depth = max(0, depth - 1 - reduction)'''
+              new='''        if gives_check:\n            reduction = 0\n        reduce = reduction > 0\n        search_depth = max(0, depth - 1 - reduction)\n        # One-ply tactical extension only near the horizon, where quiet checking continuations\n        # would otherwise fall outside non-check qsearch.\n        if gives_check and depth <= 3:\n            search_depth += 1'''
+              assert s.count(old)==1; s=s.replace(old,new,1)
+          else:
+              raise SystemExit(v)
+          p.write_text(s)
+          PY
+          python -m py_compile /tmp/engine/agent.py /tmp/engine/experiments/*.py
+      - name: Stockfish 19
+        run: |
+          curl -L --fail --retry 3 -sS -o /tmp/sf.tgz https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+          mkdir /tmp/sf; tar -xzf /tmp/sf.tgz -C /tmp/sf
+          SF=$(find /tmp/sf -type f -name 'stockfish*' | head -1); chmod +x "$SF"; echo "SF=$SF" >> "$GITHUB_ENV"
+      - name: Run V2 benchmark
+        run: |
+          mkdir -p /tmp/out
+          PYTHONPATH=scripts python scripts/v18_competitor_move_benchmark_v2.py --pgn /tmp/top.pgn --engine-dir /tmp/engine --stockfish "$SF" --target '${{ matrix.target }}' --positions 12 --nodes 100000 --threads 1 --hash-mb 64 --pairwise-margin-cp 8 --seed 20260911 --output-dir /tmp/out
+          echo RESULT_BEGIN; cat /tmp/out/summary.json; echo RESULT_END
