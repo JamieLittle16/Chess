@@ -1,0 +1,170 @@
+name: V16 current history persistence screen
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  screen:
+    if: github.head_ref == 'v16/history-persistence-current-screen'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    env:
+      RUSTFLAGS: -C target-cpu=native
+      PRODUCTION_BASE: e42ce8b9d920158827ab30afb554b9cb0d86c99e
+      GESTALT_URL: https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue
+      GESTALT_SHA256: 956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Build exact current-main reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/bin .qualification/history-current
+          git worktree add --detach /tmp/chess-reference "$PRODUCTION_BASE"
+          CARGO_TARGET_DIR=/tmp/chess-reference-target cargo build --release -p chess-uci --manifest-path /tmp/chess-reference/Cargo.toml
+          cp /tmp/chess-reference-target/release/chess-uci .qualification/bin/reference
+          chmod +x .qualification/bin/reference
+          git -C /tmp/chess-reference rev-parse HEAD | tee .qualification/history-current/reference-head.txt
+
+      - name: Apply isolated persistence candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/apply_current_history_aging_probe.py
+          cargo fmt --all
+          git diff --check
+          git diff -- \
+            crates/chess-search/src/history.rs \
+            crates/chess-search/src/lib.rs \
+            crates/chess-search/src/root_analysis.rs \
+            crates/chess-engine/src/lib.rs \
+            > .qualification/history-current/candidate.patch
+          test -s .qualification/history-current/candidate.patch
+
+      - name: Strict candidate gate and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release --exclude chess-bench
+          cargo test -p chess-bench --release tests::suite_is_deterministic_within_the_same_build
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/bin/candidate
+          chmod +x .qualification/bin/candidate
+
+      - name: Pin network and opening corpus
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 "$GESTALT_URL" \
+            --output .qualification/history-current/gestalt-b840.nnue
+          test "$(stat -c%s .qualification/history-current/gestalt-b840.nnue)" = '21242944'
+          echo "$GESTALT_SHA256  .qualification/history-current/gestalt-b840.nnue" | sha256sum --check --strict
+
+          curl --fail --location --retry 5 \
+            'https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip' \
+            --output /tmp/uho.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          mkdir -p .qualification/m6-openings
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir .qualification/m6-openings
+          echo '5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e  .qualification/m6-openings/m6-uho-lichess-5000-v1.epd' | sha256sum --check --strict
+
+      - name: Build pinned Fastchess and launchers
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          make -C .qualification/fastchess-src -j2
+
+          ROOT="$PWD"
+          mkdir -p .qualification/launchers
+          cat > .qualification/launchers/reference.sh <<EOF
+          #!/usr/bin/env bash
+          export CHESS_GESTALT_NETWORK='$ROOT/.qualification/history-current/gestalt-b840.nnue'
+          exec '$ROOT/.qualification/bin/reference'
+          EOF
+          cat > .qualification/launchers/candidate.sh <<EOF
+          #!/usr/bin/env bash
+          export CHESS_GESTALT_NETWORK='$ROOT/.qualification/history-current/gestalt-b840.nnue'
+          exec '$ROOT/.qualification/bin/candidate'
+          EOF
+          chmod +x .qualification/launchers/*.sh
+
+      - name: Run 100-game fixed-node screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=.qualification/history-current/fixed
+          mkdir -p "$OUT"
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/.qualification/launchers/candidate.sh" name=history-persistent nodes=25000 option.Hash=32 \
+            -engine cmd="$PWD/.qualification/launchers/reference.sh" name=current-main nodes=25000 option.Hash=32 \
+            -openings file="$PWD/.qualification/m6-openings/m6-uho-lichess-5000-v1.epd" format=epd order=random \
+            -srand 20260911 -rounds 50 -repeat -concurrency 1 -maxmoves 300 -ratinginterval 20 \
+            -pgnout file="$OUT/games.pgn" notation=uci append=false nodes=true nps=true \
+            | tee "$OUT/stdout.log"
+          python scripts/analyze_fastchess_node_times.py "$OUT/games.pgn" --output "$OUT/times.json"
+
+      - name: Run 200-game equal-time screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=.qualification/history-current/time
+          mkdir -p "$OUT"
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/.qualification/launchers/candidate.sh" name=history-persistent option.Hash=32 \
+            -engine cmd="$PWD/.qualification/launchers/reference.sh" name=current-main option.Hash=32 \
+            -each proto=uci tc=1+0.01 \
+            -openings file="$PWD/.qualification/m6-openings/m6-uho-lichess-5000-v1.epd" format=epd order=random \
+            -srand 20260912 -rounds 100 -repeat -concurrency 1 -maxmoves 300 -ratinginterval 40 \
+            -pgnout file="$OUT/games.pgn" notation=uci append=false nodes=true nps=true \
+            | tee "$OUT/stdout.log"
+
+      - name: Record evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/history-current
+          git rev-parse HEAD > .qualification/history-current/checkout-head.txt
+          sha256sum scripts/apply_current_history_aging_probe.py > .qualification/history-current/patcher.sha256
+          cat > .qualification/history-current/evidence.txt <<EOF
+          purpose=isolate game-scoped Search-v2 history persistence on exact current main
+          production_base=$PRODUCTION_BASE
+          candidate_difference=retain main+1ply continuation history only when the next root strictly extends the known game history; age retained entries by 3/4; independent roots remain clean
+          network_sha256=$GESTALT_SHA256
+          opening_sha256=5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e
+          fixed_nodes_per_move=25000
+          fixed_games=100
+          fixed_seed=20260911
+          timed_tc=1+0.01
+          timed_games=200
+          timed_seed=20260912
+          hash_mib=32
+          concurrency=1
+          EOF
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v16-current-history-persistence-${{ github.sha }}
+          path: .qualification/history-current/
+          retention-days: 30
