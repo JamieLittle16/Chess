@@ -1,0 +1,224 @@
+name: V16 Hyperstition parity
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  parity:
+    if: github.head_ref == 'v16/hyperstition-eval-lab'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      RUSTFLAGS: -C target-cpu=native
+      VIRI_COMMIT: e066da52d614df515e046cd03afb598e1e8d791a
+      NETWORK_URL: https://github.com/cosmobobak/viridithas-networks/releases/download/v92/hyperstition-b400.nnue.zst
+      COMPRESSED_BYTES: '22895545'
+      RAW_BYTES: '50616896'
+      COMPRESSED_SHA256: 5b4045557ae14c2c89001bdb4dde84ff0bb5b24bbeb79632f868108e56a24c6f
+      RAW_SHA256: 36bcc6b3354ecbdb88fb95a341e494558b052223143f38ff6e6387aed99ab193
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Strict repository gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --all-features --release
+
+      - name: Fetch and fingerprint exact Hyperstition v92 network
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/hyperstition
+          curl --fail --location --retry 5 "$NETWORK_URL" \
+            --output .qualification/hyperstition/hyperstition-b400.nnue.zst
+          test "$(stat -c%s .qualification/hyperstition/hyperstition-b400.nnue.zst)" = "$COMPRESSED_BYTES"
+          echo "$COMPRESSED_SHA256  .qualification/hyperstition/hyperstition-b400.nnue.zst" \
+            | sha256sum --check --strict
+          sha256sum .qualification/hyperstition/hyperstition-b400.nnue.zst \
+            > .qualification/hyperstition/network-compressed.sha256
+          if ! command -v zstd >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y zstd
+          fi
+          zstd --decompress --force \
+            .qualification/hyperstition/hyperstition-b400.nnue.zst \
+            -o .qualification/hyperstition/hyperstition-b400.nnue
+          test "$(stat -c%s .qualification/hyperstition/hyperstition-b400.nnue)" = "$RAW_BYTES"
+          echo "$RAW_SHA256  .qualification/hyperstition/hyperstition-b400.nnue" \
+            | sha256sum --check --strict
+          sha256sum .qualification/hyperstition/hyperstition-b400.nnue \
+            > .qualification/hyperstition/network-raw.sha256
+
+      - name: Build Little Gambit scalar oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release -p chess-eval --example hyperstition_eval
+          cp target/release/examples/hyperstition_eval .qualification/hyperstition/little-gambit-oracle
+          chmod +x .qualification/hyperstition/little-gambit-oracle
+
+      - name: Build exact Viridithas v14.0.1 reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/viridithas-v14
+          git clone --quiet https://github.com/cosmobobak/viridithas.git /tmp/viridithas-v14
+          git -C /tmp/viridithas-v14 checkout --quiet "$VIRI_COMMIT"
+          test "$(git -C /tmp/viridithas-v14 rev-parse HEAD)" = "$VIRI_COMMIT"
+          # The pinned v14 source has a wrapper-type bug in its AVX-512/VNNI branch on modern
+          # rustc. x86-64-v3 intentionally selects its mature AVX2 reference path instead. This is
+          # also a more reproducible parity oracle than inheriting whatever ISA GitHub's current
+          # runner happens to expose.
+          RUSTFLAGS="-C target-cpu=x86-64-v3" \
+            EVALFILE="$PWD/.qualification/hyperstition/hyperstition-b400.nnue.zst" \
+            cargo build --release --manifest-path /tmp/viridithas-v14/Cargo.toml
+          cp /tmp/viridithas-v14/target/release/viridithas \
+            .qualification/hyperstition/viridithas-reference
+          chmod +x .qualification/hyperstition/viridithas-reference
+
+      - name: Compare raw evaluations across bucket and material regimes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import re
+          import subprocess
+          from pathlib import Path
+
+          root = Path('.qualification/hyperstition')
+          ours = root / 'little-gambit-oracle'
+          reference = root / 'viridithas-reference'
+          network = root / 'hyperstition-b400.nnue'
+          cases = [
+              ('startpos', 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'),
+              ('startpos-black', 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1'),
+              ('kiwipete', 'r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1'),
+              ('open-centre', 'r2q1rk1/pp1nbppp/2p1bn2/3p4/3P4/1PN1PN2/PB2BPPP/R2Q1RK1 w - - 2 11'),
+              ('queen-imbalance', '4k3/8/8/8/8/8/4Q3/4K3 w - - 0 1'),
+              ('rook-ending', '8/5pk1/6p1/3R4/8/6P1/5PK1/8 w - - 0 1'),
+              ('minor-ending', '8/5pk1/6p1/8/3N4/6P1/5PK1/8 b - - 0 1'),
+              ('bare-kings', '7k/8/8/8/8/8/8/K7 w - - 0 1'),
+              ('white-king-e-file', '4k3/8/8/8/8/8/4P3/4K3 w - - 0 1'),
+              ('white-king-h-file', '4k3/8/8/8/8/8/7P/7K w - - 0 1'),
+              ('black-king-a-file', 'k7/7p/8/8/8/8/P7/7K b - - 0 1'),
+              ('black-king-e-file', '4k3/4p3/8/8/8/8/P7/7K b - - 0 1'),
+              ('low-material-bucket', '8/5pk1/6p1/8/8/6P1/4RPK1/8 w - - 0 1'),
+              ('mid-material-bucket', '2r3k1/5ppp/8/8/8/8/5PPP/2R3K1 w - - 0 1'),
+              ('promotion-race', '7k/P7/8/8/8/8/7p/K7 w - - 0 1'),
+          ]
+
+          def run_ours(fen: str) -> int:
+              cp = subprocess.run(
+                  [str(ours), str(network), fen],
+                  text=True,
+                  capture_output=True,
+                  check=True,
+              )
+              return int(cp.stdout.strip())
+
+          def run_reference(fen: str) -> int:
+              proc = subprocess.Popen(
+                  [str(reference)],
+                  stdin=subprocess.PIPE,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE,
+                  text=True,
+                  bufsize=1,
+              )
+              assert proc.stdin is not None
+              assert proc.stdout is not None
+              try:
+                  proc.stdin.write('uci\n')
+                  proc.stdin.write('isready\n')
+                  proc.stdin.write(f'position fen {fen}\n')
+                  proc.stdin.write('raweval\n')
+                  proc.stdin.flush()
+                  transcript = []
+                  for _ in range(128):
+                      line = proc.stdout.readline()
+                      if line == '':
+                          break
+                      transcript.append(line.rstrip())
+                      stripped = line.strip()
+                      if re.fullmatch(r'-?\d+', stripped):
+                          score = int(stripped)
+                          proc.stdin.write('quit\n')
+                          proc.stdin.flush()
+                          proc.wait(timeout=5)
+                          return score
+                  stderr = proc.stderr.read() if proc.stderr is not None else ''
+                  raise RuntimeError(
+                      f'no raweval integer for {fen!r}: stdout={transcript!r} stderr={stderr!r}'
+                  )
+              finally:
+                  if proc.poll() is None:
+                      proc.kill()
+                      proc.wait(timeout=5)
+
+          rows = []
+          bad = []
+          for name, fen in cases:
+              ours_score = run_ours(fen)
+              reference_score = run_reference(fen)
+              delta = ours_score - reference_score
+              rows.append((name, ours_score, reference_score, delta))
+              if delta != 0:
+                  bad.append((name, fen, ours_score, reference_score, delta))
+
+          report = root / 'parity.tsv'
+          with report.open('w', encoding='utf-8') as fh:
+              fh.write('case\tlittle_gambit\tviridithas\tdelta\n')
+              for row in rows:
+                  fh.write('\t'.join(map(str, row)) + '\n')
+          print(report.read_text())
+          if bad:
+              for row in bad:
+                  print('MISMATCH', row)
+              raise SystemExit(f'{len(bad)} of {len(cases)} raw evaluations differ')
+          print(f'exact parity: {len(cases)}/{len(cases)}')
+          PY
+
+      - name: Record immutable certification identity
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "candidate_commit=$(git rev-parse HEAD)"
+            echo "viridithas_commit=$VIRI_COMMIT"
+            echo "viridithas_reference_cpu=x86-64-v3"
+            echo "network_release=v92"
+            echo "network_asset=hyperstition-b400.nnue.zst"
+            echo "network_url=$NETWORK_URL"
+            echo "compressed_bytes=$COMPRESSED_BYTES"
+            echo "compressed_sha256=$COMPRESSED_SHA256"
+            echo "raw_bytes=$RAW_BYTES"
+            echo "raw_sha256=$RAW_SHA256"
+          } > .qualification/hyperstition/identity.txt
+
+      - name: Upload parity evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v16-hyperstition-parity-${{ github.sha }}
+          path: |
+            .qualification/hyperstition/*.sha256
+            .qualification/hyperstition/parity.tsv
+            .qualification/hyperstition/identity.txt
+          retention-days: 30

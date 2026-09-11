@@ -1,0 +1,201 @@
+name: V16 Hyperstition TT nonterminal proof
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    if: github.head_ref == 'v16/hyperstition-tt-nonterminal-proof'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      RUSTFLAGS: -C target-cpu=x86-64-v3
+      HYPER_URL: https://github.com/cosmobobak/viridithas-networks/releases/download/v92/hyperstition-b400.nnue.zst
+      HYPER_RAW_SHA256: 36bcc6b3354ecbdb88fb95a341e494558b052223143f38ff6e6387aed99ab193
+      FASTCHESS_COMMIT: f618e34540f94f4719ad3817950618dabe441318
+      OPENING_SHA256: 5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Strict canonical evaluator gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/bin .qualification/tt-proof
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --all-features --release
+
+      - name: Download exact Hyperstition v92 network
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 "$HYPER_URL" --output .qualification/tt-proof/hyperstition-b400.nnue.zst
+          if ! command -v zstd >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y zstd
+          fi
+          zstd --decompress --force .qualification/tt-proof/hyperstition-b400.nnue.zst -o .qualification/tt-proof/hyperstition-b400.nnue
+          test "$(stat -c%s .qualification/tt-proof/hyperstition-b400.nnue)" = '50616896'
+          echo "$HYPER_RAW_SHA256  .qualification/tt-proof/hyperstition-b400.nnue" | sha256sum --check --strict
+
+      - name: Apply Hyperstition and basic TT cache, build control
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/apply_hyperstition_search_probe.py
+          python scripts/apply_tt_static_eval_cache.py
+          cargo fmt --all
+          git diff --check
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --all-features --release
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/bin/basic-cache
+          chmod +x .qualification/bin/basic-cache
+          git diff -- crates/chess-search/src/lib.rs > .qualification/tt-proof/basic-cache.patch
+
+      - name: Apply cached-nonterminal proof, strict gate and build candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/apply_tt_cached_nonterminal_proof.py
+          cargo fmt --all
+          git diff --check
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --all-features --release
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/bin/proof-cache
+          chmod +x .qualification/bin/proof-cache
+          git diff -- crates/chess-search/src/lib.rs > .qualification/tt-proof/proof-cache.patch
+          grep -F 'terminal_search_entry_never_manufactures_static_eval_certificate' crates/chess-search/src/lib.rs
+          grep -F 'cached_static_eval.is_none() && !has_legal_move_mut(position)' crates/chess-search/src/lib.rs
+
+      - name: Reproduce certified 5000-root opening suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 'https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip' --output /tmp/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/UHO_Lichess_4852_v1.epd.zip' | sha256sum --check --strict
+          mkdir -p .qualification/m6-openings
+          python scripts/build_m6_opening_suite.py --archive /tmp/UHO_Lichess_4852_v1.epd.zip --output-dir .qualification/m6-openings | tee .qualification/m6-openings/derivation.log
+          test "$(wc -l < .qualification/m6-openings/m6-uho-lichess-5000-v1.epd)" = '5000'
+          echo "$OPENING_SHA256  .qualification/m6-openings/m6-uho-lichess-5000-v1.epd" | sha256sum --check --strict
+
+      - name: Build pinned Fastchess
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet "$FASTCHESS_COMMIT"
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = "$FASTCHESS_COMMIT"
+          make -C .qualification/fastchess-src -j2
+
+      - name: Create identical-Hyperstition launchers
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$PWD"
+          mkdir -p .qualification/launchers
+          cat > .qualification/launchers/basic.sh <<EOF
+          #!/usr/bin/env bash
+          unset CHESS_GESTALT_NETWORK
+          export CHESS_HYPERSTITION_NETWORK='$ROOT/.qualification/tt-proof/hyperstition-b400.nnue'
+          exec '$ROOT/.qualification/bin/basic-cache'
+          EOF
+          cat > .qualification/launchers/proof.sh <<EOF
+          #!/usr/bin/env bash
+          unset CHESS_GESTALT_NETWORK
+          export CHESS_HYPERSTITION_NETWORK='$ROOT/.qualification/tt-proof/hyperstition-b400.nnue'
+          exec '$ROOT/.qualification/bin/proof-cache'
+          EOF
+          chmod +x .qualification/launchers/basic.sh .qualification/launchers/proof.sh
+
+      - name: UCI smoke both binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          for engine in basic proof; do
+            { printf 'uci\nisready\nposition startpos\ngo nodes 1000\nquit\n'; } | ".qualification/launchers/${engine}.sh" | tee ".qualification/tt-proof/${engine}-smoke.txt"
+            grep -q '^uciok$' ".qualification/tt-proof/${engine}-smoke.txt"
+            grep -q '^bestmove ' ".qualification/tt-proof/${engine}-smoke.txt"
+          done
+
+      - name: Measure 60-game fixed-node incremental runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/tt-proof/fixed-nodes
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/.qualification/launchers/proof.sh" name=proof-cache nodes=25000 option.Hash=32 \
+            -engine cmd="$PWD/.qualification/launchers/basic.sh" name=basic-cache nodes=25000 option.Hash=32 \
+            -openings file="$PWD/.qualification/m6-openings/m6-uho-lichess-5000-v1.epd" format=epd order=random \
+            -srand 20260914 -rounds 30 -repeat -concurrency 1 -maxmoves 300 -ratinginterval 20 \
+            -pgnout file=.qualification/tt-proof/fixed-nodes/games.pgn notation=uci append=false nodes=true nps=true \
+            | tee .qualification/tt-proof/fixed-nodes/fastchess.stdout.log
+          python scripts/analyze_fastchess_node_times.py .qualification/tt-proof/fixed-nodes/games.pgn --output .qualification/tt-proof/fixed-nodes/times.json
+          python - <<'PY' | tee .qualification/tt-proof/performance-summary.txt
+          import json
+          from pathlib import Path
+          engines = json.loads(Path('.qualification/tt-proof/fixed-nodes/times.json').read_text())['engines']
+          candidate = engines['proof-cache']['mean_seconds']
+          control = engines['basic-cache']['mean_seconds']
+          print(f'candidate_mean_seconds={candidate:.9f}')
+          print(f'control_mean_seconds={control:.9f}')
+          print(f'time_ratio={candidate/control:.4f}x')
+          print(f'speedup={control/candidate:.4f}x')
+          PY
+
+      - name: Run paired 100-game equal-time incremental screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/tt-proof/equal-time
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/.qualification/launchers/proof.sh" name=proof-cache tc=1+0.01 option.Hash=32 \
+            -engine cmd="$PWD/.qualification/launchers/basic.sh" name=basic-cache tc=1+0.01 option.Hash=32 \
+            -openings file="$PWD/.qualification/m6-openings/m6-uho-lichess-5000-v1.epd" format=epd order=random \
+            -srand 20260915 -rounds 50 -repeat -concurrency 1 -maxmoves 300 -ratinginterval 20 \
+            -pgnout file=.qualification/tt-proof/equal-time/games.pgn notation=uci append=false nodes=true nps=true \
+            | tee .qualification/tt-proof/equal-time/fastchess.stdout.log
+
+      - name: Record experiment identity
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > .qualification/tt-proof/evidence.txt <<EOF
+          purpose=incremental TT cache B: reuse cached static eval as nonterminal proof
+          control=Hyperstition-v92 plus qualified basic TT static-eval cache
+          candidate=control plus skip legal-existence probe when cached static eval is resident
+          proof=terminal paths never manufacture static_eval; full Zobrist identity fixes move legality
+          network_sha256=$HYPER_RAW_SHA256
+          compile_target=x86-64-v3 both
+          fixed_node_games=60
+          equal_time_games=100
+          time_control=1+0.01
+          opening_sha256=$OPENING_SHA256
+          fastchess_commit=$FASTCHESS_COMMIT
+          EOF
+
+      - name: Upload evidence without network bytes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v16-hyperstition-tt-nonterminal-proof-${{ github.sha }}
+          path: |
+            .qualification/tt-proof/
+            .qualification/m6-openings/derivation.log
+          retention-days: 30

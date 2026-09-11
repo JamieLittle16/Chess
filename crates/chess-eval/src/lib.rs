@@ -7,6 +7,8 @@
 
 /// Research-only bit-exact runtime for the certified mature `gestalt` network.
 pub mod gestalt;
+/// Research-only runtime for the Viridithas v14/v15 Hyperstition NNUE family.
+pub mod hyperstition;
 pub mod nnue;
 #[cfg(feature = "search-trace")]
 mod search_trace;
