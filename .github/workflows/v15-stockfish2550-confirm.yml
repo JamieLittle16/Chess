@@ -1,0 +1,144 @@
+name: V15 Stockfish 2550 confirmation
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  PRODUCTION_BASE: 8e53d63a766122f70992942eccaac22be9e5fca3
+  GESTALT_SHA256: 956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6
+  M6_OPENING_SHA256: 5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e
+
+jobs:
+  gate:
+    if: github.head_ref == 'calibration/v15-stockfish2550-confirm-20260908'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - name: Verify exact production engine and full correctness gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin "$PRODUCTION_BASE"
+          git diff --exit-code "$PRODUCTION_BASE" -- crates Cargo.toml Cargo.lock rust-toolchain.toml
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          cargo test -p chess-bench --release tests::suite_matches_the_reviewed_reference_signature -- --exact
+
+  confirm:
+    if: github.head_ref == 'calibration/v15-stockfish2550-confirm-20260908'
+    needs: gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: a
+            seed: 20260991
+          - shard: b
+            seed: 20260992
+    name: SF19 Elo2550 shard ${{ matrix.shard }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - name: Verify source and build V15
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin "$PRODUCTION_BASE"
+          git diff --exit-code "$PRODUCTION_BASE" -- crates Cargo.toml Cargo.lock rust-toolchain.toml
+          cargo build --release -p chess-uci
+          mkdir -p .qualification/bin .qualification/external .qualification/m6-openings
+          cp target/release/chess-uci .qualification/bin/v15
+          chmod +x .qualification/bin/v15
+      - name: Fetch exact Gestalt and frozen M6 opening suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' \
+            --output .qualification/external/gestalt-b840.nnue
+          test "$(stat -c%s .qualification/external/gestalt-b840.nnue)" = '21242944'
+          echo "$GESTALT_SHA256  .qualification/external/gestalt-b840.nnue" | sha256sum --check --strict
+
+          curl --fail --location --retry 5 \
+            'https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip' \
+            --output /tmp/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/UHO_Lichess_4852_v1.epd.zip' | sha256sum --check --strict
+          python3 scripts/build_m6_opening_suite.py \
+            --archive /tmp/UHO_Lichess_4852_v1.epd.zip \
+            --output-dir .qualification/m6-openings
+          echo "$M6_OPENING_SHA256  .qualification/m6-openings/m6-uho-lichess-5000-v1.epd" | sha256sum --check --strict
+      - name: Fetch pinned Fastchess and Stockfish 19
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/fastchess .qualification/stockfish
+          curl --fail --location --retry 3 \
+            --output .qualification/fastchess.tar \
+            https://github.com/Disservin/fastchess/releases/download/v1.8.2-alpha/fastchess-linux-x86-64.tar
+          echo '1003f920bebe841acdab5e6d7871e93171a4586857b3ec91c21ef5777f26ff96  .qualification/fastchess.tar' | sha256sum --check --strict
+          tar -xf .qualification/fastchess.tar -C .qualification/fastchess
+          curl --fail --location --retry 3 \
+            --output .qualification/stockfish.tar.gz \
+            https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  .qualification/stockfish.tar.gz' | sha256sum --check --strict
+          tar -xzf .qualification/stockfish.tar.gz -C .qualification/stockfish
+          FASTCHESS_BIN=$(find "$PWD/.qualification/fastchess" -type f -name fastchess -perm -111 -print -quit)
+          STOCKFISH_BIN=$(find "$PWD/.qualification/stockfish" -type f -name 'stockfish*' -perm -111 -print -quit)
+          test -n "$FASTCHESS_BIN" && test -n "$STOCKFISH_BIN"
+          echo "FASTCHESS_BIN=$FASTCHESS_BIN" >> "$GITHUB_ENV"
+          echo "STOCKFISH_BIN=$STOCKFISH_BIN" >> "$GITHUB_ENV"
+      - name: Run 200-game paired confirmation shard
+        shell: bash
+        run: |
+          set -euo pipefail
+          export CHESS_GESTALT_NETWORK="$PWD/.qualification/external/gestalt-b840.nnue"
+          mkdir -p "confirm-${{ matrix.shard }}"
+          "$FASTCHESS_BIN" \
+            -engine cmd="$PWD/.qualification/bin/v15" name="Chess-V15" option.Hash=32 \
+            -engine cmd="$STOCKFISH_BIN" name="Stockfish-19-Elo2550" option.Threads=1 option.Hash=32 option.UCI_LimitStrength=true option.UCI_Elo=2550 \
+            -each proto=uci tc=1+0.01 \
+            -openings file="$PWD/.qualification/m6-openings/m6-uho-lichess-5000-v1.epd" format=epd order=random \
+            -srand ${{ matrix.seed }} -rounds 100 -repeat -concurrency 1 -maxmoves 300 -report penta=true \
+            -pgnout file="confirm-${{ matrix.shard }}/games.pgn" notation=uci append=false nodes=true nps=true \
+            | tee "confirm-${{ matrix.shard }}/stdout.log"
+          sha256sum "confirm-${{ matrix.shard }}/games.pgn" "confirm-${{ matrix.shard }}/stdout.log" > "confirm-${{ matrix.shard }}/sha256.txt"
+          cat > "confirm-${{ matrix.shard }}/identity.txt" <<EOF
+          production_base=$PRODUCTION_BASE
+          network_sha256=$GESTALT_SHA256
+          opening_sha256=$M6_OPENING_SHA256
+          stockfish=19
+          stockfish_uci_elo=2550
+          time_control=1+0.01
+          games=200
+          paired_colour_reversal=true
+          concurrency=1
+          hash_mib=32
+          seed=${{ matrix.seed }}
+          EOF
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v15-sf2550-${{ matrix.shard }}-${{ github.sha }}
+          path: confirm-${{ matrix.shard }}/
+          retention-days: 30
+          if-no-files-found: warn
