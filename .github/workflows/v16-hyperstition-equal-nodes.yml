@@ -1,0 +1,214 @@
+name: V16 Hyperstition equal-nodes
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  equal-nodes:
+    if: github.head_ref == 'v16/hyperstition-eval-lab'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    env:
+      RUSTFLAGS: -C target-cpu=native
+      HYPER_URL: https://github.com/cosmobobak/viridithas-networks/releases/download/v92/hyperstition-b400.nnue.zst
+      HYPER_RAW_SHA256: 36bcc6b3354ecbdb88fb95a341e494558b052223143f38ff6e6387aed99ab193
+      GESTALT_URL: https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue
+      GESTALT_SHA256: 956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Verify V15 Gestalt control and build reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/bin .qualification/hyperstition-search
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/bin/reference
+          chmod +x .qualification/bin/reference
+          sha256sum .qualification/bin/reference \
+            | tee .qualification/hyperstition-search/reference.sha256
+
+      - name: Apply auditable Hyperstition evaluator substitution
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/apply_hyperstition_search_probe.py
+          cargo fmt --all
+          git diff --check
+          git diff -- crates/chess-search/src/lib.rs \
+            > .qualification/hyperstition-search/search-integration.patch
+          test -s .qualification/hyperstition-search/search-integration.patch
+          sha256sum scripts/apply_hyperstition_search_probe.py \
+            > .qualification/hyperstition-search/patcher.sha256
+          sha256sum .qualification/hyperstition-search/search-integration.patch \
+            > .qualification/hyperstition-search/search-integration.sha256
+
+      - name: Strict candidate gate and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/bin/candidate
+          chmod +x .qualification/bin/candidate
+          sha256sum .qualification/bin/candidate \
+            | tee .qualification/hyperstition-search/candidate.sha256
+
+      - name: Download exact evaluator networks
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 "$GESTALT_URL" \
+            --output .qualification/hyperstition-search/gestalt-b840.nnue
+          test "$(stat -c%s .qualification/hyperstition-search/gestalt-b840.nnue)" = '21242944'
+          echo "$GESTALT_SHA256  .qualification/hyperstition-search/gestalt-b840.nnue" \
+            | sha256sum --check --strict
+
+          curl --fail --location --retry 5 "$HYPER_URL" \
+            --output .qualification/hyperstition-search/hyperstition-b400.nnue.zst
+          if ! command -v zstd >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y zstd
+          fi
+          zstd --decompress --force \
+            .qualification/hyperstition-search/hyperstition-b400.nnue.zst \
+            -o .qualification/hyperstition-search/hyperstition-b400.nnue
+          test "$(stat -c%s .qualification/hyperstition-search/hyperstition-b400.nnue)" = '50616896'
+          echo "$HYPER_RAW_SHA256  .qualification/hyperstition-search/hyperstition-b400.nnue" \
+            | sha256sum --check --strict
+
+      - name: Reproduce certified 5000-root opening suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip' \
+            --output /tmp/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/UHO_Lichess_4852_v1.epd.zip' \
+            | sha256sum --check --strict
+          mkdir -p .qualification/m6-openings
+          python scripts/build_m6_opening_suite.py \
+            --archive /tmp/UHO_Lichess_4852_v1.epd.zip \
+            --output-dir .qualification/m6-openings \
+            | tee .qualification/m6-openings/derivation.log
+          test "$(wc -l < .qualification/m6-openings/m6-uho-lichess-5000-v1.epd)" = '5000'
+          echo '5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e  .qualification/m6-openings/m6-uho-lichess-5000-v1.epd' \
+            | sha256sum --check --strict
+
+      - name: Build pinned Fastchess
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = 'f618e34540f94f4719ad3817950618dabe441318'
+          make -C .qualification/fastchess-src -j2
+          test -x .qualification/fastchess-src/fastchess
+
+      - name: Create evaluator launchers
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$PWD"
+          mkdir -p .qualification/launchers
+          cat > .qualification/launchers/hyperstition.sh <<EOF
+          #!/usr/bin/env bash
+          unset CHESS_GESTALT_NETWORK
+          export CHESS_HYPERSTITION_NETWORK='$ROOT/.qualification/hyperstition-search/hyperstition-b400.nnue'
+          exec '$ROOT/.qualification/bin/candidate'
+          EOF
+          cat > .qualification/launchers/gestalt.sh <<EOF
+          #!/usr/bin/env bash
+          unset CHESS_HYPERSTITION_NETWORK
+          export CHESS_GESTALT_NETWORK='$ROOT/.qualification/hyperstition-search/gestalt-b840.nnue'
+          exec '$ROOT/.qualification/bin/reference'
+          EOF
+          chmod +x .qualification/launchers/hyperstition.sh .qualification/launchers/gestalt.sh
+
+      - name: Hyperstition UCI smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            printf 'uci\n'
+            printf 'isready\n'
+            printf 'position startpos\n'
+            printf 'go nodes 1000\n'
+            printf 'quit\n'
+          } | .qualification/launchers/hyperstition.sh \
+            | tee .qualification/hyperstition-search/candidate-smoke.txt
+          grep -q '^uciok$' .qualification/hyperstition-search/candidate-smoke.txt
+          grep -q '^readyok$' .qualification/hyperstition-search/candidate-smoke.txt
+          grep -q '^bestmove ' .qualification/hyperstition-search/candidate-smoke.txt
+
+      - name: Run paired 100-game 25k-node evaluator screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/hyperstition-search/match
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/.qualification/launchers/hyperstition.sh" name=hyperstition-v92 nodes=25000 option.Hash=32 \
+            -engine cmd="$PWD/.qualification/launchers/gestalt.sh" name=gestalt-v85 nodes=25000 option.Hash=32 \
+            -openings file="$PWD/.qualification/m6-openings/m6-uho-lichess-5000-v1.epd" format=epd order=random \
+            -srand 20260908 \
+            -rounds 50 -repeat -concurrency 1 -maxmoves 300 \
+            -ratinginterval 20 \
+            -pgnout file=.qualification/hyperstition-search/match/games.pgn notation=uci append=false nodes=true nps=true \
+            -log file=.qualification/hyperstition-search/match/uci.log level=info engine=true append=false \
+            | tee .qualification/hyperstition-search/match/fastchess.stdout.log
+
+      - name: Record experiment identity
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/hyperstition-search
+          cat > .qualification/hyperstition-search/evidence.txt <<EOF
+          purpose=Hyperstition-v92-vs-production-Gestalt-v85 equal-node signal screen
+          checkout_head=$(git rev-parse HEAD)
+          candidate_leaf_eval=Hyperstition-v92 scalar dense tail with incremental feature transformer
+          reference_leaf_eval=production Gestalt-v85
+          search_semantics=V15 unchanged evaluator substitution only
+          hyperstition_sha256=$HYPER_RAW_SHA256
+          gestalt_sha256=$GESTALT_SHA256
+          nodes_per_move=25000
+          paired_games=100
+          opening_sha256=5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e
+          seed=20260908
+          hash_mib=32
+          concurrency=1
+          fastchess_commit=f618e34540f94f4719ad3817950618dabe441318
+          EOF
+
+      - name: Upload complete evidence without network bytes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v16-hyperstition-equal-nodes-${{ github.sha }}
+          path: |
+            .qualification/hyperstition-search/reference.sha256
+            .qualification/hyperstition-search/candidate.sha256
+            .qualification/hyperstition-search/patcher.sha256
+            .qualification/hyperstition-search/search-integration.patch
+            .qualification/hyperstition-search/search-integration.sha256
+            .qualification/hyperstition-search/candidate-smoke.txt
+            .qualification/hyperstition-search/evidence.txt
+            .qualification/hyperstition-search/match/
+            .qualification/m6-openings/derivation.log
+          retention-days: 30
