@@ -1,4 +1,4 @@
-name: V18 SEE Reckless-inspired root screen
+name: V18 SEE Reckless root screen
 
 on:
   push:
@@ -20,7 +20,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: '3.12'}
       - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
-      - name: Build exact SEE baseline and root-only candidate
+      - name: Build candidate
         run: |
           set -euo pipefail
           cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
@@ -30,130 +30,79 @@ jobs:
             curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o "$d/v18_gm2001.bin"
             python scripts/apply_v18_see_capture_ordering.py "$d/experiments/numba_search.py"
           done
+          echo 'Cl9FQVJMWV9ST09UX1BJRUNFX1ZBTFVFOiBGaW5hbCA9IHtjaGVzcy5QQVdOOiAxLCBjaGVzcy5LTklHSFQ6IDMsIGNoZXNzLkJJU0hPUDogMywgY2hlc3MuUk9PSzogNSwgY2hlc3MuUVVFRU46IDksIGNoZXNzLktJTkc6IDB9CgpkZWYgX2Vhcmx5X3Jvb3RfcG9zaXRpb25hbF9wcmlvcihib2FyZDogY2hlc3MuQm9hcmQpIC0+IGNoZXNzLk1vdmUgfCBOb25lOgogICAgIiIiQ2hlYXAgcm9vdC1vbmx5IG9yZGVyaW5nIGhpbnQgaW5zcGlyZWQgYnkgUmVja2xlc3M7IG5ldmVyIHN1cHBsaWVzIGEgc2NvcmUgb3IgbW92ZSBkaXJlY3RseS4iIiIKICAgIGlmIGJvYXJkLnBseSgpID4gMjQgb3IgYm9hcmQuaXNfY2hlY2soKToKICAgICAgICByZXR1cm4gTm9uZQogICAgdXMgPSBib2FyZC50dXJuCiAgICB0aGVtID0gbm90IHVzCiAgICBraW5nX3NxID0gYm9hcmQua2luZyh1cykKICAgIGhvbWVfcmFuayA9IDAgaWYgdXMgPT0gY2hlc3MuV0hJVEUgZWxzZSA3CiAgICBiZXN0X21vdmUgPSBOb25lCiAgICBiZXN0X3Njb3JlID0gMTcKICAgIGZvciBtb3ZlIGluIGJvYXJkLmxlZ2FsX21vdmVzOgogICAgICAgIGlmIGJvYXJkLmlzX2NhcHR1cmUobW92ZSkgb3IgbW92ZS5wcm9tb3Rpb24gaXMgbm90IE5vbmU6CiAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgcHQgPSBib2FyZC5waWVjZV90eXBlX2F0KG1vdmUuZnJvbV9zcXVhcmUpCiAgICAgICAgaWYgcHQgaXMgTm9uZToKICAgICAgICAgICAgY29udGludWUKICAgICAgICBzY29yZSA9IDAKICAgICAgICBpZiBib2FyZC5naXZlc19jaGVjayhtb3ZlKToKICAgICAgICAgICAgc2NvcmUgKz0gMjgKICAgICAgICBpZiBib2FyZC5pc19jYXN0bGluZyhtb3ZlKToKICAgICAgICAgICAgc2NvcmUgKz0gMjIKICAgICAgICBpZiBib2FyZC5pc19hdHRhY2tlZF9ieSh0aGVtLCBtb3ZlLmZyb21fc3F1YXJlKSBhbmQgcHQgIT0gY2hlc3MuS0lORzoKICAgICAgICAgICAgc2NvcmUgKz0gNyArIDMgKiBfRUFSTFlfUk9PVF9QSUVDRV9WQUxVRVtwdF0KICAgICAgICBpZiBwdCBpbiAoY2hlc3MuS05JR0hULCBjaGVzcy5CSVNIT1ApIGFuZCBjaGVzcy5zcXVhcmVfcmFuayhtb3ZlLmZyb21fc3F1YXJlKSA9PSBob21lX3JhbmsgYW5kIGNoZXNzLnNxdWFyZV9yYW5rKG1vdmUudG9fc3F1YXJlKSAhPSBob21lX3Jhbms6CiAgICAgICAgICAgIHNjb3JlICs9IDEyCiAgICAgICAgaWYgcHQgPT0gY2hlc3MuUEFXTiBhbmQga2luZ19zcSBpcyBub3QgTm9uZSBhbmQgY2hlc3Muc3F1YXJlX3Jhbmsoa2luZ19zcSkgPT0gaG9tZV9yYW5rIGFuZCBhYnMoY2hlc3Muc3F1YXJlX2ZpbGUobW92ZS5mcm9tX3NxdWFyZSkgLSBjaGVzcy5zcXVhcmVfZmlsZShraW5nX3NxKSkgPD0gMToKICAgICAgICAgICAgc2NvcmUgLT0gMTYKICAgICAgICBiID0gYm9hcmQuY29weShzdGFjaz1GYWxzZSkKICAgICAgICBiLnB1c2gobW92ZSkKICAgICAgICBpZiBiLmlzX2F0dGFja2VkX2J5KGIudHVybiwgbW92ZS50b19zcXVhcmUpOgogICAgICAgICAgICBzY29yZSAtPSAxMCArIDIgKiBfRUFSTFlfUk9PVF9QSUVDRV9WQUxVRVtwdF0KICAgICAgICBhdHRhY2tzID0gYi5hdHRhY2tzKG1vdmUudG9fc3F1YXJlKQogICAgICAgIGJlc3RfdGFyZ2V0ID0gMAogICAgICAgIGZvciBzcSBpbiBhdHRhY2tzOgogICAgICAgICAgICBpZiBiLmNvbG9yX2F0KHNxKSA9PSBiLnR1cm46CiAgICAgICAgICAgICAgICB0YXJnZXQgPSBiLnBpZWNlX3R5cGVfYXQoc3EpCiAgICAgICAgICAgICAgICBpZiB0YXJnZXQgaXMgbm90IE5vbmU6CiAgICAgICAgICAgICAgICAgICAgYmVzdF90YXJnZXQgPSBtYXgoYmVzdF90YXJnZXQsIF9FQVJMWV9ST09UX1BJRUNFX1ZBTFVFW3RhcmdldF0pCiAgICAgICAgaWYgYmVzdF90YXJnZXQgPiBfRUFSTFlfUk9PVF9QSUVDRV9WQUxVRVtwdF06CiAgICAgICAgICAgIHNjb3JlICs9IDUgKyAyICogKGJlc3RfdGFyZ2V0IC0gX0VBUkxZX1JPT1RfUElFQ0VfVkFMVUVbcHRdKQogICAgICAgIGlmIHNjb3JlID4gYmVzdF9zY29yZToKICAgICAgICAgICAgYmVzdF9zY29yZSA9IHNjb3JlCiAgICAgICAgICAgIGJlc3RfbW92ZSA9IG1vdmUKICAgIHJldHVybiBiZXN0X21vdmUK' | base64 -d > /tmp/helper.txt
           python - <<'PY'
           from pathlib import Path
-          p=Path('/tmp/cand/agent.py'); s=p.read_text()
-          marker='\ndef search_position(\n'
-          assert s.count(marker)==1
-          helper=r'''
-
-_EARLY_ROOT_PIECE_VALUE: Final = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 0}
-
-
-def _early_root_positional_prior(board: chess.Board) -> chess.Move | None:
-    """Cheap root-only ordering hint inspired by Reckless; never supplies a score or move directly."""
-    if board.ply() > 24 or board.is_check():
-        return None
-    us = board.turn
-    them = not us
-    king_sq = board.king(us)
-    home_rank = 0 if us == chess.WHITE else 7
-    best_move = None
-    best_score = 17  # require a concrete positional reason; otherwise preserve baseline ordering
-    for move in board.legal_moves:
-        if board.is_capture(move) or move.promotion is not None:
-            continue
-        pt = board.piece_type_at(move.from_square)
-        if pt is None:
-            continue
-        score = 0
-        if board.gives_check(move):
-            score += 28
-        if board.is_castling(move):
-            score += 22
-        if board.is_attacked_by(them, move.from_square) and pt != chess.KING:
-            score += 7 + 3 * _EARLY_ROOT_PIECE_VALUE[pt]
-        if pt in (chess.KNIGHT, chess.BISHOP) and chess.square_rank(move.from_square) == home_rank and chess.square_rank(move.to_square) != home_rank:
-            score += 12
-        if pt == chess.PAWN and king_sq is not None and chess.square_rank(king_sq) == home_rank and abs(chess.square_file(move.from_square) - chess.square_file(king_sq)) <= 1:
-            score -= 16
-        b = board.copy(stack=False)
-        b.push(move)
-        if b.is_attacked_by(b.turn, move.to_square):
-            score -= 10 + 2 * _EARLY_ROOT_PIECE_VALUE[pt]
-        attacks = b.attacks(move.to_square)
-        best_target = 0
-        for sq in attacks:
-            if b.color_at(sq) == b.turn:
-                target = b.piece_type_at(sq)
-                if target is not None:
-                    best_target = max(best_target, _EARLY_ROOT_PIECE_VALUE[target])
-        if best_target > _EARLY_ROOT_PIECE_VALUE[pt]:
-            score += 5 + 2 * (best_target - _EARLY_ROOT_PIECE_VALUE[pt])
-        if score > best_score:
-            best_score = score
-            best_move = move
-    return best_move
-'''
-          s=s.replace(marker,helper+marker,1)
+          p=Path('/tmp/cand/agent.py'); s=p.read_text(); helper=Path('/tmp/helper.txt').read_text()
+          marker='\ndef search_position(\n'; assert s.count(marker)==1
+          s=s.replace(marker,'\n'+helper+marker,1)
           old='    book_move = _book_prior(board)\n    root_prior_move = -1 if book_move is None else _internal_move_from_chess(board, book_move)\n'
           new='    book_move = _book_prior(board)\n    if book_move is None:\n        book_move = _early_root_positional_prior(board)\n    root_prior_move = -1 if book_move is None else _internal_move_from_chess(board, book_move)\n'
           assert s.count(old)==1
           p.write_text(s.replace(old,new,1))
           PY
-          python -m py_compile /tmp/base/agent.py /tmp/base/experiments/numba_search.py /tmp/cand/agent.py /tmp/cand/experiments/numba_search.py
-      - name: Reconstruct 18-start screen
+          python -m py_compile /tmp/cand/agent.py /tmp/cand/experiments/numba_search.py /tmp/base/agent.py /tmp/base/experiments/numba_search.py
+      - name: Build 18-start screen
         run: |
           set -euo pipefail
           cat match/benchmarks/top-engine-recent-20260911/chunk_00.b64 match/benchmarks/top-engine-recent-20260911/chunk_01.b64 match/benchmarks/top-engine-recent-20260911/chunk_02.b64 match/benchmarks/top-engine-recent-20260911/chunk_03a.b64 match/benchmarks/top-engine-recent-20260911/chunk_03b.b64 match/benchmarks/top-engine-recent-20260911/chunk_03c.b64 match/benchmarks/top-engine-recent-20260911/chunk_03d.b64 match/benchmarks/top-engine-recent-20260911/chunk_04.b64 | base64 -d | gzip -dc > /tmp/recent.pgn
           echo 'dbac26e0f2b451eb7bf80994ca48fdd6b1abbc9f133e528d3e968f007f7aa264  /tmp/recent.pgn' | sha256sum -c -
           python - <<'PY'
           import chess.pgn
-          seen=[];keys=set()
+          seen=[]; keys=set()
           with open('/tmp/recent.pgn',encoding='utf-8') as f:
               while True:
                   g=chess.pgn.read_game(f)
-                  if g is None:break
+                  if g is None: break
                   x=g.board().fen()
-                  if x not in keys:keys.add(x);seen.append(x)
+                  if x not in keys: keys.add(x); seen.append(x)
           assert len(seen)==36
-          screen=seen[::2]
-          assert len(screen)==18
+          screen=seen[::2]; assert len(screen)==18
           open('/tmp/starts.epd','w').write('\n'.join(screen)+'\n')
           PY
-      - name: Paired exact 30+0.5 screen
+      - name: Paired exact 30+0.5
         env:
           SHARD: ${{ matrix.shard }}
         run: |
           cat >/tmp/worker.py <<'PY'
           import contextlib,json,sys,numpy as np
-          with contextlib.redirect_stdout(sys.stderr):import agent
+          with contextlib.redirect_stdout(sys.stderr): import agent
           def reset():
-              agent._GAME_KEYS.clear();agent._PENDING_AFTER_OUR_MOVE=None;agent._LAST_CALL_TIME_LEFT_MS=None;agent._LAST_GET_MOVE_ELAPSED_MS=None;agent._CLOCK_OVERHEAD_EMA_MS=40.0;agent._CLOCK_FEEDBACK_SAMPLES=0
-              if hasattr(agent,'_BOOK_POST_SEARCH_BOOSTS'):agent._BOOK_POST_SEARCH_BOOSTS=0
-              agent._HASH_KEYS.fill(np.uint64(0));agent._HASH_MOVES.fill(np.int32(-1));agent._TT_TABLE.fill(np.uint64(0));agent._QUIET_HISTORY.fill(np.int16(0))
+              agent._GAME_KEYS.clear(); agent._PENDING_AFTER_OUR_MOVE=None; agent._LAST_CALL_TIME_LEFT_MS=None; agent._LAST_GET_MOVE_ELAPSED_MS=None; agent._CLOCK_OVERHEAD_EMA_MS=40.0; agent._CLOCK_FEEDBACK_SAMPLES=0
+              if hasattr(agent,'_BOOK_POST_SEARCH_BOOSTS'): agent._BOOK_POST_SEARCH_BOOSTS=0
+              agent._HASH_KEYS.fill(np.uint64(0)); agent._HASH_MOVES.fill(np.int32(-1)); agent._TT_TABLE.fill(np.uint64(0)); agent._QUIET_HISTORY.fill(np.int16(0))
           for line in sys.stdin:
               try:
                   q=json.loads(line)
-                  if q['op']=='reset':reset();r={'ok':1}
-                  else:r={'move':agent.get_move(q['fen'],int(q['ms']))}
-              except Exception as e:r={'error':type(e).__name__+': '+str(e)}
+                  if q['op']=='reset': reset(); r={'ok':1}
+                  else: r={'move':agent.get_move(q['fen'],int(q['ms']))}
+              except Exception as e: r={'error':type(e).__name__+': '+str(e)}
               print(json.dumps(r),flush=True)
           PY
           cat >/tmp/match.py <<'PY'
           import chess,json,math,os,subprocess,sys,time
           class W:
-              def __init__(self,d):self.p=subprocess.Popen([sys.executable,'/tmp/worker.py'],cwd=d,stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env={**os.environ,'PYTHONPATH':d})
-              def ask(self,q):self.p.stdin.write(json.dumps(q)+'\n');self.p.stdin.flush();r=json.loads(self.p.stdout.readline());assert 'error' not in r,r;return r
-              def reset(self):self.ask({'op':'reset'})
-              def close(self):self.p.terminate();self.p.wait(timeout=5)
-          allf=[x.strip() for x in open('/tmp/starts.epd') if x.strip()];sh=int(os.environ['SHARD']);starts=allf[sh::4]
-          base=W('/tmp/base');cand=W('/tmp/cand');pts=[];fails=[];BASE=30.;INC=.5
+              def __init__(self,d): self.p=subprocess.Popen([sys.executable,'/tmp/worker.py'],cwd=d,stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env={**os.environ,'PYTHONPATH':d})
+              def ask(self,q): self.p.stdin.write(json.dumps(q)+'\n'); self.p.stdin.flush(); r=json.loads(self.p.stdout.readline()); assert 'error' not in r,r; return r
+              def reset(self): self.ask({'op':'reset'})
+              def close(self): self.p.terminate(); self.p.wait(timeout=5)
+          allf=[x.strip() for x in open('/tmp/starts.epd') if x.strip()]; sh=int(os.environ['SHARD']); starts=allf[sh::4]
+          base=W('/tmp/base'); cand=W('/tmp/cand'); pts=[]; fails=[]; BASE=30.; INC=.5
           try:
-              for j,fen in enumerate(starts):
+              for fen in starts:
                   for leg in range(2):
-                      base.reset();cand.reset();b=chess.Board(fen);cl={'base':BASE,'cand':BASE};cw=(leg==0);failure=None
+                      base.reset(); cand.reset(); b=chess.Board(fen); cl={'base':BASE,'cand':BASE}; cw=(leg==0); failure=None
                       for _ in range(300):
-                          if b.outcome(claim_draw=True):break
-                          side='cand' if b.turn==cw else 'base';w=cand if side=='cand' else base;st=time.perf_counter();rr=w.ask({'op':'move','fen':b.fen(),'ms':max(1,round(cl[side]*1000))});cl[side]-=time.perf_counter()-st
-                          if cl[side]<0:failure=side+' flag';break
+                          if b.outcome(claim_draw=True): break
+                          side='cand' if b.turn==cw else 'base'; w=cand if side=='cand' else base; st=time.perf_counter(); rr=w.ask({'op':'move','fen':b.fen(),'ms':max(1,round(cl[side]*1000))}); cl[side]-=time.perf_counter()-st
+                          if cl[side]<0: failure=side+' flag'; break
                           m=chess.Move.from_uci(rr['move'])
-                          if m not in b.legal_moves:failure=side+' illegal';break
-                          b.push(m);cl[side]+=INC
-                      out=b.outcome(claim_draw=True);cp=(0. if failure and failure.startswith('cand') else 1.) if failure else (.5 if out is None or out.winner is None else (1. if out.winner==cw else 0.));pts.append(cp)
-                      if failure:fails.append(failure)
+                          if m not in b.legal_moves: failure=side+' illegal'; break
+                          b.push(m); cl[side]+=INC
+                      out=b.outcome(claim_draw=True); cp=(0. if failure and failure.startswith('cand') else 1.) if failure else (.5 if out is None or out.winner is None else (1. if out.winner==cw else 0.)); pts.append(cp)
+                      if failure: fails.append(failure)
                       print('GAME point',cp,'TOTAL',sum(pts),'failure',failure,flush=True)
-          finally:base.close();cand.close()
-          p=sum(pts)/len(pts);q=max(1e-6,min(1-1e-6,p));print('FINAL shard',sh,'points',sum(pts),'games',len(pts),'score',p,'REL_ELO',400*math.log10(q/(1-q)),'FAILS',fails)
+          finally: base.close(); cand.close()
+          p=sum(pts)/len(pts); q=max(1e-6,min(1-1e-6,p)); print('FINAL shard',sh,'points',sum(pts),'games',len(pts),'score',p,'REL_ELO',400*math.log10(q/(1-q)),'FAILS',fails)
           PY
           python /tmp/match.py
