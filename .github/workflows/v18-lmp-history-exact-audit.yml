@@ -1,0 +1,44 @@
+name: V18 LMP history exact audit
+
+on:
+  push:
+    branches: [analysis/v18-see-staging-scratch-20260911]
+    paths: ['.github/workflows/v18-lmp-history-exact-audit.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reconstruct exact PUNCH133
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/engine; mkdir /tmp/engine
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          unzip -q /tmp/p150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+      - name: Show exact move-loop pruning and history lifecycle
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          for file in ('/tmp/engine/experiments/numba_search.py','/tmp/engine/agent.py'):
+              lines=Path(file).read_text().splitlines()
+              print('\n########',file,'########')
+              terms=('move_index','quiet_count','futility','FUTILITY','LMP','late','hist_score','child_improving','_QUIET_HISTORY','quiet_history','iterative_search_stateful')
+              hits=[i for i,x in enumerate(lines) if any(t in x for t in terms)]
+              # Merge nearby windows so the exact surrounding control flow is readable.
+              windows=[]
+              for i in hits:
+                  lo=max(0,i-14); hi=min(len(lines),i+26)
+                  if windows and lo <= windows[-1][1]+5:
+                      windows[-1]=(windows[-1][0],max(windows[-1][1],hi))
+                  else: windows.append((lo,hi))
+              for lo,hi in windows:
+                  print(f'===== {lo+1}-{hi} =====')
+                  for j in range(lo,hi): print(f'{j+1:05d}: {lines[j]}')
+          PY
