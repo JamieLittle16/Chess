@@ -1,0 +1,300 @@
+name: V18 SEE + strict consensus opening prior
+
+on:
+  push:
+    branches: [analysis/v18-see-need3-opening-prior-20260911]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  paired:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [generic, targeted]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Download 2024-2026 broadcast artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for pair in '2024 10170991013' '2025 10171369612' '2026 10171021582'; do
+            set -- $pair; y=$1; id=$2
+            curl --fail --location --retry 5 -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+              "https://api.github.com/repos/JamieLittle16/Chess/actions/artifacts/${id}/zip" -o "/tmp/${y}.zip"
+            mkdir -p "/tmp/${y}"; unzip -q "/tmp/${y}.zip" -d "/tmp/${y}"
+          done
+      - name: Build exact SEE baseline and strict-consensus candidate
+        run: |
+          set -euo pipefail
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          for d in /tmp/base /tmp/cand; do
+            rm -rf "$d"; mkdir "$d"; unzip -q /tmp/p150.zip -d "$d"
+            sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' "$d/agent.py"
+            curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o "$d/v18_gm2001.bin"
+            python scripts/apply_v18_see_capture_ordering.py "$d/experiments/numba_search.py"
+          done
+          python - <<'PY'
+          import collections, glob, hashlib, struct
+          S=struct.Struct('>QHHI')
+          def load(path):
+              d=collections.defaultdict(list)
+              with open(path,'rb') as f:
+                  while True:
+                      b=f.read(16)
+                      if not b: break
+                      k,m,w,l=S.unpack(b); d[k].append((m,w,l))
+              for k in d: d[k].sort(key=lambda x:(-x[1],x[0]))
+              return d
+          def find(y,name):
+              xs=glob.glob(f'/tmp/{y}/**/{name}',recursive=True); assert xs,(y,name); return xs[0]
+          years={y:load(find(y,'broadcast-all-min2.bin')) for y in ('2024','2025','2026')}
+          gm=load('/tmp/base/v18_gm2001.bin'); rows=[]
+          for k in set().union(*(set(d) for d in years.values())):
+              vals=[years[y][k][0] for y in years if k in years[y]]
+              if len(vals)<3 or k in gm or len({m for m,w,l in vals})!=1: continue
+              rows.append((k,vals[0][0],min(65535,sum(w for m,w,l in vals)),0))
+          rows.sort(); p='/tmp/cand/v18_multiyear_consensus.bin'
+          with open(p,'wb') as f:
+              for r in rows: f.write(S.pack(*r))
+          sha=hashlib.sha256(open(p,'rb').read()).hexdigest()
+          print('NEED3_ENTRIES',len(rows),'BYTES',len(rows)*16,'SHA',sha)
+          assert len(rows)==56608
+          assert sha=='69416951f5bd48269e2562d1c862bface9abdca26ac17193ddfcb03f8dec67a3'
+          PY
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/cand/agent.py'); s=p.read_text()
+          needle='_BOOK_READER = chess.polyglot.open_reader(_BOOK_PATH)\n_BOOK_PRIOR_MAX_PLY: Final = 22\n'
+          repl='_BOOK_READER = chess.polyglot.open_reader(_BOOK_PATH)\n_CONSENSUS_BOOK_PATH = Path(__file__).with_name("v18_multiyear_consensus.bin")\nif not _CONSENSUS_BOOK_PATH.is_file():\n    raise ValueError("missing V18 multi-year consensus prior")\n_CONSENSUS_BOOK_READER = chess.polyglot.open_reader(_CONSENSUS_BOOK_PATH)\n_BOOK_PRIOR_MAX_PLY: Final = 22\n'
+          assert needle in s; s=s.replace(needle,repl,1)
+          old='''def _book_prior(board: chess.Board) -> chess.Move | None:\n    """Return the strongest available GM-book root prior, or None off book.\n\n    Keep the book strictly in the opening.  Polyglot lookup is position indexed, so this works\n    even when Chessathon starts us directly from a ply-8..16 FEN rather than from move one.\n    """\n    if board.ply() > _BOOK_PRIOR_MAX_PLY:\n        return None\n    best_entry = None\n    try:\n        for entry in _BOOK_READER.find_all(board):\n            move = entry.move\n            if move not in board.legal_moves:\n                continue\n            if best_entry is None or entry.weight > best_entry.weight:\n                best_entry = entry\n    except (IndexError, ValueError):\n        # A malformed/stale book must degrade to the exact baseline search, never affect legality.\n        return None\n    return None if best_entry is None else best_entry.move\n'''
+          new='''def _strongest_legal_book_move(reader: chess.polyglot.MemoryMappedReader, board: chess.Board) -> chess.Move | None:\n    best_entry = None\n    try:\n        for entry in reader.find_all(board):\n            move = entry.move\n            if move not in board.legal_moves or int(entry.weight) <= 0:\n                continue\n            if best_entry is None or int(entry.weight) > int(best_entry.weight):\n                best_entry = entry\n    except (IndexError, ValueError):\n        return None\n    return None if best_entry is None else best_entry.move\n\n\ndef _book_prior(board: chess.Board) -> chess.Move | None:\n    """GM prior first; strict multi-year consensus only fills true GM misses and never plays directly."""\n    if board.ply() > _BOOK_PRIOR_MAX_PLY:\n        return None\n    move = _strongest_legal_book_move(_BOOK_READER, board)\n    if move is not None:\n        return move\n    return _strongest_legal_book_move(_CONSENSUS_BOOK_READER, board)\n'''
+          assert old in s; p.write_text(s.replace(old,new,1))
+          PY
+          python -m py_compile /tmp/base/agent.py /tmp/base/experiments/numba_search.py /tmp/cand/agent.py /tmp/cand/experiments/numba_search.py
+      - name: Exact-clock paired opening match
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: |
+          cat >/tmp/worker.py <<'PY'
+          import contextlib,json,sys,numpy as np
+          with contextlib.redirect_stdout(sys.stderr): import agent
+          def reset():
+              agent._GAME_KEYS.clear(); agent._PENDING_AFTER_OUR_MOVE=None
+              agent._LAST_CALL_TIME_LEFT_MS=None; agent._LAST_GET_MOVE_ELAPSED_MS=None
+              agent._CLOCK_OVERHEAD_EMA_MS=40.0; agent._CLOCK_FEEDBACK_SAMPLES=0
+              if hasattr(agent,'_BOOK_POST_SEARCH_BOOSTS'): agent._BOOK_POST_SEARCH_BOOSTS=0
+              agent._HASH_KEYS.fill(np.uint64(0)); agent._HASH_MOVES.fill(np.int32(-1))
+              agent._TT_TABLE.fill(np.uint64(0)); agent._QUIET_HISTORY.fill(np.int16(0))
+          for line in sys.stdin:
+              try:
+                  q=json.loads(line)
+                  if q['op']=='reset': reset(); ans={'ok':True}
+                  else: ans={'move':agent.get_move(q['fen'],int(q['ms']))}
+              except Exception as e: ans={'error':type(e).__name__+': '+str(e)}
+              print(json.dumps(ans),flush=True)
+          PY
+          cat >/tmp/match.py <<'PY'
+          import chess,json,math,os,subprocess,sys,time
+          generic=[
+            ('Taimanov','r1bqkbnr/pp1p1ppp/2n1p3/8/3NP3/P7/1PP2PPP/RNBQKB1R b KQkq - 0 5'),
+            ('Semi-Slav','r1b1k2r/pp1nqppp/2pbpn2/3p4/P1PP4/2N1PN2/1P2BPPP/R1BQ1RK1 b kq - 4 8'),
+            ('Italian','r1bqk2r/1pp2ppp/1bnp1n2/pP2p3/P1B1P3/2PP1N2/5PPP/RNBQK2R b KQkq - 0 8'),
+            ('London','r1bqk2r/pp3ppp/2nbpn2/2pp4/3P1B2/P1P1P3/1P1N1PPP/R2QKBNR w KQkq - 1 7'),
+            ('French Classical','r1bqk2r/pp1n1ppp/2n1p3/2bpP3/5P2/2NB1N2/PPP3PP/R1BQK2R b KQkq - 1 8'),
+            ('Najdorf','rnbqk2r/1p2bppp/p2ppn2/8/4PPP1/1NN5/PPP4P/R1BQKB1R b KQkq - 0 8'),
+            ('Queens Indian','rn1q1rk1/pbppbppp/1p2pn2/8/2PP4/5NP1/PP2PPBP/RNBQR1K1 b - - 6 7'),
+            ('English Symm','r1bq1rk1/pp1pppbp/2n2np1/2p5/2PP4/2N2NP1/PP2PPBP/R1BQ1RK1 b - - 0 7'),
+            ('Sveshnikov','r1bqkb1r/1p3ppp/p1np1n2/4p3/P3P3/N1N5/1PP2PPP/R1BQKB1R b KQkq - 1 8'),
+            ('French Tarrasch','rnbqkbnr/pp3ppp/8/2pp4/3P4/7P/PPPN1PP1/R1BQKBNR b KQkq - 0 5')]
+          targeted=[
+            ('Public05','r1bqk2r/ppp1bppp/2np1n2/4p3/P1B1P3/2NP1N2/1PP2PPP/R1BQK2R b KQkq - 0 6'),
+            ('Public06','r1bqk1nr/pp3pbp/2npp1p1/2p5/4PP2/2NP2P1/PPP3BP/R1BQK1NR w KQkq - 0 7'),
+            ('Public16','rnbqk2r/pp2ppbp/3p1np1/8/3NP3/2N1B2P/PPP2PP1/R2QKB1R b KQkq - 2 7'),
+            ('Public21','r1bqk2r/pppp1ppp/2n2n2/1B2p3/1b2P3/2NP1N2/PPP2PPP/R1BQK2R b KQkq - 0 5'),
+            ('Public23','rnbq1rk1/ppp1bppp/4pn2/3p4/2P5/3P1NP1/PP2PPBP/RNBQ1RK1 b - - 2 6'),
+            ('Public27','r1bqkb1r/pp1p1ppp/2n1pn2/8/3NP3/2NQ4/PPP2PPP/R1B1KB1R b KQkq - 4 6'),
+            ('Public31','r2qkb1r/pp3ppp/2npbn2/3Np3/4P3/1N3P2/PPP3PP/R1BQKB1R b KQkq - 3 8'),
+            ('Public01','r1bqkb1r/pp3ppp/5n2/3pn3/8/2PB4/PP2NPPP/RNBQK2R w KQkq - 0 8'),
+            ('Public14','rn1qkbnr/pp2ppp1/2p3bp/8/3P3P/5NN1/PPP2PP1/R1BQKB1R b KQkq - 1 7'),
+            ('Public35','r1b1k2r/pp2nppp/2n1p3/q1ppP3/P2P4/2P2N2/2PB1PPP/R2QKB1R b KQkq - 4 9')]
+          starts=generic if os.environ['SUITE']=='generic' else targeted
+          class W:
+              def __init__(self,d): self.p=subprocess.Popen([sys.executable,'/tmp/worker.py'],cwd=d,stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env={**os.environ,'PYTHONPATH':d})
+              def ask(self,q):
+                  self.p.stdin.write(json.dumps(q)+'\n'); self.p.stdin.flush(); r=json.loads(self.p.stdout.readline())
+                  if 'error' in r: raise RuntimeError(r['error'])
+                  return r
+              def reset(self): self.ask({'op':'reset'})
+              def close(self): self.p.terminate(); self.p.wait(timeout=5)
+          base=W('/tmp/base'); cand=W('/tmp/cand'); pts=[]; fails=[]; BASE=30.; INC=.5
+          try:
+              for name,fen in starts:
+                  for leg in range(2):
+                      base.reset();cand.reset();b=chess.Board(fen);cl={'base':BASE,'cand':BASE};cw=(leg==0);failure=None
+                      for _ in range(300):
+                          if b.outcome(claim_draw=True): break
+                          side='cand' if b.turn==cw else 'base'; w=cand if side=='cand' else base
+                          st=time.perf_counter(); rr=w.ask({'op':'move','fen':b.fen(),'ms':max(1,round(cl[side]*1000))}); cl[side]-=time.perf_counter()-st
+                          if cl[side]<0: failure=side+' flag'; break
+                          m=chess.Move.from_uci(rr['move'])
+                          if m not in b.legal_moves: failure=side+' illegal'; break
+                          b.push(m); cl[side]+=INC
+                      out=b.outcome(claim_draw=True)
+                      cp=(0. if failure and failure.startswith('cand') else 1.) if failure else (.5 if out is None or out.winner is None else (1. if out.winner==cw else 0.))
+                      pts.append(cp)
+                      if failure: fails.append((name,leg,failure))
+                      print('GAME',len(pts),'/',len(starts)*2,name,'leg',leg,'point',cp,'TOTAL',sum(pts),'clocks',cl,'failure',failure,flush=True)
+          finally: base.close(); cand.close()
+          p=sum(pts)/len(pts); q=max(1e-6,min(1-1e-6,p))
+          print('FINAL suite',os.environ['SUITE'],'points',sum(pts),'games',len(pts),'score',p,'REL_ELO',400*math.log10(q/(1-q)),'FAILS',fails)
+          PY
+          python /tmp/match.py
+
+  root-audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Download broadcasts and Stockfish 19
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for pair in '2024 10170991013' '2025 10171369612' '2026 10171021582'; do
+            set -- $pair; y=$1; id=$2
+            curl --fail --location --retry 5 -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/JamieLittle16/Chess/actions/artifacts/${id}/zip" -o "/tmp/${y}.zip"
+            mkdir -p "/tmp/${y}"; unzip -q "/tmp/${y}.zip" -d "/tmp/${y}"
+          done
+          curl -L --fail --retry 3 -o /tmp/sf19.tgz https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  /tmp/sf19.tgz' | sha256sum -c -
+          mkdir /tmp/sf19; tar -xzf /tmp/sf19.tgz -C /tmp/sf19
+          SF=$(find /tmp/sf19 -type f -name 'stockfish*' | head -n1); chmod +x "$SF"; echo "STOCKFISH=$SF" >> "$GITHUB_ENV"
+      - name: Build SEE baseline and candidate
+        run: |
+          set -euo pipefail
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          for d in /tmp/base /tmp/cand; do
+            mkdir "$d"; unzip -q /tmp/p150.zip -d "$d"
+            sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' "$d/agent.py"
+            curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o "$d/v18_gm2001.bin"
+            python scripts/apply_v18_see_capture_ordering.py "$d/experiments/numba_search.py"
+          done
+          python - <<'PY'
+          import collections,glob,hashlib,struct
+          S=struct.Struct('>QHHI')
+          def load(path):
+              d=collections.defaultdict(list)
+              with open(path,'rb') as f:
+                  while True:
+                      b=f.read(16)
+                      if not b: break
+                      k,m,w,l=S.unpack(b); d[k].append((m,w,l))
+              for k in d:d[k].sort(key=lambda x:(-x[1],x[0]))
+              return d
+          def find(y,n):
+              xs=glob.glob(f'/tmp/{y}/**/{n}',recursive=True);assert xs;return xs[0]
+          D={y:load(find(y,'broadcast-all-min2.bin')) for y in ('2024','2025','2026')};G=load('/tmp/base/v18_gm2001.bin');rows=[]
+          for k in set().union(*(set(d) for d in D.values())):
+              vals=[D[y][k][0] for y in D if k in D[y]]
+              if len(vals)==3 and k not in G and len({m for m,w,l in vals})==1: rows.append((k,vals[0][0],min(65535,sum(w for m,w,l in vals)),0))
+          rows.sort();p='/tmp/cand/v18_multiyear_consensus.bin'
+          with open(p,'wb') as f:
+              for r in rows:f.write(S.pack(*r))
+          assert len(rows)==56608 and hashlib.sha256(open(p,'rb').read()).hexdigest()=='69416951f5bd48269e2562d1c862bface9abdca26ac17193ddfcb03f8dec67a3'
+          PY
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/cand/agent.py');s=p.read_text();needle='_BOOK_READER = chess.polyglot.open_reader(_BOOK_PATH)\n_BOOK_PRIOR_MAX_PLY: Final = 22\n';repl='_BOOK_READER = chess.polyglot.open_reader(_BOOK_PATH)\n_CONSENSUS_BOOK_PATH = Path(__file__).with_name("v18_multiyear_consensus.bin")\nif not _CONSENSUS_BOOK_PATH.is_file():\n    raise ValueError("missing V18 multi-year consensus prior")\n_CONSENSUS_BOOK_READER = chess.polyglot.open_reader(_CONSENSUS_BOOK_PATH)\n_BOOK_PRIOR_MAX_PLY: Final = 22\n';assert needle in s;s=s.replace(needle,repl,1)
+          old='''def _book_prior(board: chess.Board) -> chess.Move | None:\n    """Return the strongest available GM-book root prior, or None off book.\n\n    Keep the book strictly in the opening.  Polyglot lookup is position indexed, so this works\n    even when Chessathon starts us directly from a ply-8..16 FEN rather than from move one.\n    """\n    if board.ply() > _BOOK_PRIOR_MAX_PLY:\n        return None\n    best_entry = None\n    try:\n        for entry in _BOOK_READER.find_all(board):\n            move = entry.move\n            if move not in board.legal_moves:\n                continue\n            if best_entry is None or entry.weight > best_entry.weight:\n                best_entry = entry\n    except (IndexError, ValueError):\n        # A malformed/stale book must degrade to the exact baseline search, never affect legality.\n        return None\n    return None if best_entry is None else best_entry.move\n'''
+          new='''def _strongest_legal_book_move(reader: chess.polyglot.MemoryMappedReader, board: chess.Board) -> chess.Move | None:\n    best_entry = None\n    try:\n        for entry in reader.find_all(board):\n            move = entry.move\n            if move not in board.legal_moves or int(entry.weight) <= 0: continue\n            if best_entry is None or int(entry.weight) > int(best_entry.weight): best_entry = entry\n    except (IndexError, ValueError): return None\n    return None if best_entry is None else best_entry.move\n\n\ndef _book_prior(board: chess.Board) -> chess.Move | None:\n    if board.ply() > _BOOK_PRIOR_MAX_PLY: return None\n    move = _strongest_legal_book_move(_BOOK_READER, board)\n    return move if move is not None else _strongest_legal_book_move(_CONSENSUS_BOOK_READER, board)\n'''
+          assert old in s;p.write_text(s.replace(old,new,1))
+          PY
+      - name: Compare root quality on all 36 public starts
+        run: |
+          cat >/tmp/worker.py <<'PY'
+          import contextlib,json,sys,numpy as np
+          with contextlib.redirect_stdout(sys.stderr): import agent
+          def reset():
+              agent._GAME_KEYS.clear();agent._PENDING_AFTER_OUR_MOVE=None;agent._LAST_CALL_TIME_LEFT_MS=None;agent._LAST_GET_MOVE_ELAPSED_MS=None
+              agent._CLOCK_OVERHEAD_EMA_MS=40.0;agent._CLOCK_FEEDBACK_SAMPLES=0
+              if hasattr(agent,'_BOOK_POST_SEARCH_BOOSTS'):agent._BOOK_POST_SEARCH_BOOSTS=0
+              agent._HASH_KEYS.fill(np.uint64(0));agent._HASH_MOVES.fill(np.int32(-1));agent._TT_TABLE.fill(np.uint64(0));agent._QUIET_HISTORY.fill(np.int16(0))
+          for line in sys.stdin:
+              q=json.loads(line)
+              try:
+                  if q['op']=='reset':reset();r={'ok':1}
+                  else:r={'move':agent.get_move(q['fen'],int(q['ms']))}
+              except Exception as e:r={'error':repr(e)}
+              print(json.dumps(r),flush=True)
+          PY
+          cat >/tmp/audit.py <<'PY'
+          import chess,chess.engine,json,math,os,subprocess,sys
+          fens='''r1bqkb1r/pp3ppp/5n2/3pn3/8/2PB4/PP2NPPP/RNBQK2R w KQkq - 0 8
+          r1bqkb1r/1p2pppp/p1np1n2/6B1/3NP3/2N5/PPPQ1PPP/R3KB1R b KQkq - 1 7
+          r1bq1rk1/pp1nbpp1/2p1pn1p/3p4/2PP4/5NP1/PPQ1PPBP/RNBR2K1 w - - 2 9
+          r1bqkb1r/1p3ppp/p1np1n2/4p3/P3P3/N1N5/1PP2PPP/R1BQKB1R b KQkq - 1 8
+          r1bqk2r/ppp1bppp/2np1n2/4p3/P1B1P3/2NP1N2/1PP2PPP/R1BQK2R b KQkq - 0 6
+          r1bqk1nr/pp3pbp/2npp1p1/2p5/4PP2/2NP2P1/PPP3BP/R1BQK1NR w KQkq - 0 7
+          rnbq1rk1/ppp1bppp/4pn2/3p4/2PP4/N4NP1/PP2PPBP/R1BQK2R b KQ - 0 6
+          r1bqkb1r/ppp2ppp/2n2n2/3p4/3NP3/5P2/PPP3PP/RNBQKB1R w KQkq - 0 6
+          r1bqk2r/pp3ppp/2nbpn2/2pp4/3P1B2/P1P1P3/1P1N1PPP/R2QKBNR w KQkq - 1 7
+          r1bqkbnr/pp1p1ppp/2n1p3/1N6/4P3/8/PPP2PPP/RNBQKB1R b KQkq - 2 5
+          rn1qk2r/pbp1bppp/1p1ppn2/8/2PP1B2/5NP1/PP2PPBP/RN1Q1RK1 b kq - 1 7
+          r1bq1rk1/pp2ppbp/2np1np1/2p5/2P4P/2NP1NP1/PP2PPB1/R1BQK2R w KQ - 0 8
+          rnbqk2r/ppp2ppp/3b4/3p4/2PPn3/5N2/PP2BPPP/RNBQK2R b KQkq - 0 7
+          rn1qkbnr/pp2ppp1/2p3bp/8/3P3P/5NN1/PPP2PP1/R1BQKB1R b KQkq - 1 7
+          r1bq1rk1/2p1bppp/p2p1n2/np2p3/4P3/1B1P1N1P/PPP2PP1/RNBQR1K1 w - - 1 10
+          rnbqk2r/pp2ppbp/3p1np1/8/3NP3/2N1B2P/PPP2PP1/R2QKB1R b KQkq - 2 7
+          rnbqk2r/ppp1bppp/4pn2/3p4/2P5/P4NP1/1P1PPPBP/RNBQK2R b KQkq - 0 5
+          rnbq1rk1/ppp1ppbp/3p1np1/8/3PP3/2N2N2/PPP1BPPP/R1BQ1RK1 b - - 5 6
+          r1bq1rk1/pp2ppbp/2np1np1/2p5/2P4P/2NP1NP1/PP2PPB1/1RBQK2R b K - 1 8
+          rnbq1rk1/ppp2ppp/4pn2/8/1bBP4/2N1P2P/PP3PP1/R1BQK1NR b KQ - 0 7
+          r1bqk2r/pppp1ppp/2n2n2/1B2p3/1b2P3/2NP1N2/PPP2PPP/R1BQK2R b KQkq - 0 5
+          rnbqkb1r/pp3ppp/5n2/2pp4/3P4/8/PPPNBPPP/R1BQK1NR w KQkq - 2 6
+          rnbq1rk1/ppp1bppp/4pn2/3p4/2P5/3P1NP1/PP2PPBP/RNBQ1RK1 b - - 2 6
+          r1bqkbnr/pp1p1ppp/2n1p3/8/3NP3/6P1/PPP2P1P/RNBQKB1R b KQkq - 0 5
+          rnbqr1k1/ppp2pbp/3p1np1/8/2PNP3/2N1B3/PPQ1BPPP/R3K2R b KQ - 2 9
+          rn1qkb1r/1p3ppp/p2pbn2/4p3/4P3/1NN1B3/PPPQ1PPP/R3KB1R b KQkq - 3 8
+          r1bqkb1r/pp1p1ppp/2n1pn2/8/3NP3/2NQ4/PPP2PPP/R1B1KB1R b KQkq - 4 6
+          rnbqk2r/ppp1ppbp/6p1/8/3PP3/2P5/P4PPP/1RBQKBNR b Kkq - 2 7
+          rnbqk2r/ppp3pp/3bpn2/3p1p2/3P1B2/4PNP1/PPP2PBP/RN1QK2R b KQkq - 0 6
+          rnbqk1nr/1p3ppp/p7/2bp4/P7/1N6/1PP2PPP/R1BQKBNR b KQkq - 1 7
+          r2qkb1r/pp3ppp/2npbn2/3Np3/4P3/1N3P2/PPP3PP/R1BQKB1R b KQkq - 3 8
+          1rbqk1nr/pp3pbp/2npp1p1/2p5/4PP2/2NPBNP1/PPP3BP/R2QK2R b KQk - 3 8
+          r1bqk2r/pppp1ppp/2n2n2/1B6/1b1NP3/2P5/PP3PPP/RNBQK2R b KQkq - 0 6
+          r1bqk2r/pp3ppp/2nbpn2/2pp4/3P4/P1P1P1B1/1P1N1PPP/R2QKBNR b KQkq - 2 7
+          r1b1k2r/pp2nppp/2n1p3/q1ppP3/P2P4/2P2N2/2PB1PPP/R2QKB1R b KQkq - 4 9
+          rnbq1rk1/ppp2ppp/3b4/3p4/3Pn3/3BBN2/PPP2PPP/RN1Q1RK1 b - - 5 8'''.splitlines()
+          fens=[x.strip() for x in fens if x.strip()];assert len(fens)==36
+          class W:
+              def __init__(self,d):self.p=subprocess.Popen([sys.executable,'/tmp/worker.py'],cwd=d,stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env={**os.environ,'PYTHONPATH':d})
+              def q(self,o):self.p.stdin.write(json.dumps(o)+'\n');self.p.stdin.flush();r=json.loads(self.p.stdout.readline());assert 'error' not in r,r;return r
+              def move(self,fen):self.q({'op':'reset'});return chess.Move.from_uci(self.q({'op':'move','fen':fen,'ms':30000})['move'])
+              def close(self):self.p.terminate();self.p.wait(timeout=5)
+          base=W('/tmp/base');cand=W('/tmp/cand');sf=chess.engine.SimpleEngine.popen_uci(os.environ['STOCKFISH']);sf.configure({'Threads':1,'Hash':64})
+          def score(b,m):
+              sf.configure({'Clear Hash':None});i=sf.analyse(b,chess.engine.Limit(nodes=200000),root_moves=[m]);return i['score'].pov(b.turn).score(mate_score=100000)
+          wins=ties=losses=changed=0;net=0
+          try:
+              for i,fen in enumerate(fens,1):
+                  b=chess.Board(fen);bm=base.move(fen);cm=cand.move(fen)
+                  bs=score(b,bm);cs=score(b,cm);d=cs-bs;net+=d;changed+=bm!=cm
+                  cls='win' if d>=8 else ('loss' if d<=-8 else 'tie');wins+=cls=='win';losses+=cls=='loss';ties+=cls=='tie'
+                  print(f'ROW {i:02d} base={bm.uci()} cand={cm.uci()} delta={d:+d}cp {cls}',flush=True)
+          finally:base.close();cand.close();sf.quit()
+          print('SUMMARY changed',changed,'wins',wins,'ties',ties,'losses',losses,'pair_score',(wins+0.5*ties)/36,'net_cp',net,'mean_delta',net/36)
+          PY
+          python /tmp/audit.py
