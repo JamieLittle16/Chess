@@ -1,0 +1,149 @@
+name: V18 SEE Swiss170 root-prior A/B
+
+on:
+  push:
+    branches: [analysis/v18-see-swiss170-rootprior-20260911]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  paired:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [gm-first, swiss-first]
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Fetch certified tree artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: swiss-tree-v2-*
+          path: /tmp/trees
+          merge-multiple: true
+          repository: JamieLittle16/Chess
+          run-id: 34554618285
+          github-token: ${{ github.token }}
+      - name: Build exact SEE pair with root-only Swiss prior
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import glob,json
+          merged={}; stable=attempts=0
+          for p in sorted(glob.glob('/tmp/trees/tree-*.json')):
+              d=json.load(open(p)); stable+=sum(x['stable'] for x in d['audit']); attempts+=len(d['audit'])
+              for k,v in d['entries'].items():
+                  if k in merged: assert merged[k]==v,(k,merged[k],v)
+                  merged[k]=v
+          json.dump({'entries':merged},open('/tmp/tree.json','w'),sort_keys=True,separators=(',',':'))
+          print('MERGED_TREE entries',len(merged),'stable',stable,'attempts',attempts)
+          assert len(merged)==170 and stable==173 and attempts==238
+          PY
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          for d in /tmp/base /tmp/cand; do
+            rm -rf "$d"; mkdir "$d"; unzip -q /tmp/p150.zip -d "$d"
+            sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' "$d/agent.py"
+            curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o "$d/v18_gm2001.bin"
+            python scripts/apply_v18_see_capture_ordering.py "$d/experiments/numba_search.py"
+          done
+          python - <<'PY'
+          import json,os
+          from pathlib import Path
+          variant=os.environ['VARIANT']; entries=json.load(open('/tmp/tree.json'))['entries']
+          p=Path('/tmp/cand/agent.py'); s=p.read_text()
+          old='def _book_prior(board: chess.Board) -> chess.Move | None:\n'
+          assert s.count(old)==1
+          s=s.replace(old,'def _gm_book_prior(board: chess.Board) -> chess.Move | None:\n',1)
+          marker='\ndef _high_confidence_book_move(board: chess.Board) -> chess.Move | None:\n'
+          assert s.count(marker)==1
+          if variant=='gm-first':
+              chooser='''    gm = _gm_book_prior(board)\n    if gm is not None:\n        return gm\n    return swiss\n'''
+          else:
+              chooser='''    if swiss is not None:\n        return swiss\n    return _gm_book_prior(board)\n'''
+          helper='''\n_SWISS_CERTIFIED_PRIOR: Final = %s\n\ndef _swiss_certified_prior(board: chess.Board) -> chess.Move | None:\n    if board.ply() > 20:\n        return None\n    uci = _SWISS_CERTIFIED_PRIOR.get(" ".join(board.fen().split()[:4]))\n    if uci is None:\n        return None\n    move = chess.Move.from_uci(uci)\n    return move if move in board.legal_moves else None\n\ndef _book_prior(board: chess.Board) -> chess.Move | None:\n    # Root ordering only: normal SEE search remains authoritative.\n    swiss = _swiss_certified_prior(board)\n%s\n''' % (repr(entries), chooser)
+          s=s.replace(marker,helper+marker,1); p.write_text(s)
+          print('PATCHED',variant,'entries',len(entries))
+          PY
+          python -m py_compile /tmp/base/agent.py /tmp/base/experiments/numba_search.py /tmp/cand/agent.py /tmp/cand/experiments/numba_search.py
+      - name: Reconstruct 36 starts and audit prior conflicts
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          cat match/benchmarks/top-engine-recent-20260911/chunk_00.b64 match/benchmarks/top-engine-recent-20260911/chunk_01.b64 match/benchmarks/top-engine-recent-20260911/chunk_02.b64 match/benchmarks/top-engine-recent-20260911/chunk_03a.b64 match/benchmarks/top-engine-recent-20260911/chunk_03b.b64 match/benchmarks/top-engine-recent-20260911/chunk_03c.b64 match/benchmarks/top-engine-recent-20260911/chunk_03d.b64 match/benchmarks/top-engine-recent-20260911/chunk_04.b64 | base64 -d | gzip -dc > /tmp/recent.pgn
+          echo 'dbac26e0f2b451eb7bf80994ca48fdd6b1abbc9f133e528d3e968f007f7aa264  /tmp/recent.pgn' | sha256sum -c -
+          python - <<'PY'
+          import chess.pgn,sys,contextlib
+          seen=[];keys=set()
+          with open('/tmp/recent.pgn',encoding='utf-8') as f:
+              while True:
+                  g=chess.pgn.read_game(f)
+                  if g is None:break
+                  x=g.board().fen()
+                  if x not in keys:keys.add(x);seen.append(x)
+          assert len(seen)==36;open('/tmp/starts.epd','w').write('\n'.join(seen)+'\n')
+          sys.path.insert(0,'/tmp/cand')
+          with contextlib.redirect_stdout(sys.stderr): import agent
+          gm=sw=conf=0
+          for fen in seen:
+              b=chess.Board(fen); a=agent._gm_book_prior(b); c=agent._swiss_certified_prior(b)
+              gm+=a is not None; sw+=c is not None; conf+=a is not None and c is not None and a!=c
+          print('PRIOR_AUDIT starts',len(seen),'gm',gm,'swiss',sw,'conflicts',conf)
+          PY
+      - name: Paired exact 30+0.5
+        env:
+          SHARD: ${{ matrix.shard }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          cat >/tmp/worker.py <<'PY'
+          import contextlib,json,sys,numpy as np
+          with contextlib.redirect_stdout(sys.stderr):import agent
+          def reset():
+              agent._GAME_KEYS.clear();agent._PENDING_AFTER_OUR_MOVE=None;agent._LAST_CALL_TIME_LEFT_MS=None;agent._LAST_GET_MOVE_ELAPSED_MS=None;agent._CLOCK_OVERHEAD_EMA_MS=40.0;agent._CLOCK_FEEDBACK_SAMPLES=0
+              if hasattr(agent,'_BOOK_POST_SEARCH_BOOSTS'):agent._BOOK_POST_SEARCH_BOOSTS=0
+              agent._HASH_KEYS.fill(np.uint64(0));agent._HASH_MOVES.fill(np.int32(-1));agent._TT_TABLE.fill(np.uint64(0));agent._QUIET_HISTORY.fill(np.int16(0))
+          for line in sys.stdin:
+              try:
+                  q=json.loads(line)
+                  if q['op']=='reset':reset();r={'ok':1}
+                  else:r={'move':agent.get_move(q['fen'],int(q['ms']))}
+              except Exception as e:r={'error':type(e).__name__+': '+str(e)}
+              print(json.dumps(r),flush=True)
+          PY
+          cat >/tmp/match.py <<'PY'
+          import chess,json,math,os,subprocess,sys,time
+          class W:
+              def __init__(self,d):self.p=subprocess.Popen([sys.executable,'/tmp/worker.py'],cwd=d,stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env={**os.environ,'PYTHONPATH':d})
+              def ask(self,q):self.p.stdin.write(json.dumps(q)+'\n');self.p.stdin.flush();r=json.loads(self.p.stdout.readline());assert 'error' not in r,r;return r
+              def reset(self):self.ask({'op':'reset'})
+              def close(self):self.p.terminate();self.p.wait(timeout=5)
+          allf=[x.strip() for x in open('/tmp/starts.epd') if x.strip()];sh=int(os.environ['SHARD']);starts=allf[sh::4]
+          base=W('/tmp/base');cand=W('/tmp/cand');pts=[];fails=[];BASE=30.;INC=.5
+          try:
+              for j,fen in enumerate(starts):
+                  gi=sh+4*j
+                  for leg in range(2):
+                      base.reset();cand.reset();b=chess.Board(fen);cl={'base':BASE,'cand':BASE};cw=(leg==0);failure=None
+                      for _ in range(300):
+                          if b.outcome(claim_draw=True):break
+                          side='cand' if b.turn==cw else 'base';w=cand if side=='cand' else base;st=time.perf_counter();rr=w.ask({'op':'move','fen':b.fen(),'ms':max(1,round(cl[side]*1000))});cl[side]-=time.perf_counter()-st
+                          if cl[side]<0:failure=side+' flag';break
+                          m=chess.Move.from_uci(rr['move'])
+                          if m not in b.legal_moves:failure=side+' illegal';break
+                          b.push(m);cl[side]+=INC
+                      out=b.outcome(claim_draw=True);cp=(0. if failure and failure.startswith('cand') else 1.) if failure else (.5 if out is None or out.winner is None else (1. if out.winner==cw else 0.));pts.append(cp)
+                      if failure:fails.append((gi+1,leg,failure))
+                      print('GAME',gi+1,'leg',leg,'point',cp,'TOTAL',sum(pts),'failure',failure,flush=True)
+          finally:base.close();cand.close()
+          p=sum(pts)/len(pts);q=max(1e-6,min(1-1e-6,p));print('FINAL variant',os.environ['VARIANT'],'shard',sh,'points',sum(pts),'games',len(pts),'score',p,'REL_ELO',400*math.log10(q/(1-q)),'FAILS',fails)
+          PY
+          python /tmp/match.py
