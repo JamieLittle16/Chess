@@ -52,6 +52,7 @@ jobs:
             crates/chess-search/src/history.rs \
             crates/chess-search/src/lib.rs \
             crates/chess-search/src/root_analysis.rs \
+            crates/chess-engine/src/lib.rs \
             > .qualification/history-current/candidate.patch
           test -s .qualification/history-current/candidate.patch
 
@@ -145,9 +146,9 @@ jobs:
           git rev-parse HEAD > .qualification/history-current/checkout-head.txt
           sha256sum scripts/apply_current_history_aging_probe.py > .qualification/history-current/patcher.sha256
           cat > .qualification/history-current/evidence.txt <<EOF
-          purpose=isolate game-local Search-v2 history persistence on exact current main
+          purpose=isolate game-scoped Search-v2 history persistence on exact current main
           production_base=$PRODUCTION_BASE
-          candidate_difference=retain main+1ply continuation history across moves and age every entry by 3/4 at each top-level search
+          candidate_difference=retain main+1ply continuation history only when the next root strictly extends the known game history; age retained entries by 3/4; independent roots remain clean
           network_sha256=$GESTALT_SHA256
           opening_sha256=5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e
           fixed_nodes_per_move=25000
