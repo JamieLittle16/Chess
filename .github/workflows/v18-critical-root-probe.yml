@@ -1,0 +1,61 @@
+name: V18 critical root probe
+
+on:
+  push:
+    branches: [analysis/v18-root-quality-fastfilter-20260911]
+    paths: ['.github/workflows/v18-critical-root-probe.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Build five exact candidates
+        run: |
+          set -euo pipefail
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          for v in see root4 richhard asp40 asp40richhard; do
+            rm -rf "/tmp/$v"; mkdir -p "/tmp/$v"; unzip -q /tmp/p150.zip -d "/tmp/$v"
+            sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' "/tmp/$v/agent.py"
+            curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o "/tmp/$v/v18_gm2001.bin"
+            python scripts/apply_v18_see_capture_ordering.py "/tmp/$v/experiments/numba_search.py"
+          done
+          python - <<'PY'
+          from pathlib import Path
+          for d in ['/tmp/root4']:
+              p=Path(d+'/experiments/numba_search.py'); s=p.read_text()
+              needle='''    _order_moves_with_killers(\n        board, moves, count, preferred, score_stack[0], -1, -1, side, -1, quiet_history\n    )\n\n    _pick_next_scored_move(moves, score_stack[0], 0, count)\n'''
+              block='''    _order_moves_with_killers(\n        board, moves, count, preferred, score_stack[0], -1, -1, side, -1, quiet_history\n    )\n    root_static = _evaluate_state(side, eval_stack[0])\n    for policy_index in range(count):\n        packed_policy = int(score_stack[0, policy_index])\n        if (packed_policy & 2) == 0 and int(moves[policy_index]) != preferred:\n            policy_move = int(moves[policy_index])\n            _advance_eval_state_into(board, side, policy_move, eval_stack[0], eval_stack[1])\n            child_static = -_evaluate_state(-side, eval_stack[1])\n            policy_delta = child_static - root_static\n            if policy_delta > 300: policy_delta = 300\n            elif policy_delta < -300: policy_delta = -300\n            score_stack[0, policy_index] = ((packed_policy >> 2) + policy_delta * 4) * 4 + (packed_policy & 3)\n\n    _pick_next_scored_move(moves, score_stack[0], 0, count)\n'''
+              assert s.count(needle)==1; p.write_text(s.replace(needle,block,1))
+          PY
+          python scripts/apply_v18_rich_root_hard.py /tmp/richhard/experiments/numba_search.py
+          python scripts/apply_v18_aspiration40.py /tmp/asp40/experiments/numba_search.py
+          python scripts/apply_v18_rich_root_hard.py /tmp/asp40richhard/experiments/numba_search.py
+          python scripts/apply_v18_aspiration40.py /tmp/asp40richhard/experiments/numba_search.py
+          for v in see root4 richhard asp40 asp40richhard; do python -m py_compile "/tmp/$v/agent.py" "/tmp/$v/experiments/numba_search.py"; done
+      - name: Probe catastrophic Emile position
+        run: |
+          set -euo pipefail
+          FEN='rn1r2k1/ppq2ppp/2b1pn2/6B1/1b1P4/1BNQ1N1P/PP3PP1/R4RK1 b - - 8 13'
+          for v in see root4 richhard asp40 asp40richhard; do
+            V="$v" F="$FEN" PYTHONPATH="/tmp/$v" python - <<'PY'
+          import os,time,numpy as np
+          import agent
+          fen=os.environ['F']; variant=os.environ['V']
+          def reset():
+              agent._GAME_KEYS.clear(); agent._PENDING_AFTER_OUR_MOVE=None; agent._LAST_CALL_TIME_LEFT_MS=None; agent._LAST_GET_MOVE_ELAPSED_MS=None; agent._CLOCK_OVERHEAD_EMA_MS=40.0; agent._CLOCK_FEEDBACK_SAMPLES=0
+              if hasattr(agent,'_BOOK_POST_SEARCH_BOOSTS'): agent._BOOK_POST_SEARCH_BOOSTS=0
+              agent._HASH_KEYS.fill(np.uint64(0)); agent._HASH_MOVES.fill(np.int32(-1)); agent._TT_TABLE.fill(np.uint64(0)); agent._QUIET_HISTORY.fill(np.int16(0))
+          for ms in (122968, 240000):
+              reset(); t=time.perf_counter(); move=agent.get_move(fen,ms); dt=time.perf_counter()-t
+              print('CRITICAL',variant,'clock',ms,'move',move,'seconds',round(dt,3),flush=True)
+          PY
+          done
