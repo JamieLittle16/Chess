@@ -1,0 +1,198 @@
+name: V15 Stockfish 19 calibration ladder
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  PRODUCTION_BASE: 8e53d63a766122f70992942eccaac22be9e5fca3
+  GESTALT_SHA256: 956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6
+  OPENING_SHA256: 599a45efb446e91952d13e79bc7fec8de319e332036a54552a3e8e4af91f9cf1
+
+jobs:
+  gate:
+    if: github.head_ref == 'calibration/v15-stockfish19-ladder-20260908'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: Verify calibration branch does not change engine source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin "$PRODUCTION_BASE"
+          git diff --exit-code "$PRODUCTION_BASE" -- crates Cargo.toml Cargo.lock rust-toolchain.toml
+
+      - name: Full production correctness gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          cargo test -p chess-bench --release tests::suite_matches_the_reviewed_reference_signature -- --exact
+
+  calibration:
+    if: github.head_ref == 'calibration/v15-stockfish19-ladder-20260908'
+    needs: gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - elo: 2000
+            seed: 20260981
+          - elo: 2200
+            seed: 20260982
+          - elo: 2400
+            seed: 20260983
+          - elo: 2600
+            seed: 20260984
+          - elo: 2800
+            seed: 20260985
+    name: Stockfish 19 Elo ${{ matrix.elo }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+
+      - name: Verify exact production source and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin "$PRODUCTION_BASE"
+          git diff --exit-code "$PRODUCTION_BASE" -- crates Cargo.toml Cargo.lock rust-toolchain.toml
+          cargo build --release -p chess-uci
+          mkdir -p .qualification/bin .qualification/external
+          cp target/release/chess-uci .qualification/bin/v15
+          chmod +x .qualification/bin/v15
+
+      - name: Fetch exact certified Gestalt network
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' \
+            --output .qualification/external/gestalt-b840.nnue
+          test "$(stat -c%s .qualification/external/gestalt-b840.nnue)" = '21242944'
+          echo "$GESTALT_SHA256  .qualification/external/gestalt-b840.nnue" | sha256sum --check --strict
+
+      - name: Fetch pinned Fastchess and Stockfish 19
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/fastchess .qualification/stockfish
+
+          curl --fail --location --retry 3 \
+            --output .qualification/fastchess.tar \
+            https://github.com/Disservin/fastchess/releases/download/v1.8.2-alpha/fastchess-linux-x86-64.tar
+          echo '1003f920bebe841acdab5e6d7871e93171a4586857b3ec91c21ef5777f26ff96  .qualification/fastchess.tar' | sha256sum --check --strict
+          tar -xf .qualification/fastchess.tar -C .qualification/fastchess
+
+          curl --fail --location --retry 3 \
+            --output .qualification/stockfish.tar.gz \
+            https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  .qualification/stockfish.tar.gz' | sha256sum --check --strict
+          tar -xzf .qualification/stockfish.tar.gz -C .qualification/stockfish
+
+          FASTCHESS_BIN=$(find "$PWD/.qualification/fastchess" -type f -name fastchess -perm -111 -print -quit)
+          STOCKFISH_BIN=$(find "$PWD/.qualification/stockfish" -type f -name 'stockfish*' -perm -111 -print -quit)
+          test -n "$FASTCHESS_BIN"
+          test -n "$STOCKFISH_BIN"
+          echo "FASTCHESS_BIN=$FASTCHESS_BIN" >> "$GITHUB_ENV"
+          echo "STOCKFISH_BIN=$STOCKFISH_BIN" >> "$GITHUB_ENV"
+
+      - name: Verify calibration identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "$OPENING_SHA256  match/openings/m3-uho-lichess-100-v1.epd" | sha256sum --check --strict
+          sha256sum .qualification/bin/v15 .qualification/external/gestalt-b840.nnue "$FASTCHESS_BIN" "$STOCKFISH_BIN" match/openings/m3-uho-lichess-100-v1.epd
+          "$FASTCHESS_BIN" -version
+          printf 'uci\nquit\n' | "$STOCKFISH_BIN" | head -n 80
+
+      - name: Create exact rung protocol
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/protocols
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          elo = int('${{ matrix.elo }}')
+          seed = int('${{ matrix.seed }}')
+          protocol = {
+              'schema_version': 1,
+              'protocol_id': f'v15-calibration-stockfish{elo}-20260908',
+              'runner': 'fastchess',
+              'games': 100,
+              'time_control': '1+0.01',
+              'concurrency': 1,
+              'seed': seed,
+              'max_moves': 300,
+              'opening_format': 'epd',
+              'openings_required': True,
+              'opening_suite_id': 'm3-uho-lichess-100-v1',
+              'opening_sha256': os.environ['OPENING_SHA256'],
+              'paired_colour_reversal': True,
+              'ponder': False,
+              'tablebases': False,
+              'evaluation_adjudication': False,
+              'notes': (
+                  f'Fresh V15 external calibration: production {os.environ["PRODUCTION_BASE"]} '
+                  f'with certified Gestalt v85 vs Stockfish 19 UCI_LimitStrength=true, UCI_Elo={elo}, '
+                  'Threads=1, Hash=32. Development-protocol engine scale, not FIDE Elo.'
+              ),
+          }
+          Path(f'.qualification/protocols/sf{elo}.json').write_text(json.dumps(protocol, indent=2) + '\n')
+          PY
+
+      - name: Run paired calibration rung
+        shell: bash
+        run: |
+          set -euo pipefail
+          export CHESS_GESTALT_NETWORK="$PWD/.qualification/external/gestalt-b840.nnue"
+          python3 scripts/match_harness.py \
+            --protocol "$PWD/.qualification/protocols/sf${{ matrix.elo }}.json" \
+            --candidate "$PWD/.qualification/bin/v15" \
+            --candidate-name "Chess-V15@${PRODUCTION_BASE:0:12}" \
+            --candidate-option Hash=32 \
+            --reference "$STOCKFISH_BIN" \
+            --reference-name 'Stockfish-19-Elo${{ matrix.elo }}' \
+            --reference-option Threads=1 \
+            --reference-option Hash=32 \
+            --reference-option UCI_LimitStrength=true \
+            --reference-option UCI_Elo=${{ matrix.elo }} \
+            --fastchess "$FASTCHESS_BIN" \
+            --openings match/openings/m3-uho-lichess-100-v1.epd \
+            --output-dir "calibration-results-${{ matrix.elo }}"
+
+      - name: Upload retained calibration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v15-stockfish${{ matrix.elo }}-${{ github.sha }}
+          path: |
+            calibration-results-${{ matrix.elo }}/
+            .qualification/protocols/sf${{ matrix.elo }}.json
+          if-no-files-found: warn
+          retention-days: 30
