@@ -26,7 +26,9 @@ jobs:
       - name: Reconstruct benchmark corpus
         run: |
           set -euo pipefail
-          cat match/benchmarks/top-engine-recent-20260911/chunk_*.b64 | base64 -d | gzip -dc > /tmp/top-engines.pgn
+          # Decode each chunk independently. This works whether the stored files are slices of one
+          # base64 stream or independently padded base64 chunks, and avoids padding/CRC corruption.
+          (for f in match/benchmarks/top-engine-recent-20260911/chunk_*.b64; do base64 -d "$f"; done) | gzip -dc > /tmp/top-engines.pgn
           echo 'dbac26e0f2b451eb7bf80994ca48fdd6b1abbc9f133e528d3e968f007f7aa264  /tmp/top-engines.pgn' | sha256sum -c -
           grep -c '^\[Event ' /tmp/top-engines.pgn
 
@@ -59,7 +61,7 @@ jobs:
           p = Path('scripts/stockfish_lab.py')
           s = p.read_text()
           needle = '        root_moves = None if root_move is None else [root_move]\n        info = self.engine.analyse(\n'
-          repl = '        root_moves = None if root_move is None else [root_move]\n        # Every root probe is an independent comparison.  Clear the TT so the\n        # later candidate probe cannot inherit work from best/historical probes.\n        self.engine.configure({"Clear Hash": None})\n        info = self.engine.analyse(\n'
+          repl = '        root_moves = None if root_move is None else [root_move]\n        # Every root probe is an independent comparison. Clear the TT so the\n        # later candidate probe cannot inherit work from best/historical probes.\n        self.engine.configure({"Clear Hash": None})\n        info = self.engine.analyse(\n'
           assert s.count(needle) == 1
           s = s.replace(needle, repl, 1)
           p.write_text(s)
