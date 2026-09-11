@@ -1,0 +1,87 @@
+name: V18 safe root selector filter
+
+on:
+  push:
+    branches: [analysis/v18-root-quality-fastfilter-20260911]
+    paths: ['.github/workflows/v18-safe-root-selector-filter.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  filter:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: band8-margin16
+            band: 8
+            margin: 16
+          - variant: band12-margin16
+            band: 12
+            margin: 16
+          - variant: band16-margin20
+            band: 16
+            margin: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Reconstruct corpus
+        run: |
+          cat match/benchmarks/top-engine-recent-20260911/chunk_00.b64 match/benchmarks/top-engine-recent-20260911/chunk_01.b64 match/benchmarks/top-engine-recent-20260911/chunk_02.b64 match/benchmarks/top-engine-recent-20260911/chunk_03a.b64 match/benchmarks/top-engine-recent-20260911/chunk_03b.b64 match/benchmarks/top-engine-recent-20260911/chunk_03c.b64 match/benchmarks/top-engine-recent-20260911/chunk_03d.b64 match/benchmarks/top-engine-recent-20260911/chunk_04.b64 | base64 -d | gzip -dc > /tmp/recent.pgn
+          echo 'dbac26e0f2b451eb7bf80994ca48fdd6b1abbc9f133e528d3e968f007f7aa264  /tmp/recent.pgn' | sha256sum -c -
+      - name: Build candidate
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/engine /tmp/bench; mkdir -p /tmp/engine /tmp/bench
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          unzip -q /tmp/p150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+          curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/engine/v18_gm2001.bin
+          python scripts/apply_v18_see_capture_ordering.py /tmp/engine/experiments/numba_search.py
+          python scripts/apply_v18_root_value.py /tmp/engine/experiments/numba_search.py 4
+          python scripts/apply_v18_safe_root_selector.py /tmp/engine/experiments/numba_search.py '${{ matrix.band }}' '${{ matrix.margin }}'
+          python -m py_compile /tmp/engine/agent.py /tmp/engine/experiments/numba_search.py
+          (cd /tmp/engine && python -c 'import agent; assert agent._ENGINE_READY; print("SAFE_SELECTOR_READY")')
+      - name: Critical probe
+        env:
+          PYTHONPATH: /tmp/engine
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          python - <<'PY'
+          import os,time,numpy as np
+          import agent
+          fen='rn1r2k1/ppq2ppp/2b1pn2/6B1/1b1P4/1BNQ1N1P/PP3PP1/R4RK1 b - - 8 13'
+          agent._GAME_KEYS.clear(); agent._PENDING_AFTER_OUR_MOVE=None; agent._LAST_CALL_TIME_LEFT_MS=None; agent._LAST_GET_MOVE_ELAPSED_MS=None
+          agent._HASH_KEYS.fill(np.uint64(0)); agent._HASH_MOVES.fill(np.int32(-1)); agent._TT_TABLE.fill(np.uint64(0)); agent._QUIET_HISTORY.fill(np.int16(0))
+          t=time.perf_counter(); m=agent.get_move(fen,122968); dt=time.perf_counter()-t
+          print('SAFE_SELECTOR_CRITICAL',os.environ['VARIANT'],'move',m,'seconds',round(dt,3),flush=True)
+          PY
+      - name: Prepare cold Stockfish
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('scripts/stockfish_lab.py'); s=p.read_text()
+          old='''        root_moves = None if root_move is None else [root_move]\n        info = self.engine.analyse(\n'''
+          new='''        self.engine.configure({"Clear Hash": None})\n        root_moves = None if root_move is None else [root_move]\n        info = self.engine.analyse(\n'''
+          assert s.count(old)==1; p.write_text(s.replace(old,new,1))
+          PY
+          curl --fail --location --retry 5 -sS 'https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz' -o /tmp/sf.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  /tmp/sf.tar.gz' | sha256sum -c -
+          mkdir -p /tmp/sf && tar -xzf /tmp/sf.tar.gz -C /tmp/sf
+          SF="$(find /tmp/sf -type f -name 'stockfish*' -perm /111 | head -n1)"; cp "$SF" /tmp/stockfish19; chmod +x /tmp/stockfish19
+      - name: Emile benchmark
+        run: |
+          python scripts/v18_competitor_move_benchmark_v2.py --pgn /tmp/recent.pgn --engine-dir /tmp/engine --stockfish /tmp/stockfish19 --target 'Emile Andrieu' --positions 48 --nodes 200000 --threads 1 --hash-mb 64 --pairwise-margin-cp 8 --seed 20260911 --output-dir /tmp/bench
+          cat /tmp/bench/summary.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: safe-selector-${{ matrix.variant }}
+          path: /tmp/bench
+          retention-days: 2
