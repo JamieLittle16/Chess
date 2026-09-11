@@ -42,10 +42,11 @@ jobs:
           echo ENGINE_MEMBERS
           find /tmp/engine -maxdepth 2 -type f -printf '%P %s\n' | sort
 
-      - name: Enforce independent benchmark-state reset
+      - name: Enforce independent benchmark state
         run: |
           python - <<'PY'
           from pathlib import Path
+
           p = Path('scripts/v18_competitor_move_benchmark.py')
           s = p.read_text()
           needle = '    if hasattr(agent, "_CLOCK_FEEDBACK_SAMPLES"):\n        agent._CLOCK_FEEDBACK_SAMPLES = 0\n'
@@ -54,6 +55,15 @@ jobs:
           s = s.replace(needle, repl, 1)
           p.write_text(s)
           assert 'agent._BOOK_POST_SEARCH_BOOSTS = 0' in s
+
+          p = Path('scripts/stockfish_lab.py')
+          s = p.read_text()
+          needle = '        root_moves = None if root_move is None else [root_move]\n        info = self.engine.analyse(\n'
+          repl = '        root_moves = None if root_move is None else [root_move]\n        # Every root probe is an independent comparison.  Clear the TT so the\n        # later candidate probe cannot inherit work from best/historical probes.\n        self.engine.configure({"Clear Hash": None})\n        info = self.engine.analyse(\n'
+          assert s.count(needle) == 1
+          s = s.replace(needle, repl, 1)
+          p.write_text(s)
+          assert 'self.engine.configure({"Clear Hash": None})' in s
           PY
 
       - name: Fetch and verify Stockfish 19
