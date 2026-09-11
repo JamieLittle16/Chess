@@ -89,15 +89,15 @@ def _see_attacker_square(
                     sr += dr
         return -1
 
-    # King is last in least-valuable-attacker order.
-    for df, dr in ((-1, -1), (-1, 0), (-1, 1), (0, -1),
-                   (0, 1), (1, -1), (1, 0), (1, 1)):
-        sf = tf + df
-        sr = tr + dr
-        if 0 <= sf < 8 and 0 <= sr < 8:
-            sq = sr * 8 + sf
-            if not _see_removed(removed, sq) and int(board[sq]) == side * KING:
-                return sq
+    if piece_type == KING:
+        for df, dr in ((-1, -1), (-1, 0), (-1, 1), (0, -1),
+                       (0, 1), (1, -1), (1, 0), (1, 1)):
+            sf = tf + df
+            sr = tr + dr
+            if 0 <= sf < 8 and 0 <= sr < 8:
+                sq = sr * 8 + sf
+                if not _see_removed(removed, sq) and int(board[sq]) == side * KING:
+                    return sq
     return -1
 
 
@@ -110,12 +110,12 @@ def _see_any_attacker(board: np.ndarray, target: int, side: int, removed: np.uin
 
 
 @njit(cache=False)
-def _see_ge_zero(board: np.ndarray, move: int) -> bool:
-    """Allocation-free threshold SEE for ordinary captures, adapted to the array board.
+def _see_ge_zero_unfavourable(board: np.ndarray, move: int) -> bool:
+    """Zero-threshold swap-off SEE for an initially unfavourable ordinary capture.
 
-    This mirrors the null-window swap-off structure used by modern engines.  Promotions and
-    en-passant are deliberately accepted here; this first deployment is move ordering only.
-    Pins are treated conservatively as attackers, which can only move a capture later, never prune it.
+    Callers fast-path equal/favourable captures before entering this routine. Promotions and
+    en-passant are deliberately kept in the good-capture bucket in this first ordering-only use.
+    Pseudo-attackers are conservative: a pinned defender can move a capture later but never prune it.
     """
     if (move & FLAG_EP) or move_promotion(move) != 0:
         return True
@@ -127,19 +127,15 @@ def _see_ge_zero(board: np.ndarray, move: int) -> bool:
         return True
     attacker = abs(moving_signed)
     if attacker == KING:
-        return True  # legal king captures have already passed the attack test
+        return True
     victim = abs(captured_signed)
 
-    swap = int(PIECE_VALUE[victim])
-    if swap < 0:
-        return False
-    swap = int(PIECE_VALUE[attacker]) - swap
+    swap = int(PIECE_VALUE[attacker]) - int(PIECE_VALUE[victim])
     if swap <= 0:
         return True
 
     side = WHITE if moving_signed > 0 else -WHITE
     stm = side
-    # Captured target and the initial attacker's source are empty for x-ray purposes.
     removed = (np.uint64(1) << np.uint64(from_square)) | (np.uint64(1) << np.uint64(to_square))
     res = 1
 
@@ -176,7 +172,7 @@ def _move_order_score_meta(board: np.ndarray, move: int, preferred: int) -> int:
     s = s.replace(anchor, helper, 1)
 
     old = """        if target:\n            score += 7_000_000 + 16 * int(PIECE_VALUE[target]) - int(PIECE_VALUE[attacker])\n"""
-    new = """        if target:\n            # V18 FULL-SEE-ORDER: retain the accepted MVV/LVA ordering for good/equal\n            # captures, but place negative swap-off captures after ordinary quiets.  The\n            # move remains tactical and is still searched fully; this is ordering, not pruning.\n            if _see_ge_zero(board, move):\n                score += 7_000_000 + 16 * int(PIECE_VALUE[target]) - int(PIECE_VALUE[attacker])\n            else:\n                score += -1_000_000 + 16 * int(PIECE_VALUE[target]) - int(PIECE_VALUE[attacker])\n"""
+    new = """        if target:\n            # V18 FULL-SEE-ORDER: the overwhelmingly common equal/favourable captures\n            # bypass SEE entirely. Only an initially more-valuable attacker can possibly\n            # fail a zero-threshold exchange test, so only those enter the swap-off loop.\n            favourable = int(PIECE_VALUE[attacker]) <= int(PIECE_VALUE[target])\n            if favourable or _see_ge_zero_unfavourable(board, move):\n                score += 7_000_000 + 16 * int(PIECE_VALUE[target]) - int(PIECE_VALUE[attacker])\n            else:\n                score += -1_000_000 + 16 * int(PIECE_VALUE[target]) - int(PIECE_VALUE[attacker])\n"""
     if s.count(old) != 1:
         raise RuntimeError(f"capture score anchor count {s.count(old)}, expected 1")
     p.write_text(s.replace(old, new, 1))
