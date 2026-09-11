@@ -1,0 +1,101 @@
+name: V18 CAP1 sprint
+
+on:
+  push:
+    branches: [analysis/v18-root-quality-fastfilter-20260911]
+    paths: ['.github/workflows/v18-cap1-sprint.yml']
+  workflow_dispatch:
+
+permissions: {contents: read}
+
+jobs:
+  paired:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        idx: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Build exact SEE and CAP1
+        run: |
+          set -euo pipefail
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          for d in /tmp/base /tmp/cand; do
+            rm -rf "$d"; mkdir -p "$d"; unzip -q /tmp/p150.zip -d "$d"
+            sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' "$d/agent.py"
+            curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o "$d/v18_gm2001.bin"
+            python scripts/apply_v18_see_capture_ordering.py "$d/experiments/numba_search.py"
+          done
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/cand/experiments/numba_search.py'); s=p.read_text()
+          old='''    if depth >= 9 and move_index >= 12:\n        return 3\n    if depth >= 6 and move_index >= 8:\n        return 2\n    if depth >= 3 and move_index >= 4:\n        return 1\n'''
+          new='''    if depth >= 9 and move_index >= 12:\n        return 1\n    if depth >= 6 and move_index >= 8:\n        return 1\n    if depth >= 3 and move_index >= 4:\n        return 1\n'''
+          assert s.count(old)==1; p.write_text(s.replace(old,new,1))
+          PY
+          python -m py_compile /tmp/base/agent.py /tmp/cand/agent.py /tmp/base/experiments/numba_search.py /tmp/cand/experiments/numba_search.py
+      - name: Get indexed start
+        env: {IDX: '${{ matrix.idx }}'}
+        run: |
+          (for f in match/benchmarks/top-engine-recent-20260911/chunk_*.b64; do base64 -d "$f"; done) | gzip -dc > /tmp/recent.pgn
+          echo 'dbac26e0f2b451eb7bf80994ca48fdd6b1abbc9f133e528d3e968f007f7aa264  /tmp/recent.pgn' | sha256sum -c -
+          python - <<'PY'
+          import chess.pgn,os
+          seen=[]; keys=set()
+          with open('/tmp/recent.pgn',encoding='utf-8') as f:
+              while True:
+                  g=chess.pgn.read_game(f)
+                  if g is None: break
+                  x=g.board().fen()
+                  if x not in keys: keys.add(x); seen.append(x)
+          assert len(seen)==36
+          i=int(os.environ['IDX']); open('/tmp/start.txt','w').write(seen[i]+'\n')
+          PY
+      - name: Exact colour-swapped pair
+        env: {IDX: '${{ matrix.idx }}'}
+        run: |
+          cat >/tmp/worker.py <<'PY'
+          import contextlib,json,sys,numpy as np
+          with contextlib.redirect_stdout(sys.stderr): import agent
+          def reset():
+              agent._GAME_KEYS.clear(); agent._PENDING_AFTER_OUR_MOVE=None; agent._LAST_CALL_TIME_LEFT_MS=None; agent._LAST_GET_MOVE_ELAPSED_MS=None; agent._CLOCK_OVERHEAD_EMA_MS=40.; agent._CLOCK_FEEDBACK_SAMPLES=0
+              if hasattr(agent,'_BOOK_POST_SEARCH_BOOSTS'): agent._BOOK_POST_SEARCH_BOOSTS=0
+              agent._HASH_KEYS.fill(np.uint64(0)); agent._HASH_MOVES.fill(np.int32(-1)); agent._TT_TABLE.fill(np.uint64(0)); agent._QUIET_HISTORY.fill(np.int16(0))
+          for line in sys.stdin:
+              q=json.loads(line)
+              try:
+                  if q['op']=='reset': reset(); r={'ok':1}
+                  else:r={'move':agent.get_move(q['fen'],int(q['ms']))}
+              except Exception as e:r={'error':type(e).__name__+': '+str(e)}
+              print(json.dumps(r),flush=True)
+          PY
+          cat >/tmp/pair.py <<'PY'
+          import chess,json,os,subprocess,sys,time
+          class W:
+              def __init__(self,d): self.p=subprocess.Popen([sys.executable,'/tmp/worker.py'],cwd=d,stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env={**os.environ,'PYTHONPATH':d})
+              def q(self,x): self.p.stdin.write(json.dumps(x)+'\n'); self.p.stdin.flush(); r=json.loads(self.p.stdout.readline()); assert 'error' not in r,r; return r
+              def reset(self): self.q({'op':'reset'})
+              def close(self): self.p.terminate(); self.p.wait(timeout=5)
+          fen=open('/tmp/start.txt').read().strip(); B=W('/tmp/base'); C=W('/tmp/cand'); pts=[]; fails=[]
+          try:
+              for leg in range(2):
+                  B.reset(); C.reset(); b=chess.Board(fen); clocks={'base':30.,'cand':30.}; cw=(leg==0); fail=None
+                  for _ in range(300):
+                      if b.outcome(claim_draw=True): break
+                      side='cand' if b.turn==cw else 'base'; w=C if side=='cand' else B; t=time.perf_counter(); r=w.q({'op':'move','fen':b.fen(),'ms':max(1,round(clocks[side]*1000))}); clocks[side]-=time.perf_counter()-t
+                      if clocks[side]<0: fail=side+' flag'; break
+                      m=chess.Move.from_uci(r['move'])
+                      if m not in b.legal_moves: fail=side+' illegal'; break
+                      b.push(m); clocks[side]+=.5
+                  out=b.outcome(claim_draw=True)
+                  p=(0. if fail and fail.startswith('cand') else 1.) if fail else (.5 if out is None or out.winner is None else (1. if out.winner==cw else 0.)); pts.append(p)
+                  if fail:fails.append(fail)
+              print('SPRINT_FINAL idx',os.environ['IDX'],'points',sum(pts),'games',len(pts),'FAILS',fails,flush=True)
+          finally:B.close();C.close()
+          PY
+          python /tmp/pair.py
