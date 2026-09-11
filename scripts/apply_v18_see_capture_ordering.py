@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Add static exchange evaluation to capture ordering only; never prune a legal move."""
+"""Stage captures as good/bad using ordering-only SEE; never prune a legal move."""
 from __future__ import annotations
 
 import argparse
@@ -91,7 +91,7 @@ def _see_least_attacker(board: np.ndarray, target: int, side: int) -> tuple[int,
 
 @njit(cache=False)
 def _see_capture_ordering(board: np.ndarray, move: int) -> int:
-    """Swap-off estimate used only to rank captures. It never removes a move."""
+    """Swap-off estimate used only to classify captures. It never removes a move."""
     from_square = move_from(move)
     to_square = move_to(move)
     signed_attacker = int(board[from_square])
@@ -163,12 +163,15 @@ def _see_capture_ordering(board: np.ndarray, move: int) -> int:
 '''
     rep(anchor, helpers + anchor)
 
+    # The production scorer gives captures a 7M band. Preserve that for
+    # non-losing captures, but send SEE-negative captures below ordinary quiets.
+    # Preferred/TT moves still retain their independent preferred bonus.
     old = "    if target:\n        score += 7_000_000 + 16 * int(PIECE_VALUE[target]) - int(PIECE_VALUE[attacker])\n"
-    new = "    if target:\n        see = int(PIECE_VALUE[target]) - int(PIECE_VALUE[attacker])\n        if int(PIECE_VALUE[target]) <= int(PIECE_VALUE[attacker]):\n            see = _see_capture_ordering(board, move)\n        see = max(-1_500, min(1_500, see))\n        score += 7_000_000 + 16 * int(PIECE_VALUE[target]) - int(PIECE_VALUE[attacker]) + 32 * see\n"
+    new = "    if target:\n        tactical = 16 * int(PIECE_VALUE[target]) - int(PIECE_VALUE[attacker])\n        see = int(PIECE_VALUE[target]) - int(PIECE_VALUE[attacker])\n        if int(PIECE_VALUE[target]) <= int(PIECE_VALUE[attacker]):\n            see = _see_capture_ordering(board, move)\n        if see >= 0:\n            score += 7_000_000 + tactical\n        else:\n            score += -2_000_000 + tactical\n"
     rep(old, new)
 
     old = "        if target:\n            score += 7_000_000 + 16 * int(PIECE_VALUE[target]) - int(PIECE_VALUE[attacker])\n"
-    new = "        if target:\n            see = int(PIECE_VALUE[target]) - int(PIECE_VALUE[attacker])\n            if int(PIECE_VALUE[target]) <= int(PIECE_VALUE[attacker]):\n                see = _see_capture_ordering(board, move)\n            see = max(-1_500, min(1_500, see))\n            score += 7_000_000 + 16 * int(PIECE_VALUE[target]) - int(PIECE_VALUE[attacker]) + 32 * see\n"
+    new = "        if target:\n            tactical = 16 * int(PIECE_VALUE[target]) - int(PIECE_VALUE[attacker])\n            see = int(PIECE_VALUE[target]) - int(PIECE_VALUE[attacker])\n            if int(PIECE_VALUE[target]) <= int(PIECE_VALUE[attacker]):\n                see = _see_capture_ordering(board, move)\n            if see >= 0:\n                score += 7_000_000 + tactical\n            else:\n                score += -2_000_000 + tactical\n"
     rep(old, new)
 
     p.write_text(s)
