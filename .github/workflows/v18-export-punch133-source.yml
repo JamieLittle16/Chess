@@ -26,11 +26,10 @@ jobs:
           sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
           python -m py_compile /tmp/engine/agent.py /tmp/engine/experiments/*.py
           sha256sum /tmp/engine/agent.py /tmp/engine/experiments/numba_search.py
-          grep -nEi 'aspiration|lmr|late move|futility|razor|null|qsearch|quies|soft_fraction|stable|history|singular|extension|see|probcut|delta|reverse futility|russian|root' /tmp/engine/experiments/numba_search.py | head -n 400 || true
-          grep -nEi 'soft_fraction|deadline|stable|book|root|time|search' /tmp/engine/agent.py | head -n 300 || true
-          echo '--- ROOT LOOP CONTEXT ---'
-          grep -nE '^def .*search|^def .*root|^def choose|^def find' /tmp/engine/experiments/numba_search.py || true
-          nl -ba /tmp/engine/experiments/numba_search.py | sed -n '1460,1710p' || true
+          echo '--- ROOT FUNCTION ---'
+          nl -ba /tmp/engine/experiments/numba_search.py | sed -n '1960,2090p'
+          echo '--- TIMED ITERATIVE LOOP ---'
+          nl -ba /tmp/engine/experiments/numba_search.py | sed -n '2330,2490p'
       - name: Export exact source
         uses: actions/upload-artifact@v4
         with:
@@ -42,4 +41,4 @@ jobs:
             /tmp/engine/experiments/v14_student_single_runtime.py
           retention-days: 2
 
-# refreshed 2026-09-11 for root-score recycling audit
+# refreshed 2026-09-11 for PVS root audit
