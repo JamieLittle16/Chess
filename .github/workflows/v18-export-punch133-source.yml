@@ -28,6 +28,9 @@ jobs:
           sha256sum /tmp/engine/agent.py /tmp/engine/experiments/numba_search.py
           grep -nEi 'aspiration|lmr|late move|futility|razor|null|qsearch|quies|soft_fraction|stable|history|singular|extension|see|probcut|delta|reverse futility|russian|root' /tmp/engine/experiments/numba_search.py | head -n 400 || true
           grep -nEi 'soft_fraction|deadline|stable|book|root|time|search' /tmp/engine/agent.py | head -n 300 || true
+          echo '--- ROOT LOOP CONTEXT ---'
+          grep -nE '^def .*search|^def .*root|^def choose|^def find' /tmp/engine/experiments/numba_search.py || true
+          nl -ba /tmp/engine/experiments/numba_search.py | sed -n '1460,1710p' || true
       - name: Export exact source
         uses: actions/upload-artifact@v4
         with:
@@ -38,3 +41,5 @@ jobs:
             /tmp/engine/experiments/numba_core.py
             /tmp/engine/experiments/v14_student_single_runtime.py
           retention-days: 2
+
+# refreshed 2026-09-11 for root-score recycling audit
