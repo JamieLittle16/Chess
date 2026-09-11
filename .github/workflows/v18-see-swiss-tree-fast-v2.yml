@@ -1,0 +1,218 @@
+name: V18 SEE fast certified Swiss opening tree v2
+
+on:
+  push:
+    branches: [analysis/v18-see-swiss-tree-fast-v2-20260911]
+
+permissions:
+  contents: read
+
+jobs:
+  build-tree:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'chess==1.11.2'
+      - name: Reconstruct 36 Swiss starts
+        run: |
+          set -euo pipefail
+          cat match/benchmarks/top-engine-recent-20260911/chunk_00.b64 match/benchmarks/top-engine-recent-20260911/chunk_01.b64 match/benchmarks/top-engine-recent-20260911/chunk_02.b64 match/benchmarks/top-engine-recent-20260911/chunk_03a.b64 match/benchmarks/top-engine-recent-20260911/chunk_03b.b64 match/benchmarks/top-engine-recent-20260911/chunk_03c.b64 match/benchmarks/top-engine-recent-20260911/chunk_03d.b64 match/benchmarks/top-engine-recent-20260911/chunk_04.b64 | base64 -d | gzip -dc > /tmp/recent.pgn
+          echo 'dbac26e0f2b451eb7bf80994ca48fdd6b1abbc9f133e528d3e968f007f7aa264  /tmp/recent.pgn' | sha256sum -c -
+          python - <<'PY'
+          import chess.pgn
+          seen=[]; keys=set()
+          with open('/tmp/recent.pgn',encoding='utf-8') as f:
+              while True:
+                  g=chess.pgn.read_game(f)
+                  if g is None: break
+                  fen=g.board().fen()
+                  if fen not in keys: keys.add(fen); seen.append(fen)
+          assert len(seen)==36,len(seen)
+          open('/tmp/starts.epd','w').write('\n'.join(seen)+'\n')
+          PY
+      - name: Fetch Stockfish 19
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 3 -o /tmp/sf19.tgz https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  /tmp/sf19.tgz' | sha256sum -c -
+          mkdir /tmp/sf19; tar -xzf /tmp/sf19.tgz -C /tmp/sf19
+          SF=$(find /tmp/sf19 -type f -name 'stockfish*' | head -n1); chmod +x "$SF"; echo "STOCKFISH=$SF" >> "$GITHUB_ENV"
+      - name: Build stable branch-aware shard
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          cat >/tmp/build_tree.py <<'PY'
+          import json,os,chess,chess.engine
+          SHALLOW=250_000; DEEP=1_200_000; OPP=150_000; BRANCH=2; OUR_MOVES=2; MAX_PLY=20
+          shard=int(os.environ['SHARD']); starts=[x.strip() for x in open('/tmp/starts.epd') if x.strip()][shard::6]
+          eng=chess.engine.SimpleEngine.popen_uci(os.environ['STOCKFISH']); eng.configure({'Threads':1,'Hash':64})
+          tree={};audit=[];seen=set()
+          def key(b):return ' '.join(b.fen().split()[:4])
+          def best_at(b,n,multipv=1):
+              eng.configure({'Clear Hash':None}); x=eng.analyse(b,chess.engine.Limit(nodes=n),multipv=multipv)
+              xs=x if isinstance(x,list) else [x]
+              moves=[i['pv'][0] for i in xs if i.get('pv')]
+              if not moves: raise RuntimeError('Stockfish returned no PV')
+              return moves[0] if multipv==1 else moves
+          def certify(b):
+              a=best_at(b,SHALLOW); ds=best_at(b,DEEP,2); d=ds[0]; ok=(a==d)
+              audit.append({'key':key(b),'ply':b.ply(),'shallow':a.uci(),'deep':d.uci(),'stable':ok})
+              return d if ok else None
+          def replies(b):
+              out=[]
+              for m in best_at(b,OPP,BRANCH):
+                  if m not in out:out.append(m)
+              return out[:BRANCH]
+          def our_turn(b,remaining):
+              if remaining<=0 or b.is_game_over() or b.ply()>MAX_PLY:return
+              sig=(key(b),remaining)
+              if sig in seen:return
+              seen.add(sig); k=key(b); m=chess.Move.from_uci(tree[k]) if k in tree else certify(b)
+              if m is None:return
+              tree[k]=m.uci()
+              if remaining==1:return
+              c=b.copy(stack=False);c.push(m)
+              if c.is_game_over() or c.ply()>=MAX_PLY:return
+              for om in replies(c):
+                  d=c.copy(stack=False);d.push(om);our_turn(d,remaining-1)
+          def opponent_first(b):
+              if b.is_game_over() or b.ply()>=MAX_PLY:return
+              for om in replies(b):
+                  c=b.copy(stack=False);c.push(om);our_turn(c,OUR_MOVES)
+          try:
+              for i,fen in enumerate(starts):
+                  b=chess.Board(fen);before=len(tree);our_turn(b,OUR_MOVES);opponent_first(b)
+                  print('START',shard+1+6*i,'new',len(tree)-before,'total',len(tree),flush=True)
+          finally:eng.quit()
+          out={'schema':2,'shard':shard,'shallow_nodes':SHALLOW,'deep_nodes':DEEP,'opponent_nodes':OPP,'branch':BRANCH,'our_moves':OUR_MOVES,'max_ply':MAX_PLY,'entries':dict(sorted(tree.items())),'audit':audit}
+          p=f'/tmp/tree-{shard}.json';json.dump(out,open(p,'w'),sort_keys=True,separators=(',',':'))
+          print('TREE_SHARD',shard,'starts',len(starts),'entries',len(tree),'attempts',len(audit),'stable',sum(x['stable'] for x in audit))
+          PY
+          python /tmp/build_tree.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: swiss-tree-v2-${{ matrix.shard }}
+          path: /tmp/tree-${{ matrix.shard }}.json
+          retention-days: 7
+
+  qualify:
+    needs: build-tree
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: swiss-tree-v2-*
+          path: /tmp/trees
+          merge-multiple: true
+      - name: Merge tree and build exact SEE pair
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import glob,json
+          merged={};stable=attempts=0
+          for p in sorted(glob.glob('/tmp/trees/tree-*.json')):
+              d=json.load(open(p));stable+=sum(x['stable'] for x in d['audit']);attempts+=len(d['audit'])
+              for k,v in d['entries'].items():
+                  if k in merged: assert merged[k]==v,(k,merged[k],v)
+                  merged[k]=v
+          json.dump({'entries':merged},open('/tmp/tree.json','w'),sort_keys=True,separators=(',',':'))
+          print('MERGED_TREE entries',len(merged),'stable',stable,'attempts',attempts)
+          assert len(merged)>40
+          PY
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          for d in /tmp/base /tmp/cand; do
+            rm -rf "$d"; mkdir "$d"; unzip -q /tmp/p150.zip -d "$d"
+            sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' "$d/agent.py"
+            curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o "$d/v18_gm2001.bin"
+            python scripts/apply_v18_see_capture_ordering.py "$d/experiments/numba_search.py"
+          done
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          entries=json.load(open('/tmp/tree.json'))['entries']; p=Path('/tmp/cand/agent.py'); s=p.read_text()
+          marker='\ndef _internal_move_from_chess(board: chess.Board, move: chess.Move) -> int:\n'; literal=repr(entries)
+          helper=f'''\n# Stockfish-19 certified continuation tree for the public Swiss opening distribution.\n_SWISS_CERTIFIED_TREE: Final = {literal}\n\ndef _swiss_certified_book_move(board: chess.Board) -> chess.Move | None:\n    if board.ply() > 20: return None\n    uci = _SWISS_CERTIFIED_TREE.get(" ".join(board.fen().split()[:4]))\n    if uci is None: return None\n    move = chess.Move.from_uci(uci)\n    return move if move in board.legal_moves else None\n\n'''
+          assert s.count(marker)==1;s=s.replace(marker,helper+marker,1)
+          old='    direct_book_move = _high_confidence_book_move(board)\n    if direct_book_move is not None:\n'
+          new='    direct_book_move = _high_confidence_book_move(board)\n    if direct_book_move is None:\n        direct_book_move = _swiss_certified_book_move(board)\n    if direct_book_move is not None:\n'
+          assert s.count(old)==1;s=s.replace(old,new,1);p.write_text(s);print('PATCHED_TREE_ENTRIES',len(entries))
+          PY
+          python -m py_compile /tmp/base/agent.py /tmp/base/experiments/numba_search.py /tmp/cand/agent.py /tmp/cand/experiments/numba_search.py
+      - name: Reconstruct 36 starts
+        run: |
+          cat match/benchmarks/top-engine-recent-20260911/chunk_00.b64 match/benchmarks/top-engine-recent-20260911/chunk_01.b64 match/benchmarks/top-engine-recent-20260911/chunk_02.b64 match/benchmarks/top-engine-recent-20260911/chunk_03a.b64 match/benchmarks/top-engine-recent-20260911/chunk_03b.b64 match/benchmarks/top-engine-recent-20260911/chunk_03c.b64 match/benchmarks/top-engine-recent-20260911/chunk_03d.b64 match/benchmarks/top-engine-recent-20260911/chunk_04.b64 | base64 -d | gzip -dc > /tmp/recent.pgn
+          echo 'dbac26e0f2b451eb7bf80994ca48fdd6b1abbc9f133e528d3e968f007f7aa264  /tmp/recent.pgn' | sha256sum -c -
+          python - <<'PY'
+          import chess.pgn
+          seen=[];keys=set()
+          with open('/tmp/recent.pgn',encoding='utf-8') as f:
+              while True:
+                  g=chess.pgn.read_game(f)
+                  if g is None:break
+                  x=g.board().fen()
+                  if x not in keys:keys.add(x);seen.append(x)
+          assert len(seen)==36;open('/tmp/starts.epd','w').write('\n'.join(seen)+'\n')
+          PY
+      - name: Paired exact 30+0.5
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          cat >/tmp/worker.py <<'PY'
+          import contextlib,json,sys,numpy as np
+          with contextlib.redirect_stdout(sys.stderr):import agent
+          def reset():
+              agent._GAME_KEYS.clear();agent._PENDING_AFTER_OUR_MOVE=None;agent._LAST_CALL_TIME_LEFT_MS=None;agent._LAST_GET_MOVE_ELAPSED_MS=None;agent._CLOCK_OVERHEAD_EMA_MS=40.0;agent._CLOCK_FEEDBACK_SAMPLES=0
+              if hasattr(agent,'_BOOK_POST_SEARCH_BOOSTS'):agent._BOOK_POST_SEARCH_BOOSTS=0
+              agent._HASH_KEYS.fill(np.uint64(0));agent._HASH_MOVES.fill(np.int32(-1));agent._TT_TABLE.fill(np.uint64(0));agent._QUIET_HISTORY.fill(np.int16(0))
+          for line in sys.stdin:
+              try:
+                  q=json.loads(line)
+                  if q['op']=='reset':reset();r={'ok':1}
+                  else:r={'move':agent.get_move(q['fen'],int(q['ms']))}
+              except Exception as e:r={'error':type(e).__name__+': '+str(e)}
+              print(json.dumps(r),flush=True)
+          PY
+          cat >/tmp/match.py <<'PY'
+          import chess,json,math,os,subprocess,sys,time
+          class W:
+              def __init__(self,d):self.p=subprocess.Popen([sys.executable,'/tmp/worker.py'],cwd=d,stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env={**os.environ,'PYTHONPATH':d})
+              def ask(self,q):self.p.stdin.write(json.dumps(q)+'\n');self.p.stdin.flush();r=json.loads(self.p.stdout.readline());assert 'error' not in r,r;return r
+              def reset(self):self.ask({'op':'reset'})
+              def close(self):self.p.terminate();self.p.wait(timeout=5)
+          allf=[x.strip() for x in open('/tmp/starts.epd') if x.strip()];sh=int(os.environ['SHARD']);starts=allf[sh::4]
+          base=W('/tmp/base');cand=W('/tmp/cand');pts=[];fails=[];BASE=30.;INC=.5
+          try:
+              for j,fen in enumerate(starts):
+                  gi=sh+4*j
+                  for leg in range(2):
+                      base.reset();cand.reset();b=chess.Board(fen);cl={'base':BASE,'cand':BASE};cw=(leg==0);failure=None
+                      for _ in range(300):
+                          if b.outcome(claim_draw=True):break
+                          side='cand' if b.turn==cw else 'base';w=cand if side=='cand' else base;st=time.perf_counter();rr=w.ask({'op':'move','fen':b.fen(),'ms':max(1,round(cl[side]*1000))});cl[side]-=time.perf_counter()-st
+                          if cl[side]<0:failure=side+' flag';break
+                          m=chess.Move.from_uci(rr['move'])
+                          if m not in b.legal_moves:failure=side+' illegal';break
+                          b.push(m);cl[side]+=INC
+                      out=b.outcome(claim_draw=True);cp=(0. if failure and failure.startswith('cand') else 1.) if failure else (.5 if out is None or out.winner is None else (1. if out.winner==cw else 0.));pts.append(cp)
+                      if failure:fails.append((gi+1,leg,failure))
+                      print('GAME',gi+1,'leg',leg,'point',cp,'TOTAL',sum(pts),'clocks',cl,'failure',failure,flush=True)
+          finally:base.close();cand.close()
+          p=sum(pts)/len(pts);q=max(1e-6,min(1-1e-6,p));print('FINAL shard',sh,'points',sum(pts),'games',len(pts),'score',p,'REL_ELO',400*math.log10(q/(1-q)),'FAILS',fails)
+          PY
+          python /tmp/match.py
