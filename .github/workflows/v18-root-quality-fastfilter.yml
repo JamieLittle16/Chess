@@ -1,0 +1,116 @@
+name: V18 root-quality fast filter
+
+on:
+  push:
+    branches: [analysis/v18-root-quality-fastfilter-20260911]
+    paths: ['.github/workflows/v18-root-quality-fastfilter.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [asp40, early125, asp40early125, asp40root4]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+
+      - name: Reconstruct validated corpus
+        run: |
+          cat match/benchmarks/top-engine-recent-20260911/chunk_00.b64 match/benchmarks/top-engine-recent-20260911/chunk_01.b64 match/benchmarks/top-engine-recent-20260911/chunk_02.b64 match/benchmarks/top-engine-recent-20260911/chunk_03a.b64 match/benchmarks/top-engine-recent-20260911/chunk_03b.b64 match/benchmarks/top-engine-recent-20260911/chunk_03c.b64 match/benchmarks/top-engine-recent-20260911/chunk_03d.b64 match/benchmarks/top-engine-recent-20260911/chunk_04.b64 | base64 -d | gzip -dc > /tmp/recent.pgn
+          echo 'dbac26e0f2b451eb7bf80994ca48fdd6b1abbc9f133e528d3e968f007f7aa264  /tmp/recent.pgn' | sha256sum -c -
+
+      - name: Build candidate
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/engine /tmp/bench
+          mkdir -p /tmp/engine /tmp/bench
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          unzip -q /tmp/p150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+          curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/engine/v18_gm2001.bin
+          python scripts/apply_v18_see_capture_ordering.py /tmp/engine/experiments/numba_search.py
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          variant=os.environ['VARIANT']
+          sp=Path('/tmp/engine/experiments/numba_search.py')
+          s=sp.read_text()
+          if 'asp40' in variant:
+              old='''    depth: int,\n    preferred: int,\n    nodes: np.ndarray,\n'''
+              new='''    depth: int,\n    preferred: int,\n    root_alpha: int,\n    root_beta: int,\n    nodes: np.ndarray,\n'''
+              assert s.count(old)==1; s=s.replace(old,new,1)
+              old='''    best_move = int(moves[0])\n    best_score = -INFINITY\n    alpha = -INFINITY\n'''
+              new='''    best_move = int(moves[0])\n    best_score = -INFINITY\n    alpha = root_alpha\n    beta = root_beta\n'''
+              assert s.count(old)==1; s=s.replace(old,new,1)
+              old='''                board, -side, child_castling, child_ep, child_halfmove, child_depth,\n                -INFINITY, -alpha, np.int64(1), nodes, max_nodes, hard_deadline_ticks,\n'''
+              new='''                board, -side, child_castling, child_ep, child_halfmove, child_depth,\n                -beta, -alpha, np.int64(1), nodes, max_nodes, hard_deadline_ticks,\n'''
+              assert s.count(old)==1; s=s.replace(old,new,1)
+              old='''                    board, -side, child_castling, child_ep, child_halfmove, child_depth,\n                    -INFINITY, -alpha, np.int64(1), nodes, max_nodes, hard_deadline_ticks,\n'''
+              new='''                    board, -side, child_castling, child_ep, child_halfmove, child_depth,\n                    -beta, -alpha, np.int64(1), nodes, max_nodes, hard_deadline_ticks,\n'''
+              assert s.count(old)==1; s=s.replace(old,new,1)
+              old='''        if score > alpha:\n            alpha = score\n    return best_move, best_score, False\n'''
+              new='''        if score > alpha:\n            alpha = score\n        if alpha >= beta:\n            break\n    return best_move, best_score, False\n'''
+              assert s.count(old)==1; s=s.replace(old,new,1)
+              old='''            depth,\n            np.int64(best_move),\n            nodes,\n'''
+              new='''            depth,\n            np.int64(best_move),\n            np.int64(-INFINITY),\n            np.int64(INFINITY),\n            nodes,\n'''
+              assert s.count(old)==1; s=s.replace(old,new,1)
+              old='''            board, side, castling, ep_square, halfmove_clock, depth, np.int64(best_move), nodes, hard_nodes,\n            0,\n'''
+              new='''            board, side, castling, ep_square, halfmove_clock, depth, np.int64(best_move),\n            np.int64(-INFINITY), np.int64(INFINITY), nodes, hard_nodes,\n            0,\n'''
+              assert s.count(old)==1; s=s.replace(old,new,1)
+              old='''        move, score, aborted = _root(\n            board, side, castling, ep_square, halfmove_clock, depth, np.int64(root_preferred), nodes, max_nodes,\n            hard_deadline,\n            pseudo_stack, move_stack, score_stack, eval_stack, history_keys, history_count, path_keys,\n            killers, quiet_history, move_context_stack, hash_keys, hash_moves, history_contexts, student_edges,\n            tt_table,\n        )\n        if aborted:\n            break\n        now_ticks = int(_CPU_CLOCK())\n'''
+              new='''        aspiration_alpha = -INFINITY\n        aspiration_beta = INFINITY\n        if depth >= 5 and completed_depth > 0 and abs(best_score) < MATE_THRESHOLD:\n            aspiration_alpha = max(-INFINITY, best_score - 40)\n            aspiration_beta = min(INFINITY, best_score + 40)\n        move, score, aborted = _root(\n            board, side, castling, ep_square, halfmove_clock, depth, np.int64(root_preferred),\n            np.int64(aspiration_alpha), np.int64(aspiration_beta), nodes, max_nodes,\n            hard_deadline,\n            pseudo_stack, move_stack, score_stack, eval_stack, history_keys, history_count, path_keys,\n            killers, quiet_history, move_context_stack, hash_keys, hash_moves, history_contexts, student_edges,\n            tt_table,\n        )\n        if aborted:\n            break\n        if score <= aspiration_alpha or score >= aspiration_beta:\n            move, score, aborted = _root(\n                board, side, castling, ep_square, halfmove_clock, depth, np.int64(move),\n                np.int64(-INFINITY), np.int64(INFINITY), nodes, max_nodes, hard_deadline,\n                pseudo_stack, move_stack, score_stack, eval_stack, history_keys, history_count, path_keys,\n                killers, quiet_history, move_context_stack, hash_keys, hash_moves, history_contexts, student_edges,\n                tt_table,\n            )\n            if aborted:\n                break\n        now_ticks = int(_CPU_CLOCK())\n'''
+              assert s.count(old)==1; s=s.replace(old,new,1)
+          if 'root4' in variant:
+              needle='''    _order_moves_with_killers(\n        board, moves, count, preferred, score_stack[0], -1, -1, side, -1, quiet_history\n    )\n\n    _pick_next_scored_move(moves, score_stack[0], 0, count)\n'''
+              block='''    root_static = _evaluate_state(side, eval_stack[0])\n    for policy_index in range(count):\n        packed_policy = int(score_stack[0, policy_index])\n        if (packed_policy & 2) == 0 and int(moves[policy_index]) != preferred:\n            policy_move = int(moves[policy_index])\n            _advance_eval_state_into(board, side, policy_move, eval_stack[0], eval_stack[1])\n            child_static = -_evaluate_state(-side, eval_stack[1])\n            policy_delta = child_static - root_static\n            if policy_delta > 300: policy_delta = 300\n            elif policy_delta < -300: policy_delta = -300\n            score_stack[0, policy_index] = (((packed_policy >> 2) + policy_delta * 4) * 4 + (packed_policy & 3))\n\n'''
+              repl='''    _order_moves_with_killers(\n        board, moves, count, preferred, score_stack[0], -1, -1, side, -1, quiet_history\n    )\n''' + block + '''    _pick_next_scored_move(moves, score_stack[0], 0, count)\n'''
+              assert s.count(needle)==1; s=s.replace(needle,repl,1)
+          sp.write_text(s)
+          if 'early125' in variant:
+              ap=Path('/tmp/engine/agent.py'); a=ap.read_text()
+              old='''    target = (base + surplus_spend) * _position_time_factor(board, legal_moves)\n\n    usable = max(1.0, remaining - reserve)\n'''
+              new='''    target = (base + surplus_spend) * _position_time_factor(board, legal_moves)\n    if remaining >= 60_000.0 and board.fullmove_number <= 16 and len(legal_moves) >= 18:\n        target *= 1.25\n\n    usable = max(1.0, remaining - reserve)\n'''
+              assert a.count(old)==1; ap.write_text(a.replace(old,new,1))
+          PY
+          python -m py_compile /tmp/engine/agent.py /tmp/engine/experiments/numba_search.py scripts/v18_competitor_move_benchmark_v2.py scripts/stockfish_lab.py
+          (cd /tmp/engine && python -c 'import agent; assert agent._ENGINE_READY; print("FILTER_READY")')
+
+      - name: Make Stockfish cold and independent
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('scripts/stockfish_lab.py'); s=p.read_text()
+          old='''        root_moves = None if root_move is None else [root_move]\n        info = self.engine.analyse(\n'''
+          new='''        self.engine.configure({"Clear Hash": None})\n        root_moves = None if root_move is None else [root_move]\n        info = self.engine.analyse(\n'''
+          assert s.count(old)==1; p.write_text(s.replace(old,new,1))
+          PY
+
+      - name: Fetch Stockfish 19
+        run: |
+          curl --fail --location --retry 5 -sS 'https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz' -o /tmp/sf.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  /tmp/sf.tar.gz' | sha256sum -c -
+          mkdir -p /tmp/sf && tar -xzf /tmp/sf.tar.gz -C /tmp/sf
+          SF="$(find /tmp/sf -type f -name 'stockfish*' -perm /111 | head -n1)"; cp "$SF" /tmp/stockfish19; chmod +x /tmp/stockfish19
+
+      - name: Score against Emile
+        run: |
+          python scripts/v18_competitor_move_benchmark_v2.py --pgn /tmp/recent.pgn --engine-dir /tmp/engine --stockfish /tmp/stockfish19 --target 'Emile Andrieu' --positions 48 --nodes 200000 --threads 1 --hash-mb 64 --pairwise-margin-cp 8 --seed 20260911 --output-dir /tmp/bench
+          cat /tmp/bench/summary.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: root-quality-${{ matrix.variant }}
+          path: /tmp/bench
+          retention-days: 3
