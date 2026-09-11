@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "protocol_id": "m6-stockfish-calibration-v1",
+  "runner": "fastchess",
+  "games": 100,
+  "time_control": "1+0.01",
+  "concurrency": 1,
+  "seed": 20261016,
+  "max_moves": 300,
+  "opening_format": "epd",
+  "openings_required": true,
+  "opening_suite_id": "m6-uho-lichess-5000-v1",
+  "opening_sha256": "5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e",
+  "paired_colour_reversal": true,
+  "ponder": false,
+  "tablebases": false,
+  "evaluation_adjudication": false,
+  "notes": "M6 absolute protocol-Elo calibration of the production mature-gestalt engine against Stockfish 19 UCI_LimitStrength rungs. 100 paired-colour games per rung on independently selected roots from the frozen 5000-position M6 UHO suite. Threads=1 and Hash=32 are supplied explicitly by the workflow. This is controlled protocol Elo, not FIDE Elo."
+}
