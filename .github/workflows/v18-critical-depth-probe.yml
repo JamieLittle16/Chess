@@ -1,0 +1,49 @@
+name: V18 critical depth probe
+
+on:
+  push:
+    branches: [analysis/v18-root-quality-fastfilter-20260911]
+    paths: ['.github/workflows/v18-critical-depth-probe.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        factor: ['1.00','1.25','1.50','2.00']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Build and probe
+        env:
+          FACTOR: ${{ matrix.factor }}
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/engine; mkdir /tmp/engine
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          unzip -q /tmp/p150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+          curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/engine/v18_gm2001.bin
+          python scripts/apply_v18_see_capture_ordering.py /tmp/engine/experiments/numba_search.py
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          f=float(os.environ['FACTOR']); p=Path('/tmp/engine/agent.py'); s=p.read_text()
+          old='''    allocation = _move_budget_ms(board, time_left_ms, legal_moves)\n'''
+          new=f'''    allocation = min(_MAX_TARGET_MS, _move_budget_ms(board, time_left_ms, legal_moves) * {f})\n'''
+          assert s.count(old)==1; p.write_text(s.replace(old,new,1))
+          PY
+          PYTHONPATH=/tmp/engine python - <<'PY'
+          import os,chess,numpy as np,agent
+          fen='rn1r2k1/ppq2ppp/2b1pn2/6B1/1b1P4/1BNQ1N1P/PP3PP1/R4RK1 b - - 8 13'
+          b=chess.Board(fen); agent._HASH_KEYS.fill(np.uint64(0)); agent._HASH_MOVES.fill(np.int32(-1)); agent._TT_TABLE.fill(np.uint64(0)); agent._QUIET_HISTORY.fill(np.int16(0))
+          r=agent.search_position(b,122968,np.empty(0,dtype=np.uint64)); print('DEPTH_PROBE factor',os.environ['FACTOR'],'move',r.move.uci(),'score',r.score,'depth',r.depth,'nodes',r.nodes,'elapsed_ms',round(r.elapsed_ms,1),flush=True)
+          PY
