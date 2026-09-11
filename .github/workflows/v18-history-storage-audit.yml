@@ -1,0 +1,29 @@
+name: V18 history storage audit
+on:
+  push:
+    branches: [analysis/v18-see-staging-scratch-20260911]
+    paths: ['.github/workflows/v18-history-storage-audit.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect agent persistent history allocation
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/engine; mkdir /tmp/engine
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          unzip -q /tmp/p150.zip -d /tmp/engine
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/engine/agent.py')
+          lines=p.read_text().splitlines()
+          for i,x in enumerate(lines):
+              if '_QUIET_HISTORY' in x or 'QUIET_HISTORY_STORAGE_SIZE' in x:
+                  for j in range(max(0,i-8),min(len(lines),i+12)):
+                      print(f'{j+1:05d}: {lines[j]}')
+                  print('---')
+          PY
