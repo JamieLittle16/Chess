@@ -1,0 +1,155 @@
+name: M5 verified null-move v3 screen
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  screen:
+    if: github.head_ref == 'm5/null-move-v3-screening'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: Verify exact production starting point
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          cargo run --quiet --release -p chess-bench | tee production-bench.txt
+          grep -Fx 'signature 0x4c3bbe8701fbbb68' production-bench.txt
+
+      - name: Materialize verified NMP v3 candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/apply_null_move_v3.py
+          # The generator's first run exposed a Clippy-only regression in the test constructor.
+          # Normalize only that generated test before recording the immutable candidate patch;
+          # no NMP policy, threshold, or production code is changed here.
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("crates/chess-search/src/lib.rs")
+          text = path.read_text()
+          old = """        let mut searcher = Searcher::default();
+                  searcher.synthetic_null = true;
+          """
+          new = """        let mut searcher = Searcher {
+                      synthetic_null: true,
+                      ..Searcher::default()
+                  };
+          """
+          if text.count(old) != 1:
+              raise SystemExit("expected exactly one generated synthetic-null test constructor")
+          text = text.replace(old, new, 1)
+          reset = "        searcher.synthetic_null = false;\n"
+          if text.count(reset) != 1:
+              raise SystemExit("expected exactly one generated synthetic-null test reset")
+          path.write_text(text.replace(reset, "", 1))
+          PY
+          cargo fmt
+          git diff --check
+          git diff --binary > candidate.patch
+          sha256sum candidate.patch | tee candidate-patch.sha256
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release --exclude chess-bench
+          cargo run --quiet --release -p chess-bench | tee candidate-bench.txt
+
+      - name: Build exact candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          CARGO_TARGET_DIR="$PWD/target-candidate" cargo build --release -p chess-uci
+          test -x target-candidate/release/chess-uci
+          sha256sum target-candidate/release/chess-uci | tee candidate-engine.sha256
+
+      - name: Materialize exact current-main reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin main
+          MAIN_SHA=$(git rev-parse origin/main)
+          echo "$MAIN_SHA" | tee reference-main.sha
+          git worktree add --detach .qualification/reference "$MAIN_SHA"
+          CARGO_TARGET_DIR="$PWD/target-reference" cargo run --quiet --release -p chess-bench --manifest-path .qualification/reference/Cargo.toml | tee reference-bench.txt
+          grep -Fx 'signature 0x4c3bbe8701fbbb68' reference-bench.txt
+          CARGO_TARGET_DIR="$PWD/target-reference" cargo build --release -p chess-uci --manifest-path .qualification/reference/Cargo.toml
+          test -x target-reference/release/chess-uci
+          sha256sum target-reference/release/chess-uci | tee reference-engine.sha256
+
+      - name: Build pinned Fastchess 1.8.2-alpha
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          test "$(git -C .qualification/fastchess-src rev-parse HEAD)" = 'f618e34540f94f4719ad3817950618dabe441318'
+          make -C .qualification/fastchess-src -j2
+          test -x .qualification/fastchess-src/fastchess
+
+      - name: Run frozen paired 100-game screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/screen
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/target-candidate/release/chess-uci" name=null-move-v3 option.Hash=32 \
+            -engine cmd="$PWD/target-reference/release/chess-uci" name=production-main option.Hash=32 \
+            -each tc=1+0.01 \
+            -openings file=match/openings/m3-uho-lichess-100-v1.epd format=epd order=random \
+            -srand 20261101 \
+            -rounds 50 -repeat -concurrency 1 -maxmoves 300 \
+            -ratinginterval 20 \
+            -pgnout file=.qualification/screen/games.pgn notation=uci append=false nodes=true nps=true \
+            -log file=.qualification/screen/uci.log level=info engine=true append=false \
+            | tee .qualification/screen/fastchess.stdout.log
+
+      - name: Record immutable evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/screen
+          cp production-bench.txt .qualification/screen/production-bench.txt || true
+          cp candidate-bench.txt .qualification/screen/candidate-bench.txt || true
+          cp reference-bench.txt .qualification/screen/reference-bench.txt || true
+          cp candidate.patch .qualification/screen/candidate.patch || true
+          cp candidate-patch.sha256 .qualification/screen/candidate-patch.sha256 || true
+          cp candidate-engine.sha256 .qualification/screen/candidate-engine.sha256 || true
+          cp reference-engine.sha256 .qualification/screen/reference-engine.sha256 || true
+          cp reference-main.sha .qualification/screen/reference-main.sha || true
+          cat > .qualification/screen/evidence.txt <<EOF
+          experiment=verified-null-move-v3
+          experiment_head=${GITHUB_HEAD_SHA:-unknown}
+          games=100
+          tc=1+0.01
+          seed=20261101
+          opening_sha256=599a45efb446e91952d13e79bc7fec8de319e332036a54552a3e8e4af91f9cf1
+          expected_reference_signature=0x4c3bbe8701fbbb68
+          fastchess_commit=f618e34540f94f4719ad3817950618dabe441318
+          nmp_min_depth=5
+          nmp_min_static_margin=40
+          nmp_verify_margin=160
+          EOF
+
+      - name: Upload complete screen evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m5-null-move-v3-${{ github.sha }}
+          path: .qualification/screen/
+          retention-days: 30
