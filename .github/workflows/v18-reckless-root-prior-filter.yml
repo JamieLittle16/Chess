@@ -1,0 +1,122 @@
+name: V18 generic threat-aware root prior filter
+
+on:
+  push:
+    branches: [analysis/v18-reckless-root-prior-20260911]
+    paths: ['.github/workflows/v18-reckless-root-prior-filter.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  filter:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: balanced
+            dev: 8
+            castle: 11
+            escape: 9
+            unsafe: 13
+            check: 2
+            offense: 3
+            kingpawn: 5
+          - variant: safety
+            dev: 7
+            castle: 12
+            escape: 13
+            unsafe: 18
+            check: 1
+            offense: 2
+            kingpawn: 6
+          - variant: active
+            dev: 7
+            castle: 10
+            escape: 8
+            unsafe: 11
+            check: 4
+            offense: 5
+            kingpawn: 4
+          - variant: develop
+            dev: 11
+            castle: 14
+            escape: 7
+            unsafe: 12
+            check: 1
+            offense: 2
+            kingpawn: 7
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Reconstruct corpus
+        run: |
+          cat match/benchmarks/top-engine-recent-20260911/chunk_00.b64 match/benchmarks/top-engine-recent-20260911/chunk_01.b64 match/benchmarks/top-engine-recent-20260911/chunk_02.b64 match/benchmarks/top-engine-recent-20260911/chunk_03a.b64 match/benchmarks/top-engine-recent-20260911/chunk_03b.b64 match/benchmarks/top-engine-recent-20260911/chunk_03c.b64 match/benchmarks/top-engine-recent-20260911/chunk_03d.b64 match/benchmarks/top-engine-recent-20260911/chunk_04.b64 | base64 -d | gzip -dc > /tmp/recent.pgn
+          echo 'dbac26e0f2b451eb7bf80994ca48fdd6b1abbc9f133e528d3e968f007f7aa264  /tmp/recent.pgn' | sha256sum -c -
+      - name: Build candidate
+        env:
+          DEV: ${{ matrix.dev }}
+          CASTLE: ${{ matrix.castle }}
+          ESCAPE: ${{ matrix.escape }}
+          UNSAFE: ${{ matrix.unsafe }}
+          CHECK: ${{ matrix.check }}
+          OFFENSE: ${{ matrix.offense }}
+          KINGPAWN: ${{ matrix.kingpawn }}
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/engine /tmp/bench; mkdir -p /tmp/engine /tmp/bench
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          unzip -q /tmp/p150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+          curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/engine/v18_gm2001.bin
+          python scripts/apply_v18_see_capture_ordering.py /tmp/engine/experiments/numba_search.py
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          W={k:int(os.environ[k]) for k in ['DEV','CASTLE','ESCAPE','UNSAFE','CHECK','OFFENSE','KINGPAWN']}
+          p=Path('/tmp/engine/agent.py'); s=p.read_text()
+          marker='\ndef _internal_move_from_chess(board: chess.Board, move: chess.Move) -> int:\n'
+          helper=f'''\n# Generic early root-ordering prior inspired by modern threat-aware move ordering.\n# This never changes evaluation or directly plays a move; it only chooses the first quiet root move searched.\ndef _threat_aware_root_prior(board: chess.Board) -> chess.Move | None:\n    if board.ply() > 32 or len(board.piece_map()) < 18:\n        return None\n    us = board.turn\n    them = not us\n    king_sq = board.king(us)\n    if king_sq is None:\n        return None\n    home_knights = {{chess.B1, chess.G1}} if us == chess.WHITE else {{chess.B8, chess.G8}}\n    home_bishops = {{chess.C1, chess.F1}} if us == chess.WHITE else {{chess.C8, chess.F8}}\n    values = {{chess.PAWN:1, chess.KNIGHT:3, chess.BISHOP:3, chess.ROOK:5, chess.QUEEN:9, chess.KING:0}}\n    best_move = None\n    best_score = 0\n    for move in board.legal_moves:\n        if board.is_capture(move) or move.promotion is not None:\n            continue\n        piece = board.piece_type_at(move.from_square)\n        if piece is None:\n            continue\n        score = 0\n        if board.is_castling(move):\n            score += {W['CASTLE']}\n        if piece == chess.KNIGHT and move.from_square in home_knights:\n            score += {W['DEV']}\n        elif piece == chess.BISHOP and move.from_square in home_bishops:\n            score += {W['DEV']}\n        was_attacked = board.is_attacked_by(them, move.from_square)\n        gives_check = board.gives_check(move)\n        child = board.copy(stack=False)\n        child.push(move)\n        # After push child.turn is the opponent, exactly the side whose attacks make the destination unsafe.\n        safe = not child.is_attacked_by(child.turn, move.to_square)\n        if was_attacked and safe:\n            score += {W['ESCAPE']}\n        if not safe:\n            score -= {W['UNSAFE']}\n        if gives_check:\n            score += {W['CHECK']}\n        if safe:\n            for sq in child.attacks(move.to_square):\n                target = child.piece_at(sq)\n                if target is not None and target.color == child.turn:\n                    score += {W['OFFENSE']} * values.get(target.piece_type, 0)\n        if piece == chess.PAWN:\n            kf = chess.square_file(king_sq)\n            ff = chess.square_file(move.from_square)\n            # Discourage casual pawn loosening around our own king; tactical pawn moves remain searchable.\n            if abs(ff - kf) <= 1:\n                score -= {W['KINGPAWN']}\n        if score > best_score:\n            best_score = score\n            best_move = move\n    return best_move\n\n'''
+          assert s.count(marker)==1; s=s.replace(marker,helper+marker,1)
+          old='''    book_move = _book_prior(board)\n    root_prior_move = -1 if book_move is None else _internal_move_from_chess(board, book_move)\n'''
+          new='''    book_move = _book_prior(board)\n    if book_move is None:\n        book_move = _threat_aware_root_prior(board)\n    root_prior_move = -1 if book_move is None else _internal_move_from_chess(board, book_move)\n'''
+          assert s.count(old)==1; s=s.replace(old,new,1); p.write_text(s)
+          PY
+          python -m py_compile /tmp/engine/agent.py /tmp/engine/experiments/numba_search.py
+          (cd /tmp/engine && python -c 'import agent; assert agent._ENGINE_READY; print("THREAT_PRIOR_READY")')
+      - name: Probe critical Emile miss
+        env:
+          PYTHONPATH: /tmp/engine
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          python - <<'PY'
+          import os,agent,numpy as np,chess
+          fen='rn1r2k1/ppq2ppp/2b1pn2/6B1/1b1P4/1BNQ1N1P/PP3PP1/R4RK1 b - - 8 13'
+          b=chess.Board(fen)
+          print('HEURISTIC_PRIOR',os.environ['VARIANT'],agent._threat_aware_root_prior(b),flush=True)
+          agent._GAME_KEYS.clear(); agent._HASH_KEYS.fill(np.uint64(0)); agent._HASH_MOVES.fill(np.int32(-1)); agent._TT_TABLE.fill(np.uint64(0)); agent._QUIET_HISTORY.fill(np.int16(0))
+          print('CRITICAL_MOVE',os.environ['VARIANT'],agent.get_move(fen,122968),flush=True)
+          PY
+      - name: Prepare cold Stockfish
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('scripts/stockfish_lab.py'); s=p.read_text(); old='''        root_moves = None if root_move is None else [root_move]\n        info = self.engine.analyse(\n'''; new='''        self.engine.configure({"Clear Hash": None})\n        root_moves = None if root_move is None else [root_move]\n        info = self.engine.analyse(\n'''; assert s.count(old)==1; p.write_text(s.replace(old,new,1))
+          PY
+          curl --fail --location --retry 5 -sS 'https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz' -o /tmp/sf.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  /tmp/sf.tar.gz' | sha256sum -c -
+          mkdir -p /tmp/sf; tar -xzf /tmp/sf.tar.gz -C /tmp/sf
+          SF="$(find /tmp/sf -type f -name 'stockfish*' -perm /111 | head -n1)"; cp "$SF" /tmp/stockfish19; chmod +x /tmp/stockfish19
+      - name: Emile 48 cold-TT benchmark
+        run: |
+          python scripts/v18_competitor_move_benchmark_v2.py --pgn /tmp/recent.pgn --engine-dir /tmp/engine --stockfish /tmp/stockfish19 --target 'Emile Andrieu' --positions 48 --nodes 200000 --threads 1 --hash-mb 64 --pairwise-margin-cp 8 --seed 20260911 --output-dir /tmp/bench
+          python - <<'PY'
+          import json
+          x=json.load(open('/tmp/bench/summary.json')); c=x['candidate']; p=x['pairwise']; r=x['candidate_runtime']
+          print('THREAT_PRIOR_RESULT CPL',c['mean_cp_loss'],'BEST',c['best_move_matches'],'PAIR',p['score'],'BLUNDERS',c['blunders_cp_ge_150'],'SEVERE',c['severe_cp_ge_300'],'IMPORT',r['import_seconds'],'MEANSEC',r['mean_move_seconds'])
+          PY
