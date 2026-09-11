@@ -58,3 +58,4 @@ jobs:
             /tmp/SHA256.txt
           if-no-files-found: error
           retention-days: 7
+# retrigger package after workflow creation
