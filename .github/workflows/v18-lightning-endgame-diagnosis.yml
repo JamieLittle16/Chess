@@ -18,36 +18,44 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: '3.12'}
       - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
-      - name: Reconstruct exact PUNCH133
+      - name: Reconstruct exact PUNCH133 and no-null control
         run: |
           set -euo pipefail
-          rm -rf /tmp/engine; mkdir /tmp/engine
           cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
-          unzip -q /tmp/p150.zip -d /tmp/engine
-          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
-          curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/engine/v18_gm2001.bin
-      - name: Engine depth and budget convergence
+          for d in /tmp/base /tmp/nonull; do
+            rm -rf "$d"; mkdir "$d"; unzip -q /tmp/p150.zip -d "$d"
+            sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' "$d/agent.py"
+            curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o "$d/v18_gm2001.bin"
+          done
+          sed -i 's/NULL_MIN_DEPTH = 5/NULL_MIN_DEPTH = 99/' /tmp/nonull/experiments/numba_search.py
+      - name: Engine depth, nodes, and null-move diagnosis
         run: |
           cat >/tmp/probe.py <<'PY'
           import sys, contextlib, numpy as np, chess
-          sys.path.insert(0,'/tmp/engine')
-          with contextlib.redirect_stdout(sys.stderr): import agent
+          root=sys.argv[1]; label=sys.argv[2]
+          sys.path.insert(0,root)
+          with contextlib.redirect_stdout(sys.stderr):
+            import agent
+            from experiments import numba_search as ns
           FEN='8/6p1/4n3/1P6/P1R3Pk/r1N4P/6K1/8 b - - 8 57'
           b=chess.Board(FEN)
           def reset():
             agent._HASH_KEYS.fill(np.uint64(0)); agent._HASH_MOVES.fill(np.int32(-1)); agent._TT_TABLE.fill(np.uint64(0)); agent._QUIET_HISTORY.fill(np.int16(0))
-          for ms in (15000, 30000, 44240, 60000, 90000, 120000):
+          print('===',label,'===',flush=True)
+          for ms in (15000, 44240, 90000):
             reset(); r=agent.search_position(b,ms,np.empty(0,dtype=np.uint64)); print('TIMED',ms,r,flush=True)
           enc=agent.encode_position(b)
-          for nodes in (25000,50000,100000,200000,400000,800000,1600000,3200000):
-            reset(); m,s,d,n=agent.iterative_search_stateful(enc.board,enc.side,enc.castling,enc.ep_square,b.halfmove_clock,np.empty(0,dtype=np.uint64),0,nodes)
+          for nodes in (100000,400000,1600000,3200000):
+            reset(); m,s,d,n=ns.iterative_search_stateful(enc.board,enc.side,enc.castling,enc.ep_square,b.halfmove_clock,np.empty(0,dtype=np.uint64),0,nodes)
             print('NODES',nodes,'move',agent.move_to_uci(int(m)),'score',int(s),'depth',int(d),'used',int(n),flush=True)
           PY
-          python /tmp/probe.py
+          python /tmp/probe.py /tmp/base PUNCH133
+          python /tmp/probe.py /tmp/nonull NO_NULL
       - name: Stockfish tactical explanation
+        if: always()
         run: |
           curl -L --fail --retry 3 -sS -o /tmp/sf.tgz https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
-          mkdir /tmp/sf; tar -xzf /tmp/sf.tgz -C /tmp/sf
+          mkdir -p /tmp/sf; tar -xzf /tmp/sf.tgz -C /tmp/sf
           SF=$(find /tmp/sf -type f -name 'stockfish*' | head -1); chmod +x "$SF"
           python - "$SF" <<'PY'
           import chess,chess.engine,sys
