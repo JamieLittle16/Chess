@@ -6,6 +6,7 @@ on:
     paths:
       - '.github/workflows/v18-see-ordering-selfplay.yml'
       - 'scripts/apply_v18_see_capture_ordering.py'
+      - 'scripts/apply_v18_staging_meta_guards.py'
   workflow_dispatch:
 
 permissions:
@@ -38,15 +39,20 @@ jobs:
           s=Path('/tmp/base/experiments/numba_search.py').read_text()
           i=s.index('def _move_order_score')
           print('BASE_MOVE_ORDER_SNIPPET')
-          print(s[i:i+1800])
+          print(s[i:i+2200])
           PY
           python scripts/apply_v18_see_capture_ordering.py /tmp/cand/experiments/numba_search.py
+          python scripts/apply_v18_staging_meta_guards.py /tmp/cand/experiments/numba_search.py
           python -m py_compile /tmp/cand/experiments/numba_search.py
           python - <<'PY'
           from pathlib import Path
           s=Path('/tmp/cand/experiments/numba_search.py').read_text()
           assert 'score += -2_000_000 + tactical' in s
           assert s.count('_see_capture_ordering(board, move)') == 2
+          assert 'if (meta & 2) == 0:' in s
+          assert 'if quiet:' in s
+          assert 'if score < 5_040_000:' not in s
+          assert 'if order_score < 5_590_000:' not in s
           print('STAGING_PATCH_GUARDS_OK')
           PY
       - name: Paired 30+0.5 selfplay
