@@ -1,0 +1,69 @@
+name: V18 search ablation smoke
+
+on:
+  push:
+    branches: [analysis/v18-benchmark-driven-search-audit-20260911]
+    paths: [.github/workflows/v18-search-ablation-smoke.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [qh64, soft_lmr, no_shallow]
+        target: ['Ryan Vincent', 'Emile Andrieu', 'Lightning Tree']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Reconstruct corpus and engine
+        env: {VARIANT: '${{ matrix.variant }}'}
+        run: |
+          set -euo pipefail
+          cat match/benchmarks/aichessathon-top-engines/chunk_*.b64 | base64 -d | gzip -dc > /tmp/top.pgn
+          echo '81c44dee067b39db09938f159e3192245abc5c4c52896b986b71f53b1cce5187  /tmp/top.pgn' | sha256sum -c -
+          rm -rf /tmp/engine; mkdir /tmp/engine
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          unzip -q /tmp/p150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+          curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/engine/v18_gm2001.bin
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path('/tmp/engine/experiments/numba_search.py'); s=p.read_text(); v=os.environ['VARIANT']
+          if v=='qh64':
+              old='''        stand_pat = (\n            _evaluate_state(side, eval_stack[ply])\n            if qply == 0\n            else _evaluate_state_v13_only(side, eval_stack[ply])\n        )'''
+              assert s.count(old)==1
+              s=s.replace(old,'        stand_pat = _evaluate_state(side, eval_stack[ply])',1)
+              old2='''        _advance_eval_state_into(\n            board,\n            side,\n            move,\n            eval_stack[ply, :EVAL_V13_WIDTH],\n            eval_stack[ply + 1, :EVAL_V13_WIDTH],\n        )'''
+              new2='''        _advance_eval_state_into(\n            board,\n            side,\n            move,\n            eval_stack[ply],\n            eval_stack[ply + 1],\n        )'''
+              assert s.count(old2)==1; s=s.replace(old2,new2,1)
+          elif v=='soft_lmr':
+              old='''    if depth >= 9 and move_index >= 12:\n        return 3\n    if depth >= 6 and move_index >= 8:\n        return 2\n    if depth >= 3 and move_index >= 4:\n        return 1'''
+              new='''    if depth >= 9 and move_index >= 12:\n        return 2\n    if depth >= 6 and move_index >= 8:\n        return 1\n    if depth >= 3 and move_index >= 4:\n        return 1'''
+              assert s.count(old)==1; s=s.replace(old,new,1)
+          elif v=='no_shallow':
+              old='''    if (\n        depth <= 3\n        and beta == alpha + 1'''
+              new='''    if (\n        False\n        and depth <= 3\n        and beta == alpha + 1'''
+              assert s.count(old)==1; s=s.replace(old,new,1)
+          else: raise SystemExit(v)
+          p.write_text(s)
+          PY
+          python -m py_compile /tmp/engine/agent.py /tmp/engine/experiments/*.py
+      - name: Stockfish 19
+        run: |
+          curl -L --fail --retry 3 -sS -o /tmp/sf.tgz https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+          mkdir /tmp/sf; tar -xzf /tmp/sf.tgz -C /tmp/sf
+          SF=$(find /tmp/sf -type f -name 'stockfish*' | head -1); chmod +x "$SF"; echo "SF=$SF" >> "$GITHUB_ENV"
+      - name: Run benchmark
+        run: |
+          mkdir -p /tmp/out
+          PYTHONPATH=scripts python scripts/v18_competitor_move_benchmark_v2.py --pgn /tmp/top.pgn --engine-dir /tmp/engine --stockfish "$SF" --target '${{ matrix.target }}' --positions 12 --nodes 100000 --threads 1 --hash-mb 64 --pairwise-margin-cp 8 --seed 20260911 --output-dir /tmp/out
+          echo RESULT_BEGIN; cat /tmp/out/summary.json; echo RESULT_END
