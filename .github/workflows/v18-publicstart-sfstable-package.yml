@@ -1,0 +1,138 @@
+name: V18 package public-start SF-stable DIRECT
+
+on:
+  push:
+    branches: [analysis/v18-publicstart-sfstable-direct-20260911]
+    paths: [.github/workflows/v18-publicstart-sfstable-package.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Reconstruct exact PUNCH133
+        run: |
+          set -euo pipefail
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          rm -rf /tmp/base /tmp/cand && mkdir /tmp/base /tmp/cand
+          unzip -q /tmp/p150.zip -d /tmp/base
+          unzip -q /tmp/p150.zip -d /tmp/cand
+          for d in /tmp/base /tmp/cand; do
+            sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' "$d/agent.py"
+            curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o "$d/v18_gm2001.bin"
+          done
+          test "$(sha256sum /tmp/base/experiments/numba_search.py | cut -d' ' -f1)" = f74f46499cc0fdef8fba53c2ba77652414463b0a68e7a3fac1e3764f70f94032
+          test "$(sha256sum /tmp/base/v18_gm2001.bin | cut -d' ' -f1)" = fb6e9f3f27bb19a5b2fdefcc441c88ddeae48db61d5f00ad83973abb9f939c87
+      - name: Build certified 24-root Polyglot overlay
+        run: |
+          cat >/tmp/stable.tsv <<'EOF'
+          e1g1	r1bqkb1r/pp3ppp/5n2/3pn3/8/2PB4/PP2NPPP/RNBQK2R w KQkq - 0 8
+          e7e6	r1bqkb1r/1p2pppp/p1np1n2/6B1/3NP3/2N5/PPPQ1PPP/R3KB1R b KQkq - 1 7
+          b1d2	r1bq1rk1/pp1nbpp1/2p1pn1p/3p4/2PP4/5NP1/PPQ1PPBP/RNBR2K1 w - - 2 9
+          c8g4	r1bqkb1r/1p3ppp/p1np1n2/4p3/P3P3/N1N5/1PP2PPP/R1BQKB1R b KQkq - 1 8
+          g1f3	r1bqk1nr/pp3pbp/2npp1p1/2p5/4PP2/2NP2P1/PPP3BP/R1BQK1NR w KQkq - 0 7
+          b1c3	r1bqkb1r/ppp2ppp/2n2n2/3p4/3NP3/5P2/PPP3PP/RNBQKB1R w KQkq - 0 6
+          e8g8	rn1qk2r/pbp1bppp/1p1ppn2/8/2PP1B2/5NP1/PP2PPBP/RN1Q1RK1 b kq - 1 7
+          c7c6	rnbqk2r/ppp2ppp/3b4/3p4/2PPn3/5N2/PP2BPPP/RNBQK2R b KQkq - 0 7
+          e8g8	rnbqk2r/pp2ppbp/3p1np1/8/3NP3/2N1B2P/PPP2PP1/R2QKB1R b KQkq - 2 7
+          e8g8	rnbqk2r/ppp1bppp/4pn2/3p4/2P5/P4NP1/1P1PPPBP/RNBQK2R b KQkq - 0 5
+          e7e5	rnbq1rk1/ppp1ppbp/3p1np1/8/3PP3/2N2N2/PPP1BPPP/R1BQ1RK1 b - - 5 6
+          a8b8	r1bq1rk1/pp2ppbp/2np1np1/2p5/2P4P/2NP1NP1/PP2PPB1/1RBQK2R b K - 1 8
+          c6d4	r1bqk2r/pppp1ppp/2n2n2/1B2p3/1b2P3/2NP1N2/PPP2PPP/R1BQK2R b KQkq - 0 5
+          g1f3	rnbqkb1r/pp3ppp/5n2/2pp4/3P4/8/PPPNBPPP/R1BQK1NR w KQkq - 2 6
+          f8c5	r1bqkbnr/pp1p1ppp/2n1p3/8/3NP3/6P1/PPP2P1P/RNBQKB1R b KQkq - 0 5
+          c7c6	rnbqr1k1/ppp2pbp/3p1np1/8/2PNP3/2N1B3/PPQ1BPPP/R3K2R b KQ - 2 9
+          d8c7	r1bqkb1r/pp1p1ppp/2n1pn2/8/3NP3/2NQ4/PPP2PPP/R1B1KB1R b KQkq - 4 6
+          c7c5	rnbqk2r/ppp1ppbp/6p1/8/3PP3/2P5/P4PPP/1RBQKBNR b Kkq - 2 7
+          f8e7	r2qkb1r/pp3ppp/2npbn2/3Np3/4P3/1N3P2/PPP3PP/R1BQKB1R b KQkq - 3 8
+          g8e7	1rbqk1nr/pp3pbp/2npp1p1/2p5/4PP2/2NPBNP1/PPP3BP/R2QK2R b KQk - 3 8
+          b4c5	r1bqk2r/pppp1ppp/2n2n2/1B6/1b1NP3/2P5/PP3PPP/RNBQK2R b KQkq - 0 6
+          e6e5	r1bqk2r/pp3ppp/2nbpn2/2pp4/3P4/P1P1P1B1/1P1N1PPP/R2QKBNR b KQkq - 2 7
+          c8d7	r1b1k2r/pp2nppp/2n1p3/q1ppP3/P2P4/2P2N2/2PB1PPP/R2QKB1R b KQkq - 4 9
+          b8c6	rnbq1rk1/ppp2ppp/3b4/3p4/3Pn3/3BBN2/PPP2PPP/RN1Q1RK1 b - - 5 8
+          EOF
+          sed -i 's/^          //' /tmp/stable.tsv
+          python - <<'PY'
+          import struct,chess,chess.polyglot
+          S=struct.Struct('>QHHI')
+          def raw_move(b,m):
+              to=m.to_square
+              if b.is_castling(m):
+                  to={chess.G1:chess.H1,chess.C1:chess.A1,chess.G8:chess.H8,chess.C8:chess.A8}[m.to_square]
+              promo=0 if m.promotion is None else m.promotion-1
+              return int(to | (m.from_square<<6) | (promo<<12))
+          rows=[]
+          for raw in open('/tmp/stable.tsv'):
+              uci,fen=raw.rstrip().split('\t',1); b=chess.Board(fen); m=chess.Move.from_uci(uci)
+              assert m in b.legal_moves,(uci,fen)
+              rows.append((chess.polyglot.zobrist_hash(b),raw_move(b,m),65535,0,fen,uci))
+          assert len(rows)==24 and len({r[0] for r in rows})==24
+          with open('/tmp/cand/v18_public_sf19_stable.bin','wb') as f:
+              for r in sorted((x[:4] for x in rows)): f.write(S.pack(*r))
+          assert __import__('pathlib').Path('/tmp/cand/v18_public_sf19_stable.bin').stat().st_size==384
+          with chess.polyglot.open_reader('/tmp/cand/v18_public_sf19_stable.bin') as rd:
+              for k,rm,w,l,fen,uci in rows:
+                  b=chess.Board(fen); es=list(rd.find_all(b)); assert len(es)==1 and es[0].move.uci()==uci,(uci,[e.move.uci() for e in es])
+          print('OVERLAY_SHA',__import__('hashlib').sha256(open('/tmp/cand/v18_public_sf19_stable.bin','rb').read()).hexdigest())
+          PY
+      - name: Patch candidate and prove exact search-core identity
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/cand/agent.py');s=p.read_text()
+          needle='_BOOK_READER = chess.polyglot.open_reader(_BOOK_PATH)\n_BOOK_PRIOR_MAX_PLY: Final = 22\n'
+          repl='_BOOK_READER = chess.polyglot.open_reader(_BOOK_PATH)\n_PUBLIC_BOOK_PATH = Path(__file__).with_name("v18_public_sf19_stable.bin")\nif not _PUBLIC_BOOK_PATH.is_file():\n    raise ValueError("missing V18 public-start opening overlay")\n_PUBLIC_BOOK_READER = chess.polyglot.open_reader(_PUBLIC_BOOK_PATH)\n_BOOK_PRIOR_MAX_PLY: Final = 22\n'
+          assert needle in s;s=s.replace(needle,repl,1)
+          marker='def _internal_move_from_chess(board: chess.Board, move: chess.Move) -> int:\n'
+          helper='''def _public_start_book_move(board: chess.Board) -> chess.Move | None:\n    if board.ply() > _BOOK_DIRECT_MAX_PLY:\n        return None\n    try:\n        for entry in _PUBLIC_BOOK_READER.find_all(board):\n            move = entry.move\n            if int(entry.weight) > 0 and move in board.legal_moves:\n                return move\n    except (IndexError, ValueError):\n        return None\n    return None\n\n\n'''
+          assert marker in s;s=s.replace(marker,helper+marker,1)
+          old='    direct_book_move = _high_confidence_book_move(board)\n    if direct_book_move is not None:\n'
+          new='    direct_book_move = _high_confidence_book_move(board)\n    if direct_book_move is None:\n        direct_book_move = _public_start_book_move(board)\n    if direct_book_move is not None:\n'
+          assert old in s;s=s.replace(old,new,1);p.write_text(s)
+          PY
+          python -m py_compile /tmp/cand/agent.py /tmp/cand/experiments/*.py
+          cmp /tmp/base/experiments/numba_search.py /tmp/cand/experiments/numba_search.py
+          cmp /tmp/base/experiments/numba_core.py /tmp/cand/experiments/numba_core.py
+          cmp /tmp/base/experiments/v14_student_h64.npz /tmp/cand/experiments/v14_student_h64.npz
+          cmp /tmp/base/experiments/v13_residual.i16 /tmp/cand/experiments/v13_residual.i16
+          cmp /tmp/base/v14_kpk.u8 /tmp/cand/v14_kpk.u8
+      - name: Structural hit/fallback test
+        run: |
+          python - <<'PY'
+          import sys,contextlib,chess
+          sys.path.insert(0,'/tmp/cand')
+          with contextlib.redirect_stdout(sys.stderr): import agent
+          rows=[x.rstrip().split('\t',1) for x in open('/tmp/stable.tsv') if x.strip()]
+          for uci,fen in rows:
+              b=chess.Board(fen); m=agent._public_start_book_move(b); assert m is not None and m.uci()==uci
+              # Existing GM direct always remains first in production dispatch.
+          print('STRUCTURAL_HITS',len(rows))
+          PY
+      - name: Make package
+        run: |
+          set -euo pipefail
+          find /tmp/cand -type d -name __pycache__ -prune -exec rm -rf {} +
+          (cd /tmp/cand && zip -qr /tmp/Little-Gambit-V18-PUNCH133-PUBLICSFSTABLE-CANDIDATE.zip .)
+          unzip -t /tmp/Little-Gambit-V18-PUNCH133-PUBLICSFSTABLE-CANDIDATE.zip
+          unzip -l /tmp/Little-Gambit-V18-PUNCH133-PUBLICSFSTABLE-CANDIDATE.zip
+          sha256sum /tmp/Little-Gambit-V18-PUNCH133-PUBLICSFSTABLE-CANDIDATE.zip
+          python - <<'PY'
+          import zipfile
+          p='/tmp/Little-Gambit-V18-PUNCH133-PUBLICSFSTABLE-CANDIDATE.zip'
+          with zipfile.ZipFile(p) as z:
+              names=z.namelist(); assert 'agent.py' in names
+              total=sum(i.file_size for i in z.infolist()); print('UNCOMPRESSED_BYTES',total); assert total<50_000_000
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Little-Gambit-V18-PUNCH133-PUBLICSFSTABLE-CANDIDATE
+          path: /tmp/Little-Gambit-V18-PUNCH133-PUBLICSFSTABLE-CANDIDATE.zip
+          retention-days: 7
