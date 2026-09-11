@@ -1,0 +1,72 @@
+name: V18 ROOT-REPLY2 severe6 probe
+
+on:
+  push:
+    branches: [analysis/v18-see-root-reply2-screen-20260911]
+    paths: ['.github/workflows/v18-root-reply2-severe6-probe.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Build exact SEE baseline and ROOT-REPLY2
+        run: |
+          set -euo pipefail
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          for d in /tmp/base /tmp/cand; do
+            rm -rf "$d"; mkdir "$d"; unzip -q /tmp/p150.zip -d "$d"
+            sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' "$d/agent.py"
+            curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o "$d/v18_gm2001.bin"
+            python scripts/apply_v18_see_capture_ordering.py "$d/experiments/numba_search.py"
+          done
+          python scripts/apply_v18_root_reply2.py /tmp/cand/experiments/numba_search.py
+          python -m py_compile /tmp/base/agent.py /tmp/cand/agent.py /tmp/cand/experiments/numba_search.py
+      - name: Replay six certified severe opening positions
+        run: |
+          cat >/tmp/worker.py <<'PY'
+          import contextlib,json,sys,numpy as np
+          with contextlib.redirect_stdout(sys.stderr): import agent
+          def reset():
+              agent._GAME_KEYS.clear(); agent._PENDING_AFTER_OUR_MOVE=None; agent._LAST_CALL_TIME_LEFT_MS=None; agent._LAST_GET_MOVE_ELAPSED_MS=None; agent._CLOCK_OVERHEAD_EMA_MS=40.0; agent._CLOCK_FEEDBACK_SAMPLES=0
+              if hasattr(agent,'_BOOK_POST_SEARCH_BOOSTS'): agent._BOOK_POST_SEARCH_BOOSTS=0
+              agent._HASH_KEYS.fill(np.uint64(0)); agent._HASH_MOVES.fill(np.int32(-1)); agent._TT_TABLE.fill(np.uint64(0)); agent._QUIET_HISTORY.fill(np.int16(0))
+          for line in sys.stdin:
+              q=json.loads(line)
+              if q['op']=='reset': reset(); r={'ok':1}
+              else: r={'move':agent.get_move(q['fen'],int(q['ms']))}
+              print(json.dumps(r),flush=True)
+          PY
+          cat >/tmp/probe.py <<'PY'
+          import json,os,subprocess,sys,time
+          cases=[
+          ('bishop402','r1bqk2r/pppp1ppp/5n2/1B2p3/1b1nP3/2NP1N2/PPP2PPP/R1BQK2R w KQkq - 0 6','b5a4','a2a4'),
+          ('castle237','r1bqr1k1/pp3pbp/2np1np1/2p5/2P1P3/1NN1B3/PPQ1BPPP/R3K2R w KQ - 0 11','f2f3','e1c1'),
+          ('castle193','rnbqk2r/ppp1ppbp/6p1/8/3PP3/2P5/P4PPP/1RBQKBNR b Kkq - 0 7','e8g8','e8f8'),
+          ('develop170','r2qk2r/1p2bppp/p1npbn2/4p3/P1N1P3/2N5/1PP2PPP/R1BQKB1R w KQkq - 0 10','c1e3','f2f4'),
+          ('queen86','r3k2r/pp1bnpp1/2n1p2p/q1ppP3/P2P3P/2P2N2/2PB1PP1/R2QKB1R w KQkq - 0 11','d1c1','h1h2'),
+          ('castle85','rnbqr1k1/1p3pbp/3p1np1/p1p5/2P1P3/1NN1B3/PPQ1BPPP/R3K2R w KQ - 0 11','a1d1','e1c1')]
+          class W:
+              def __init__(self,d): self.p=subprocess.Popen([sys.executable,'/tmp/worker.py'],cwd=d,stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env={**os.environ,'PYTHONPATH':d})
+              def q(self,x): self.p.stdin.write(json.dumps(x)+'\n'); self.p.stdin.flush(); return json.loads(self.p.stdout.readline())
+              def close(self): self.p.terminate(); self.p.wait(timeout=5)
+          ws={'SEE':W('/tmp/base'),'REPLY2':W('/tmp/cand')}
+          try:
+              for name,fen,sf,old in cases:
+                  out=[name,'SF='+sf,'OLD='+old]
+                  for tag,w in ws.items():
+                      w.q({'op':'reset'}); t=time.perf_counter(); r=w.q({'op':'move','fen':fen,'ms':90000}); dt=time.perf_counter()-t
+                      out.append(f'{tag}={r["move"]}@{dt:.3f}s')
+                  print('SEVERE',*out,flush=True)
+          finally:
+              for w in ws.values(): w.close()
+          PY
+          python /tmp/probe.py
