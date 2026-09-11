@@ -1,0 +1,87 @@
+name: V18 competitor move benchmark V2 smoke
+
+on:
+  push:
+    branches: [analysis/v18-top-engine-move-benchmark-20260911]
+    paths:
+      - '.github/workflows/v18-top-engine-move-benchmark-v2-smoke.yml'
+      - 'scripts/v18_competitor_move_benchmark_v2.py'
+      - 'scripts/stockfish_lab.py'
+      - 'match/benchmarks/top-engine-recent-20260911/**'
+      - 'ci/v18_postbook_payload/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: 'Ryan Vincent'
+            slug: ryan-vincent
+          - target: 'Emile Andrieu'
+            slug: emile-andrieu
+          - target: 'Lightning Tree'
+            slug: lightning-tree
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition analysis runtime
+        run: python -m pip install 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Verify V2 runner syntax
+        run: python -m py_compile scripts/v18_competitor_move_benchmark_v2.py scripts/stockfish_lab.py
+      - name: Reconstruct retained first-corpus fixture
+        run: |
+          set -euo pipefail
+          cat match/benchmarks/top-engine-recent-20260911/chunk_*.b64 | base64 -d | gzip -dc > /tmp/top-engine-recent.pgn
+          printf '%s  %s\n' 'dbac26e0f2b451eb7bf80994ca48fdd6b1abbc9f133e528d3e968f007f7aa264' '/tmp/top-engine-recent.pgn' | sha256sum -c -
+      - name: Reconstruct exact PUNCH133 engine
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/engine /tmp/bench
+          mkdir -p /tmp/engine /tmp/bench/${{ matrix.slug }}
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/postbook150.zip
+          unzip -q /tmp/postbook150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+          curl --fail --location --retry 5 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/engine/v18_gm2001.bin
+          grep -q '_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33' /tmp/engine/agent.py
+          printf '%s  %s\n' '0ab496524b077f3c8f3778634f46b2bd79ed1c44ad4d89cf96857890396d1424' '/tmp/engine/agent.py' | sha256sum -c -
+          printf '%s  %s\n' 'f74f46499cc0fdef8fba53c2ba77652414463b0a68e7a3fac1e3764f70f94032' '/tmp/engine/experiments/numba_search.py' | sha256sum -c -
+          printf '%s  %s\n' 'fb6e9f3f27bb19a5b2fdefcc441c88ddeae48db61d5f00ad83973abb9f939c87' '/tmp/engine/v18_gm2001.bin' | sha256sum -c -
+      - name: Download Stockfish 19
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 'https://github.com/official-stockfish/Stockfish/releases/latest/download/stockfish-linux-x86-64-universal.tar.gz' -o /tmp/sf.tar.gz
+          mkdir -p /tmp/sf
+          tar -xzf /tmp/sf.tar.gz -C /tmp/sf
+          SF="$(find /tmp/sf -type f -name 'stockfish*' -perm /111 | head -n1)"
+          cp "$SF" /tmp/stockfish19
+          chmod +x /tmp/stockfish19
+      - name: Run V2 smoke against ${{ matrix.target }}
+        run: |
+          python scripts/v18_competitor_move_benchmark_v2.py \
+            --pgn /tmp/top-engine-recent.pgn \
+            --engine-dir /tmp/engine \
+            --stockfish /tmp/stockfish19 \
+            --target '${{ matrix.target }}' \
+            --positions 12 \
+            --nodes 100000 \
+            --threads 1 \
+            --hash-mb 64 \
+            --pairwise-margin-cp 8 \
+            --seed 20260911 \
+            --output-dir /tmp/bench/${{ matrix.slug }}
+          cat /tmp/bench/${{ matrix.slug }}/summary.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v2-smoke-${{ matrix.slug }}
+          path: /tmp/bench/${{ matrix.slug }}
+          retention-days: 7
