@@ -1,0 +1,38 @@
+name: V18 improving-state audit
+
+on:
+  push:
+    branches: [analysis/v18-benchmark-driven-search-audit-20260911]
+    paths: ['.github/workflows/v18-improving-state-audit.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reconstruct exact PUNCH133 and print negamax state
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/engine; mkdir /tmp/engine
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          unzip -q /tmp/p150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+          python - <<'PY'
+          from pathlib import Path
+          lines=Path('/tmp/engine/experiments/numba_search.py').read_text().splitlines()
+          terms=('def _negamax','_negamax(','pruning_static_eval','eval_stack','parent_', 'grand', 'previous_move_context','futility_candidate','move_history_score')
+          hits=[i for i,x in enumerate(lines) if any(t in x for t in terms)]
+          windows=[]
+          for i in hits:
+              lo=max(0,i-20); hi=min(len(lines),i+45)
+              if windows and lo <= windows[-1][1]+5: windows[-1]=(windows[-1][0],max(windows[-1][1],hi))
+              else: windows.append((lo,hi))
+          for lo,hi in windows:
+              print(f'===== {lo+1}-{hi} =====')
+              for j in range(lo,hi): print(f'{j+1:05d}: {lines[j]}')
+          PY
