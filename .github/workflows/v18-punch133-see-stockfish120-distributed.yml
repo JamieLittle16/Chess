@@ -1,0 +1,213 @@
+name: V18 PUNCH133 SEE distributed exact Stockfish 120+0.5 calibration
+
+on:
+  push:
+    branches: [analysis/v18-punch133-see-stockfish120-20260911]
+    paths: ['.github/workflows/v18-punch133-see-stockfish120-distributed.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pair:
+    name: SF19 ${{ matrix.elo }} pair ${{ matrix.pair }} @ 120+0.5
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 48
+      matrix:
+        elo: [2050, 2150, 2250, 2350, 2450, 2550]
+        pair: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install exact competition runtime
+        run: |
+          python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+
+      - name: Reconstruct and verify byte-identical uploaded engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/engine /tmp/run
+          mkdir -p /tmp/engine /tmp/run
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          unzip -q /tmp/p150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+          cat ci/v18_punch133_see_exact/numba_search.py.gz.b64.* | base64 -d | gzip -dc \
+            > /tmp/engine/experiments/numba_search.py
+          curl --fail --location --retry 5 -sS \
+            'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' \
+            -o /tmp/engine/v18_gm2001.bin
+          cat >/tmp/uploaded-files.sha256 <<'EOF'
+          0306e8145a453d91b9b5ac92e9980931510d9e18f8ba598a7548d08b85165c35  /tmp/engine/experiments/numba_core.py
+          e38876e2a37193639f9b8b559b02bc064d820c4cdeda44579c9f88e5bd4468b1  /tmp/engine/experiments/v14_student_h64.npz
+          7d0fc5f7a186e79317cf12a2ff285d7716c651fbd045c53d65a3cc6eb1b15319  /tmp/engine/experiments/v13_residual.i16
+          f2656e69525862a294dbf095c6ceb0ced57da5b37393c3822649fed813ae6ff5  /tmp/engine/experiments/numba_search.py
+          cb9540d5ea2a7074ae0c3b5894babecc2fb01de94b102420d8a65e159325ada6  /tmp/engine/experiments/v14_student_single_runtime.py
+          6422eb8eb8713e02e6d62d33ef230f37cf707188e864b575226802aead128b2f  /tmp/engine/experiments/__init__.py
+          c2cc0534a984124c5a75e250bab65f2756ade47341bbca84d6b6871fdb2977f2  /tmp/engine/v14_kpk.u8
+          0ab496524b077f3c8f3778634f46b2bd79ed1c44ad4d89cf96857890396d1424  /tmp/engine/agent.py
+          fb6e9f3f27bb19a5b2fdefcc441c88ddeae48db61d5f00ad83973abb9f939c87  /tmp/engine/v18_gm2001.bin
+          EOF
+          sha256sum -c /tmp/uploaded-files.sha256
+          test "$(find /tmp/engine -type f | wc -l)" -eq 9
+          grep -q '_START_CLOCK_MS: Final = 120_000.0' /tmp/engine/agent.py
+          grep -q '_INCREMENT_MS: Final = 500.0' /tmp/engine/agent.py
+          grep -q '_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33' /tmp/engine/agent.py
+
+      - name: Fetch pinned Stockfish 19
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 5 --retry-delay 2 -sS \
+            -o /tmp/sf19.tgz \
+            'https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz'
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  /tmp/sf19.tgz' | sha256sum -c -
+          mkdir -p /tmp/sf19
+          tar -xzf /tmp/sf19.tgz -C /tmp/sf19
+          SF="$(find /tmp/sf19 -type f -name 'stockfish*' -perm /111 | head -n1)"
+          cp "$SF" /tmp/stockfish19
+          chmod +x /tmp/stockfish19
+          printf 'uci\nquit\n' | /tmp/stockfish19 | grep -q 'Stockfish 19'
+
+      - name: Select disjoint frozen UHO root
+        shell: bash
+        run: |
+          set -euo pipefail
+          ELO='${{ matrix.elo }}'
+          PAIR='${{ matrix.pair }}'
+          RUNG=$(( (ELO - 2050) / 100 ))
+          INDEX=$(( RUNG * 8 + PAIR ))
+          python - "$INDEX" <<'PY'
+          import sys
+          from pathlib import Path
+          src = Path('match/openings/m3-uho-lichess-100-v1.epd')
+          rows = [x.strip() for x in src.read_text().splitlines() if x.strip() and not x.lstrip().startswith('#')]
+          idx = int(sys.argv[1])
+          assert len(rows) >= 48 and 0 <= idx < 48
+          Path('/tmp/one.epd').write_text(rows[idx] + '\n')
+          print('opening_index', idx, rows[idx])
+          PY
+          echo '599a45efb446e91952d13e79bc7fec8de319e332036a54552a3e8e4af91f9cf1  match/openings/m3-uho-lichess-100-v1.epd' | sha256sum -c -
+
+      - name: Play exact colour-reversed pair
+        shell: bash
+        run: |
+          set -euo pipefail
+          ELO='${{ matrix.elo }}'
+          PAIR='${{ matrix.pair }}'
+          SEED=$((202609110000 + ELO * 10 + PAIR))
+          out="/tmp/run/sf-${ELO}-pair-${PAIR}"
+          python scripts/v18_stockfish_calibration.py \
+            --engine-dir /tmp/engine \
+            --stockfish /tmp/stockfish19 \
+            --openings /tmp/one.epd \
+            --elo "$ELO" \
+            --games 2 \
+            --tc '120+0.5' \
+            --seed "$SEED" \
+            --max-plies 600 \
+            --output-dir "$out"
+          cat "$out/summary.json"
+          test "$(python -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["games"])' "$out/summary.json")" = 2
+
+      - name: Upload pair evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: punch133-see-120-sf-${{ matrix.elo }}-pair-${{ matrix.pair }}
+          path: /tmp/run
+          if-no-files-found: warn
+          retention-days: 14
+
+  fit:
+    name: Aggregate 48 games and fit 120+0.5 rating
+    needs: pair
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: punch133-see-120-sf-*-pair-*
+          path: artifacts/pairs
+
+      - name: Aggregate eight independent pairs per rung
+        run: |
+          set -euo pipefail
+          test "$(find artifacts/pairs -name summary.json | wc -l)" -eq 48
+          python - <<'PY'
+          import json, math, random
+          from collections import defaultdict
+          from pathlib import Path
+
+          rows = [json.loads(p.read_text()) for p in Path('artifacts/pairs').rglob('summary.json')]
+          groups = defaultdict(list)
+          for row in rows:
+              assert row['games'] == 2
+              assert row['time_control'] == '120+0.5'
+              assert not row['failures'], row['failures']
+              groups[int(row['stockfish_uci_elo'])].append(row)
+          assert sorted(groups) == [2050, 2150, 2250, 2350, 2450, 2550]
+
+          def score_to_elo(score):
+              p=min(1-1e-6,max(1e-6,score))
+              return 400*math.log10(p/(1-p))
+          def ci(pairs, seed):
+              rng=random.Random(seed)
+              vals=[]
+              for _ in range(20000):
+                  sampled=[pairs[rng.randrange(len(pairs))] for _ in pairs]
+                  vals.append(score_to_elo(sum(sampled)/(2*len(sampled))))
+              vals.sort()
+              return [vals[int(.025*len(vals))], vals[min(len(vals)-1,int(.975*len(vals)))]]
+
+          outroot=Path('artifacts/grouped')
+          for elo, rs in groups.items():
+              assert len(rs)==8, (elo,len(rs))
+              pair_scores=[float(r['pair_scores'][0]) for r in rs]
+              wins=sum(int(r['wins']) for r in rs); draws=sum(int(r['draws']) for r in rs); losses=sum(int(r['losses']) for r in rs)
+              points=sum(float(r['points']) for r in rs); games=sum(int(r['games']) for r in rs)
+              score=points/games; rel=score_to_elo(score)
+              row={
+                  'stockfish_uci_elo': elo, 'games': games,
+                  'wins': wins, 'draws': draws, 'losses': losses,
+                  'points': points, 'score': score, 'relative_elo': rel,
+                  'relative_elo_pair_bootstrap_95': ci(pair_scores, 20260911+elo),
+                  'implied_v18_rating': elo+rel, 'pair_scores': pair_scores,
+                  'time_control': '120+0.5', 'seed': None,
+              }
+              d=outroot/str(elo); d.mkdir(parents=True, exist_ok=True)
+              (d/'summary.json').write_text(json.dumps(row,indent=2)+'\n')
+              print(json.dumps(row))
+          PY
+
+      - name: Joint logistic MLE and pair bootstrap
+        run: |
+          python scripts/v18_fit_stockfish_ladder.py \
+            --root artifacts/grouped \
+            --output artifacts/punch133-see-stockfish120-distributed-rating.json \
+            --seed 20260911 \
+            --bootstrap 20000
+          cat artifacts/punch133-see-stockfish120-distributed-rating.json
+
+      - name: Upload fitted rating and grouped rungs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: punch133-see-stockfish120-distributed-fit
+          path: |
+            artifacts/punch133-see-stockfish120-distributed-rating.json
+            artifacts/grouped
+          if-no-files-found: warn
+          retention-days: 14
