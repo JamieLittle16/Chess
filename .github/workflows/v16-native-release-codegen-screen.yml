@@ -1,0 +1,134 @@
+name: V16 native release codegen screen
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  screen:
+    if: github.head_ref == 'v16/native-release-codegen-screen'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    env:
+      RUSTFLAGS: -C target-cpu=native
+      GESTALT_URL: https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue
+      GESTALT_SHA256: 956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Pin production network and opening corpus
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/codegen .qualification/openings
+          curl --fail --location --retry 5 "$GESTALT_URL" --output .qualification/codegen/gestalt-b840.nnue
+          test "$(stat -c%s .qualification/codegen/gestalt-b840.nnue)" = '21242944'
+          echo "$GESTALT_SHA256  .qualification/codegen/gestalt-b840.nnue" | sha256sum --check --strict
+          curl --fail --location --retry 5 \
+            'https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip' \
+            --output /tmp/uho.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/uho.zip' | sha256sum --check --strict
+          python scripts/build_m6_opening_suite.py --archive /tmp/uho.zip --output-dir .qualification/openings
+          echo '5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e  .qualification/openings/m6-uho-lichess-5000-v1.epd' | sha256sum --check --strict
+
+      - name: Build ordinary native release
+        shell: bash
+        run: |
+          set -euo pipefail
+          CARGO_TARGET_DIR=/tmp/native-base cargo build --release -p chess-uci -p chess-bench
+          mkdir -p .qualification/bin
+          cp /tmp/native-base/release/chess-uci .qualification/bin/base-uci
+          cp /tmp/native-base/release/chess-bench .qualification/bin/base-bench
+
+      - name: Build fat-LTO single-codegen-unit release
+        shell: bash
+        run: |
+          set -euo pipefail
+          CARGO_TARGET_DIR=/tmp/native-lto \
+          CARGO_PROFILE_RELEASE_LTO=fat \
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
+            cargo build --release -p chess-uci -p chess-bench
+          cp /tmp/native-lto/release/chess-uci .qualification/bin/lto-uci
+          cp /tmp/native-lto/release/chess-bench .qualification/bin/lto-bench
+          chmod +x .qualification/bin/*
+
+      - name: Prove deterministic chess identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          export CHESS_GESTALT_NETWORK="$PWD/.qualification/codegen/gestalt-b840.nnue"
+          .qualification/bin/base-bench > .qualification/codegen/base-bench.txt
+          .qualification/bin/lto-bench > .qualification/codegen/lto-bench.txt
+          diff -u .qualification/codegen/base-bench.txt .qualification/codegen/lto-bench.txt
+
+      - name: Build pinned Fastchess
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          make -C .qualification/fastchess-src -j2
+          ROOT="$PWD"
+          mkdir -p .qualification/launchers
+          cat > .qualification/launchers/base.sh <<EOF
+          #!/usr/bin/env bash
+          export CHESS_GESTALT_NETWORK='$ROOT/.qualification/codegen/gestalt-b840.nnue'
+          exec '$ROOT/.qualification/bin/base-uci'
+          EOF
+          cat > .qualification/launchers/lto.sh <<EOF
+          #!/usr/bin/env bash
+          export CHESS_GESTALT_NETWORK='$ROOT/.qualification/codegen/gestalt-b840.nnue'
+          exec '$ROOT/.qualification/bin/lto-uci'
+          EOF
+          chmod +x .qualification/launchers/*.sh
+
+      - name: Run paired fixed-node timing
+        shell: bash
+        run: |
+          set -euo pipefail
+          .qualification/fastchess-src/fastchess \
+            -engine cmd="$PWD/.qualification/launchers/lto.sh" name=fat-lto nodes=30000 option.Hash=64 \
+            -engine cmd="$PWD/.qualification/launchers/base.sh" name=ordinary-release nodes=30000 option.Hash=64 \
+            -openings file="$PWD/.qualification/openings/m6-uho-lichess-5000-v1.epd" format=epd order=random \
+            -srand 20260913 -rounds 60 -repeat -concurrency 1 -maxmoves 300 -ratinginterval 20 \
+            -pgnout file=.qualification/codegen/games.pgn notation=uci append=false nodes=true nps=true \
+            | tee .qualification/codegen/fastchess.log
+          python scripts/analyze_fastchess_node_times.py .qualification/codegen/games.pgn \
+            --output .qualification/codegen/times.json
+
+      - name: Record evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > .qualification/codegen/evidence.txt <<EOF
+          source=$(git rev-parse HEAD)
+          source_base=e42ce8b9d920158827ab30afb554b9cb0d86c99e
+          common_rustflags=-C target-cpu=native
+          candidate_lto=fat
+          candidate_codegen_units=1
+          network_sha256=$GESTALT_SHA256
+          fixed_nodes_per_move=30000
+          fixed_games=120
+          fixed_seed=20260913
+          hash_mib=64
+          concurrency=1
+          EOF
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v16-native-release-codegen-${{ github.sha }}
+          path: .qualification/codegen/
+          retention-days: 30
