@@ -1,0 +1,81 @@
+name: V18 public36 SF19 deep certification
+
+on:
+  push:
+    branches: [analysis/v18-public36-sf19-direct-ab-20260911]
+    paths: [.github/workflows/v18-public36-sf19-deep-cert.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  certify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'chess==1.11.2'
+      - name: Fetch Stockfish 19
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/sf19
+          curl -L --fail --retry 3 --retry-delay 2 -o /tmp/stockfish-19.tar.gz https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  /tmp/stockfish-19.tar.gz' | sha256sum -c -
+          tar -xzf /tmp/stockfish-19.tar.gz -C /tmp/sf19
+          SF=$(find /tmp/sf19 -type f -name 'stockfish*' | head -n1)
+          chmod +x "$SF"
+          echo "STOCKFISH=$SF" >> "$GITHUB_ENV"
+      - name: Recheck 500k/5m-stable GM-DIRECT misses at 20m nodes
+        run: |
+          cat >/tmp/candidates.tsv <<'EOF'
+          01	e1g1	r1bqkb1r/pp3ppp/5n2/3pn3/8/2PB4/PP2NPPP/RNBQK2R w KQkq - 0 8
+          02	e7e6	r1bqkb1r/1p2pppp/p1np1n2/6B1/3NP3/2N5/PPPQ1PPP/R3KB1R b KQkq - 1 7
+          03	b1d2	r1bq1rk1/pp1nbpp1/2p1pn1p/3p4/2PP4/5NP1/PPQ1PPBP/RNBR2K1 w - - 2 9
+          04	c8g4	r1bqkb1r/1p3ppp/p1np1n2/4p3/P3P3/N1N5/1PP2PPP/R1BQKB1R b KQkq - 1 8
+          06	g1f3	r1bqk1nr/pp3pbp/2npp1p1/2p5/4PP2/2NP2P1/PPP3BP/R1BQK1NR w KQkq - 0 7
+          08	b1c3	r1bqkb1r/ppp2ppp/2n2n2/3p4/3NP3/5P2/PPP3PP/RNBQKB1R w KQkq - 0 6
+          11	e8g8	rn1qk2r/pbp1bppp/1p1ppn2/8/2PP1B2/5NP1/PP2PPBP/RN1Q1RK1 b kq - 1 7
+          13	c7c6	rnbqk2r/ppp2ppp/3b4/3p4/2PPn3/5N2/PP2BPPP/RNBQK2R b KQkq - 0 7
+          16	e8g8	rnbqk2r/pp2ppbp/3p1np1/8/3NP3/2N1B2P/PPP2PP1/R2QKB1R b KQkq - 2 7
+          17	e8g8	rnbqk2r/ppp1bppp/4pn2/3p4/2P5/P4NP1/1P1PPPBP/RNBQK2R b KQkq - 0 5
+          18	e7e5	rnbq1rk1/ppp1ppbp/3p1np1/8/3PP3/2N2N2/PPP1BPPP/R1BQ1RK1 b - - 5 6
+          19	a8b8	r1bq1rk1/pp2ppbp/2np1np1/2p5/2P4P/2NP1NP1/PP2PPB1/1RBQK2R b K - 1 8
+          21	c6d4	r1bqk2r/pppp1ppp/2n2n2/1B2p3/1b2P3/2NP1N2/PPP2PPP/R1BQK2R b KQkq - 0 5
+          22	g1f3	rnbqkb1r/pp3ppp/5n2/2pp4/3P4/8/PPPNBPPP/R1BQK1NR w KQkq - 2 6
+          24	f8c5	r1bqkbnr/pp1p1ppp/2n1p3/8/3NP3/6P1/PPP2P1P/RNBQKB1R b KQkq - 0 5
+          25	c7c6	rnbqr1k1/ppp2pbp/3p1np1/8/2PNP3/2N1B3/PPQ1BPPP/R3K2R b KQ - 2 9
+          27	d8c7	r1bqkb1r/pp1p1ppp/2n1pn2/8/3NP3/2NQ4/PPP2PPP/R1B1KB1R b KQkq - 4 6
+          28	c7c5	rnbqk2r/ppp1ppbp/6p1/8/3PP3/2P5/P4PPP/1RBQKBNR b Kkq - 2 7
+          31	f8e7	r2qkb1r/pp3ppp/2npbn2/3Np3/4P3/1N3P2/PPP3PP/R1BQKB1R b KQkq - 3 8
+          32	g8e7	1rbqk1nr/pp3pbp/2npp1p1/2p5/4PP2/2NPBNP1/PPP3BP/R2QK2R b KQk - 3 8
+          33	b4c5	r1bqk2r/pppp1ppp/2n2n2/1B6/1b1NP3/2P5/PP3PPP/RNBQK2R b KQkq - 0 6
+          34	e6e5	r1bqk2r/pp3ppp/2nbpn2/2pp4/3P4/P1P1P1B1/1P1N1PPP/R2QKBNR b KQkq - 2 7
+          35	c8d7	r1b1k2r/pp2nppp/2n1p3/q1ppP3/P2P4/2P2N2/2PB1PPP/R2QKB1R b KQkq - 4 9
+          36	b8c6	rnbq1rk1/ppp2ppp/3b4/3p4/3Pn3/3BBN2/PPP2PPP/RN1Q1RK1 b - - 5 8
+          EOF
+          sed -i 's/^          //' /tmp/candidates.tsv
+          python - <<'PY'
+          import os, chess, chess.engine
+          eng=chess.engine.SimpleEngine.popen_uci(os.environ['STOCKFISH'])
+          eng.configure({'Threads':1,'Hash':256})
+          kept=[]
+          try:
+              for raw in open('/tmp/candidates.tsv'):
+                  idx, expected, fen=raw.rstrip().split('\t',2)
+                  b=chess.Board(fen)
+                  info=eng.analyse(b,chess.engine.Limit(nodes=20_000_000))
+                  move=info['pv'][0].uci()
+                  score=info['score'].pov(b.turn).score(mate_score=100000)
+                  ok=move==expected
+                  if ok: kept.append((idx,expected,fen))
+                  print('ROW',idx,'expected',expected,'sf20m',move,'cp20m',score,'TRIPLE_STABLE',ok,'FEN',fen,flush=True)
+          finally:
+              eng.quit()
+          print('SUMMARY candidates 24 triple_stable',len(kept),'dropped',24-len(kept))
+          print('KEPT_BEGIN')
+          for row in kept: print('\t'.join(row))
+          print('KEPT_END')
+          PY
