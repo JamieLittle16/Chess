@@ -1,0 +1,79 @@
+name: V18 hard-tail diagnostic
+
+on:
+  push:
+    branches: [analysis/v18-hardtail-diagnostic-20260911]
+    paths: [.github/workflows/v18-hardtail-diagnostic.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        soft: ['0.85', '1.00']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Reconstruct diagnostic candidate
+        env:
+          SOFT: ${{ matrix.soft }}
+        run: |
+          set -euo pipefail
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          rm -rf /tmp/engine && mkdir /tmp/engine && unzip -q /tmp/p150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+          curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/engine/v18_gm2001.bin
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          p=Path('/tmp/engine/agent.py');s=p.read_text();v=os.environ['SOFT']
+          assert s.count('soft_fraction = 0.58')==1
+          s=s.replace('soft_fraction = 0.58',f'soft_fraction = {v}',1)
+          assert s.count('soft_fraction = 0.64')>=1
+          # Make this diagnostic a genuine floor: quiet/check branches must not reduce it.
+          s=s.replace('soft_fraction = 0.64',f'soft_fraction = max(soft_fraction, 0.64)',1)
+          p.write_text(s)
+          print('SOFT_FLOOR',v)
+          PY
+          python -m py_compile /tmp/engine/agent.py /tmp/engine/experiments/*.py
+      - name: Probe worst clean-benchmark misses
+        env:
+          SOFT: ${{ matrix.soft }}
+        run: |
+          cat >/tmp/probe.py <<'PY'
+          import contextlib,sys,time,numpy as np,chess
+          sys.path.insert(0,'/tmp/engine')
+          with contextlib.redirect_stdout(sys.stderr): import agent
+          rows=[
+            ('RYAN-41',88109,'f3g5','3nr1k1/1ppq1pp1/r4b2/p2p3Q/1P1N2nP/P2P1NP1/1B2PPK1/R1R5 w - - 1 21'),
+            ('RYAN-19',120996,'b1c3','r1bq1rk1/pp1n1ppp/2pb4/3p4/2PPn3/5N2/PP2BPPP/RNBQR1K1 w - - 4 10'),
+            ('RYAN-15',120498,'b2b3','r1bq1rk1/ppp1bppp/2n2n2/3p4/8/3P1NP1/PP2PPBP/RNBQ1RK1 w - - 0 8'),
+            ('EMILE-18',120993,'b8d7','rnbq1rk1/pp3ppp/2pb4/3p4/2PPn3/5N2/PP2BPPP/RNBQR1K1 b - - 3 9'),
+            ('EMILE-79',43447,'c5g5','8/5ppp/3k4/2R5/pP1K4/Pr2P2P/8/8 w - - 5 40'),
+            ('LIGHT-98',63031,'g7e5','q7/6bk/2q3pp/2p1P2P/2Pp1R1P/5N2/2QB2K1/8 b - - 3 49'),
+            ('LIGHT-114',44240,'e6f8','8/6p1/4n3/1P6/P1R3Pk/r1N4P/6K1/8 b - - 8 57'),
+            ('LIGHT-97',69330,'d5e5','4r3/4kp2/4n1p1/2PK4/2R4P/4N3/2P2P2/8 w - - 9 49'),
+            ('LIGHT-18',120498,'d8d7','r1bq1rk1/pp2ppbp/2np2p1/2p4n/2P4P/P1NP1NP1/1P2PPB1/1RBQK2R b K - 0 9'),
+            ('LIGHT-23',117532,'e1g1','r2qkb1r/1p3ppp/p1n5/3np3/P7/N1N5/1PP1QPPP/R1B1K2R w KQkq - 0 12'),
+          ]
+          def reset():
+            agent._GAME_KEYS.clear();agent._PENDING_AFTER_OUR_MOVE=None;agent._LAST_CALL_TIME_LEFT_MS=None;agent._LAST_GET_MOVE_ELAPSED_MS=None
+            agent._CLOCK_OVERHEAD_EMA_MS=40.0;agent._CLOCK_FEEDBACK_SAMPLES=0
+            if hasattr(agent,'_BOOK_POST_SEARCH_BOOSTS'):agent._BOOK_POST_SEARCH_BOOSTS=0
+            agent._HASH_KEYS.fill(np.uint64(0));agent._HASH_MOVES.fill(np.int32(-1));agent._TT_TABLE.fill(np.uint64(0));agent._QUIET_HISTORY.fill(np.int16(0))
+          hits=0
+          for name,ms,best,fen in rows:
+            reset();b=chess.Board(fen);t=time.perf_counter();m=agent.get_move(fen,ms);dt=time.perf_counter()-t
+            legal=chess.Move.from_uci(m) in b.legal_moves;hit=(m==best);hits+=hit
+            print('PROBE',name,'ms',ms,'best',best,'move',m,'HIT',hit,'legal',legal,'elapsed',round(dt,3),flush=True)
+          print('SUMMARY soft',__import__('os').environ['SOFT'],'best_hits',hits,'/',len(rows),flush=True)
+          PY
+          PYTHONPATH=/tmp/engine python /tmp/probe.py
