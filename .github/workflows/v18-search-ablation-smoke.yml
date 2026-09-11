@@ -23,12 +23,12 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: '3.12'}
       - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
-      - name: Reconstruct corpus and engine
+      - name: Reconstruct repaired corpus and engine
         env: {VARIANT: '${{ matrix.variant }}'}
         run: |
           set -euo pipefail
-          cat match/benchmarks/aichessathon-top-engines/chunk_*.b64 | base64 -d | gzip -dc > /tmp/top.pgn
-          echo '81c44dee067b39db09938f159e3192245abc5c4c52896b986b71f53b1cce5187  /tmp/top.pgn' | sha256sum -c -
+          (for f in match/benchmarks/top-engine-recent-20260911/chunk_*.b64; do base64 -d "$f"; done) | gzip -dc > /tmp/top.pgn
+          echo 'dbac26e0f2b451eb7bf80994ca48fdd6b1abbc9f133e528d3e968f007f7aa264  /tmp/top.pgn' | sha256sum -c -
           rm -rf /tmp/engine; mkdir /tmp/engine
           cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
           unzip -q /tmp/p150.zip -d /tmp/engine
