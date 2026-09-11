@@ -1,0 +1,62 @@
+name: V18 safe selector diagnose
+
+on:
+  push:
+    branches: [analysis/v18-root-quality-fastfilter-20260911]
+    paths: ['.github/workflows/v18-safe-selector-diagnose.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Build ROOT4
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/engine; mkdir -p /tmp/engine
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          unzip -q /tmp/p150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+          curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/engine/v18_gm2001.bin
+          python scripts/apply_v18_see_capture_ordering.py /tmp/engine/experiments/numba_search.py
+          python scripts/apply_v18_root_value.py /tmp/engine/experiments/numba_search.py 4
+      - name: Rank quiet root moves and inspect Stockfish PV
+        env:
+          PYTHONPATH: /tmp/engine
+        run: |
+          curl --fail --location --retry 5 -sS 'https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz' -o /tmp/sf.tar.gz
+          mkdir -p /tmp/sf && tar -xzf /tmp/sf.tar.gz -C /tmp/sf
+          SF="$(find /tmp/sf -type f -name 'stockfish*' -perm /111 | head -n1)"; cp "$SF" /tmp/stockfish19; chmod +x /tmp/stockfish19
+          python - <<'PY'
+          import chess,chess.engine,numpy as np
+          import experiments.numba_search as s
+          from experiments.numba_core import encode_position
+          fen='rn1r2k1/ppq2ppp/2b1pn2/6B1/1b1P4/1BNQ1N1P/PP3PP1/R4RK1 b - - 8 13'
+          root=chess.Board(fen); rows=[]
+          for m in list(root.legal_moves):
+              if root.is_capture(m) or m.promotion is not None:
+                  continue
+              b=root.copy(stack=False); b.push(m); e=encode_position(b)
+              state=np.empty(s.EVAL_WIDTH,dtype=np.int32); s._build_eval_state_into(e.board,state)
+              rows.append((-int(s._evaluate_state(e.side,state)),m.uci()))
+          rows.sort(reverse=True)
+          print('STATIC_QUIET_TOP',rows[:12],flush=True)
+          print('STATIC_H6_ND7',[(v,m) for v,m in rows if m in ('h7h6','b8d7')],flush=True)
+          eng=chess.engine.SimpleEngine.popen_uci('/tmp/stockfish19'); eng.configure({'Threads':1,'Hash':64})
+          try:
+              for uci in ('h7h6','b8d7'):
+                  b=root.copy(stack=False); b.push(chess.Move.from_uci(uci)); eng.configure({'Clear Hash':None})
+                  info=eng.analyse(b,chess.engine.Limit(nodes=5_000_000),multipv=1)
+                  if isinstance(info,list): info=info[0]
+                  sc=info['score'].pov(chess.BLACK).score(mate_score=100000)
+                  print('SF_CHILD',uci,'cp',sc,'depth',info.get('depth'),'seldepth',info.get('seldepth'),'pv',' '.join(x.uci() for x in info.get('pv',[])[:16]),flush=True)
+          finally: eng.quit()
+          PY
