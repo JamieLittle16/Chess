@@ -1,0 +1,89 @@
+name: V18 root-stage LMR current
+
+on:
+  push:
+    branches: [analysis/v18-root-quality-fastfilter-20260911]
+    paths: ['.github/workflows/v18-rootstage-lmr-current.yml']
+  workflow_dispatch:
+
+permissions: {contents: read}
+
+jobs:
+  bench:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        fullmove_max: [14, 16, 18]
+        target: ['Ryan Vincent', 'Emile Andrieu', 'Lightning Tree']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Build SEE plus root-stage LMR safety
+        env:
+          FULLMOVE_MAX: ${{ matrix.fullmove_max }}
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/engine /tmp/out && mkdir -p /tmp/engine /tmp/out
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          unzip -q /tmp/p150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+          curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/engine/v18_gm2001.bin
+          test "$(sha256sum /tmp/engine/v18_gm2001.bin | cut -d' ' -f1)" = 'fb6e9f3f27bb19a5b2fdefcc441c88ddeae48db61d5f00ad83973abb9f939c87'
+          python scripts/apply_v18_see_capture_ordering.py /tmp/engine/experiments/numba_search.py
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          fm=int(os.environ['FULLMOVE_MAX'])
+          p=Path('/tmp/engine/experiments/numba_search.py'); s=p.read_text()
+          old='NULL_DISABLE_CASTLING_FLAG = 16\nNULL_MIN_DEPTH = 5\n'
+          new='NULL_DISABLE_CASTLING_FLAG = 16\nLMR_OPENING_SAFE_CASTLING_FLAG = 32\nNULL_MIN_DEPTH = 5\n'
+          assert s.count(old)==1; s=s.replace(old,new,1)
+          old='''        reduction = (\n            _history_adjusted_lmr_reduction(depth, index, move_history_score)\n            if lmr_candidate else 0\n        )\n        futility_candidate = ('''
+          new='''        reduction = (\n            _history_adjusted_lmr_reduction(depth, index, move_history_score)\n            if lmr_candidate else 0\n        )\n        if (\n            (castling & LMR_OPENING_SAFE_CASTLING_FLAG) != 0\n            and depth >= 6\n            and index >= 8\n            and not (depth >= 9 and index >= 12)\n            and reduction > 0\n        ):\n            reduction -= 1\n        futility_candidate = ('''
+          assert s.count(old)==1; s=s.replace(old,new,1); p.write_text(s)
+          p=Path('/tmp/engine/agent.py'); s=p.read_text()
+          old='''        encoded.castling,\n        encoded.ep_square,\n        board.halfmove_clock,'''
+          new=f'''        encoded.castling | (32 if board.fullmove_number <= {fm} else 0),\n        encoded.ep_square,\n        board.halfmove_clock,'''
+          pos=s.rfind(old); assert pos >= 0
+          s=s[:pos]+s[pos:].replace(old,new,1); p.write_text(s)
+          PY
+          python -m py_compile /tmp/engine/agent.py /tmp/engine/experiments/*.py
+      - name: Reconstruct frozen panel
+        run: |
+          (for f in match/benchmarks/top-engine-recent-20260911/chunk_*.b64; do base64 -d "$f"; done) | gzip -dc > /tmp/top.pgn
+          echo 'dbac26e0f2b451eb7bf80994ca48fdd6b1abbc9f133e528d3e968f007f7aa264  /tmp/top.pgn' | sha256sum -c -
+      - name: Cold Stockfish
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('scripts/stockfish_lab.py'); s=p.read_text()
+          old='        root_moves = None if root_move is None else [root_move]\n        info = self.engine.analyse(\n'
+          new='        root_moves = None if root_move is None else [root_move]\n        if "Clear Hash" in self.engine.options:\n            self.engine.configure({"Clear Hash": None})\n        info = self.engine.analyse(\n'
+          assert s.count(old)==1; p.write_text(s.replace(old,new,1))
+          PY
+          mkdir -p /tmp/sf
+          curl -L --fail --retry 3 -sS -o /tmp/sf.tgz https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  /tmp/sf.tgz' | sha256sum -c -
+          tar -xzf /tmp/sf.tgz -C /tmp/sf
+          SF=$(find /tmp/sf -type f -name 'stockfish*' -perm /111 | head -1); chmod +x "$SF"; echo "SF=$SF" >> "$GITHUB_ENV"
+      - name: Benchmark
+        env:
+          TARGET: ${{ matrix.target }}
+          FULLMOVE_MAX: ${{ matrix.fullmove_max }}
+        run: |
+          PYTHONPATH=scripts python scripts/v18_competitor_move_benchmark_v2.py --pgn /tmp/top.pgn --engine-dir /tmp/engine --stockfish "$SF" --target "$TARGET" --positions 24 --nodes 150000 --threads 1 --hash-mb 64 --pairwise-margin-cp 8 --seed 20260912 --output-dir /tmp/out
+          python - <<'PY'
+          import json,os
+          x=json.load(open('/tmp/out/summary.json'))
+          print('ROOT_STAGE_LMR_RESULT',os.environ['FULLMOVE_MAX'],os.environ['TARGET'],'cpl',x['candidate']['mean_cp_loss'],'pair',x['pairwise']['score'],'sfmatch',x['candidate']['best_move_match_rate'],'mist80',x['candidate']['mistakes_cp_ge_80'],'blund150',x['candidate']['blunders_cp_ge_150'],'secs',x['candidate_runtime']['mean_move_seconds'])
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: root-stage-lmr-${{ matrix.fullmove_max }}-${{ matrix.target }}
+          path: /tmp/out/
+          retention-days: 2
