@@ -22,23 +22,26 @@ jobs:
           cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
           unzip -q /tmp/p150.zip -d /tmp/engine
           sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
-      - name: Show exact move-loop pruning and history lifecycle
+      - name: Show history layout, scoring and TT feedback anchors
         run: |
           python - <<'PY'
           from pathlib import Path
-          for file in ('/tmp/engine/experiments/numba_search.py','/tmp/engine/agent.py'):
-              lines=Path(file).read_text().splitlines()
-              print('\n########',file,'########')
-              terms=('move_index','quiet_count','futility','FUTILITY','LMP','late','hist_score','child_improving','_QUIET_HISTORY','quiet_history','iterative_search_stateful')
-              hits=[i for i,x in enumerate(lines) if any(t in x for t in terms)]
-              # Merge nearby windows so the exact surrounding control flow is readable.
-              windows=[]
-              for i in hits:
-                  lo=max(0,i-14); hi=min(len(lines),i+26)
-                  if windows and lo <= windows[-1][1]+5:
-                      windows[-1]=(windows[-1][0],max(windows[-1][1],hi))
-                  else: windows.append((lo,hi))
-              for lo,hi in windows:
-                  print(f'===== {lo+1}-{hi} =====')
-                  for j in range(lo,hi): print(f'{j+1:05d}: {lines[j]}')
+          p=Path('/tmp/engine/experiments/numba_search.py')
+          lines=p.read_text().splitlines()
+          terms=(
+              'QUIET_HISTORY_', 'def _move_order_score_meta', 'def _quiet_history_context',
+              'def _quiet_history_score', 'def _quiet_history_update', 'tt_score', 'tt_move',
+              'TT_LOWER', 'TT_EXACT', 'for index in range(count):', 'move_history_score',
+              'if alpha >= beta', 'futility_candidate',
+          )
+          hits=[i for i,x in enumerate(lines) if any(t in x for t in terms)]
+          windows=[]
+          for i in hits:
+              lo=max(0,i-18); hi=min(len(lines),i+36)
+              if windows and lo <= windows[-1][1]+5:
+                  windows[-1]=(windows[-1][0],max(windows[-1][1],hi))
+              else: windows.append((lo,hi))
+          for lo,hi in windows:
+              print(f'===== {lo+1}-{hi} =====')
+              for j in range(lo,hi): print(f'{j+1:05d}: {lines[j]}')
           PY
