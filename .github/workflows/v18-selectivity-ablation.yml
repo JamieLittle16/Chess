@@ -54,8 +54,8 @@ jobs:
               assert s.count(old)==1, s.count(old)
               s=s.replace(old,new,1)
           if 'nolmr' in v:
-              old='''        lmr_candidate = not checked and quiet and not protected_killer\n'''
-              new='''        lmr_candidate = False and not checked and quiet and not protected_killer\n'''
+              old='''        reduction = (\n            _history_adjusted_lmr_reduction(depth, index, move_history_score)\n            if lmr_candidate else 0\n        )\n'''
+              new='''        reduction = (\n            _history_adjusted_lmr_reduction(depth, index, move_history_score)\n            if lmr_candidate else 0\n        )\n        reduction = 0\n'''
               assert s.count(old)==1, s.count(old)
               s=s.replace(old,new,1)
           p.write_text(s)
