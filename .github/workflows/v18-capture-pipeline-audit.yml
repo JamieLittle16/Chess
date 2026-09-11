@@ -1,0 +1,41 @@
+name: V18 capture pipeline audit
+
+on:
+  push:
+    branches: [analysis/v18-see-staging-scratch-20260911]
+    paths: ['.github/workflows/v18-capture-pipeline-audit.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reconstruct exact PUNCH133
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/engine; mkdir /tmp/engine
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          unzip -q /tmp/p150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+      - name: Print capture and history contexts
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/engine/experiments/numba_search.py')
+          s=p.read_text().splitlines()
+          needles=['_move_order_score','_score_moves_in_place','_update_history','QUIET_HISTORY','CONT_HISTORY','quiet_history','beta','best_move']
+          seen=set()
+          for i,line in enumerate(s):
+              if any(n in line for n in needles):
+                  lo=max(0,i-10); hi=min(len(s),i+22)
+                  key=(lo,hi)
+                  if key in seen: continue
+                  seen.add(key)
+                  print(f'===== LINES {lo+1}-{hi} =====')
+                  for j in range(lo,hi): print(f'{j+1:05d}: {s[j]}')
+          PY
