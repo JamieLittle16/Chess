@@ -32,6 +32,9 @@ def main() -> int:
     )
 
     search = Path("crates/chess-search/src/lib.rs")
+    # Convert only the two existing independent-search root resets before adding the explicit
+    # discard method below (which intentionally still calls HistoryTables::clear directly).
+    replace_count(search, "self.history.clear();", "self.prepare_root_history();", 2)
     replace_count(
         search,
         """    history: HistoryTables,\n    move_contexts: [Option<MoveContext>; MAX_SEARCH_PLY],\n""",
@@ -50,7 +53,6 @@ def main() -> int:
         """    pub fn tt_capacity_entries(&self) -> usize {\n        self.table.len()\n    }\n\n    /// Retain and age quiet-move history for exactly the next top-level root.\n    ///\n    /// This is deliberately explicit: raw `Searcher` reuse remains root-independent unless a\n    /// game-owning frontend has proved that the next root continues the same game.\n    pub fn preserve_move_history_for_next_root(&mut self) {\n        self.preserve_history_once = true;\n    }\n\n    /// Forget all quiet-move history and cancel any pending same-game retention request.\n    pub fn discard_move_history(&mut self) {\n        self.preserve_history_once = false;\n        self.history.clear();\n    }\n\n    fn prepare_root_history(&mut self) {\n        if std::mem::take(&mut self.preserve_history_once) {\n            self.history.age();\n        } else {\n            self.history.clear();\n        }\n    }\n\n    fn reset_leaf_evaluator""",
         1,
     )
-    replace_count(search, "self.history.clear();", "self.prepare_root_history();", 2)
 
     root_analysis = Path("crates/chess-search/src/root_analysis.rs")
     replace_count(
