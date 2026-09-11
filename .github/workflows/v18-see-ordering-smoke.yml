@@ -38,7 +38,9 @@ jobs:
           cat >/tmp/probe.py <<'PY'
           import sys,contextlib,numpy as np,chess,time
           root,label=sys.argv[1:3]; sys.path.insert(0,root)
-          with contextlib.redirect_stdout(sys.stderr): import agent
+          with contextlib.redirect_stdout(sys.stderr):
+            import agent
+            from experiments import numba_search as ns
           fens=[
           'r3r1k1/ppp2ppp/2np1n2/8/2B1P3/2P2N2/PP3PPP/R2R2K1 w - - 0 16',
           '8/6p1/4n3/1P6/P1R3Pk/r1N4P/6K1/8 b - - 8 57',
@@ -49,7 +51,7 @@ jobs:
           ]
           for i,fen in enumerate(fens):
             b=chess.Board(fen); agent._HASH_KEYS.fill(np.uint64(0)); agent._HASH_MOVES.fill(np.int32(-1)); agent._TT_TABLE.fill(np.uint64(0)); agent._QUIET_HISTORY.fill(np.int16(0))
-            enc=agent.encode_position(b); st=time.perf_counter(); m,s,d,n=agent.iterative_search_stateful(enc.board,enc.side,enc.castling,enc.ep_square,b.halfmove_clock,np.empty(0,dtype=np.uint64),0,250000)
+            enc=agent.encode_position(b); st=time.perf_counter(); m,s,d,n=ns.iterative_search_stateful(enc.board,enc.side,enc.castling,enc.ep_square,b.halfmove_clock,np.empty(0,dtype=np.uint64),0,250000)
             print(label,i,agent.move_to_uci(int(m)),int(s),int(d),int(n),'SEC',round(time.perf_counter()-st,4),flush=True)
           PY
           python /tmp/probe.py /tmp/base BASE
