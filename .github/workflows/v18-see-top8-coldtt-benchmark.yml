@@ -3,7 +3,9 @@ name: V18 SEE top-eight cold-TT benchmark
 on:
   push:
     branches: [analysis/v18-see-top8-benchmark-20260911]
-    paths: ['.github/workflows/v18-see-top8-coldtt-benchmark.yml']
+    paths:
+      - '.github/workflows/v18-see-top8-coldtt-benchmark.yml'
+      - 'match/benchmarks/aichessathon-top-engines/full.pgn.gz'
   workflow_dispatch:
 
 permissions:
@@ -42,7 +44,7 @@ jobs:
       - name: Reconstruct full 71-game holdout corpus
         run: |
           set -euo pipefail
-          cat match/benchmarks/aichessathon-top-engines/chunk_*.b64 | base64 -d | gzip -dc > /tmp/top8.pgn
+          gzip -dc match/benchmarks/aichessathon-top-engines/full.pgn.gz > /tmp/top8.pgn
           printf '%s  %s\n' '81c44dee067b39db09938f159e3192245abc5c4c52896b986b71f53b1cce5187' /tmp/top8.pgn | sha256sum -c -
 
       - name: Reconstruct exact PUNCH133 and apply SEE leader
