@@ -1,0 +1,266 @@
+name: V18 public36 SF19 certified opening tree A/B
+
+on:
+  push:
+    branches: [analysis/v18-public36-sf19-tree-ab-20260911]
+    paths: [.github/workflows/v18-public36-sf19-tree-ab.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'chess==1.11.2'
+      - name: Fetch and verify Stockfish 19
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/sf19
+          curl -L --fail --retry 3 --retry-delay 2 -o /tmp/stockfish-19.tar.gz https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  /tmp/stockfish-19.tar.gz' | sha256sum -c -
+          tar -xzf /tmp/stockfish-19.tar.gz -C /tmp/sf19
+          SF=$(find /tmp/sf19 -type f -name 'stockfish*' | head -n1); chmod +x "$SF"; echo "STOCKFISH=$SF" >> "$GITHUB_ENV"
+      - name: Prepare 36 public historical starts
+        run: |
+          cat >/tmp/starts.epd <<'EOF'
+          r1bqkb1r/pp3ppp/5n2/3pn3/8/2PB4/PP2NPPP/RNBQK2R w KQkq - 0 8
+          r1bqkb1r/1p2pppp/p1np1n2/6B1/3NP3/2N5/PPPQ1PPP/R3KB1R b KQkq - 1 7
+          r1bq1rk1/pp1nbpp1/2p1pn1p/3p4/2PP4/5NP1/PPQ1PPBP/RNBR2K1 w - - 2 9
+          r1bqkb1r/1p3ppp/p1np1n2/4p3/P3P3/N1N5/1PP2PPP/R1BQKB1R b KQkq - 1 8
+          r1bqk2r/ppp1bppp/2np1n2/4p3/P1B1P3/2NP1N2/1PP2PPP/R1BQK2R b KQkq - 0 6
+          r1bqk1nr/pp3pbp/2npp1p1/2p5/4PP2/2NP2P1/PPP3BP/R1BQK1NR w KQkq - 0 7
+          rnbq1rk1/ppp1bppp/4pn2/3p4/2PP4/N4NP1/PP2PPBP/R1BQK2R b KQ - 0 6
+          r1bqkb1r/ppp2ppp/2n2n2/3p4/3NP3/5P2/PPP3PP/RNBQKB1R w KQkq - 0 6
+          r1bqk2r/pp3ppp/2nbpn2/2pp4/3P1B2/P1P1P3/1P1N1PPP/R2QKBNR w KQkq - 1 7
+          r1bqkbnr/pp1p1ppp/2n1p3/1N6/4P3/8/PPP2PPP/RNBQKB1R b KQkq - 2 5
+          rn1qk2r/pbp1bppp/1p1ppn2/8/2PP1B2/5NP1/PP2PPBP/RN1Q1RK1 b kq - 1 7
+          r1bq1rk1/pp2ppbp/2np1np1/2p5/2P4P/2NP1NP1/PP2PPB1/R1BQK2R w KQ - 0 8
+          rnbqk2r/ppp2ppp/3b4/3p4/2PPn3/5N2/PP2BPPP/RNBQK2R b KQkq - 0 7
+          rn1qkbnr/pp2ppp1/2p3bp/8/3P3P/5NN1/PPP2PP1/R1BQKB1R b KQkq - 1 7
+          r1bq1rk1/2p1bppp/p2p1n2/np2p3/4P3/1B1P1N1P/PPP2PP1/RNBQR1K1 w - - 1 10
+          rnbqk2r/pp2ppbp/3p1np1/8/3NP3/2N1B2P/PPP2PP1/R2QKB1R b KQkq - 2 7
+          rnbqk2r/ppp1bppp/4pn2/3p4/2P5/P4NP1/1P1PPPBP/RNBQK2R b KQkq - 0 5
+          rnbq1rk1/ppp1ppbp/3p1np1/8/3PP3/2N2N2/PPP1BPPP/R1BQ1RK1 b - - 5 6
+          r1bq1rk1/pp2ppbp/2np1np1/2p5/2P4P/2NP1NP1/PP2PPB1/1RBQK2R b K - 1 8
+          rnbq1rk1/ppp2ppp/4pn2/8/1bBP4/2N1P2P/PP3PP1/R1BQK1NR b KQ - 0 7
+          r1bqk2r/pppp1ppp/2n2n2/1B2p3/1b2P3/2NP1N2/PPP2PPP/R1BQK2R b KQkq - 0 5
+          rnbqkb1r/pp3ppp/5n2/2pp4/3P4/8/PPPNBPPP/R1BQK1NR w KQkq - 2 6
+          rnbq1rk1/ppp1bppp/4pn2/3p4/2P5/3P1NP1/PP2PPBP/RNBQ1RK1 b - - 2 6
+          r1bqkbnr/pp1p1ppp/2n1p3/8/3NP3/6P1/PPP2P1P/RNBQKB1R b KQkq - 0 5
+          rnbqr1k1/ppp2pbp/3p1np1/8/2PNP3/2N1B3/PPQ1BPPP/R3K2R b KQ - 2 9
+          rn1qkb1r/1p3ppp/p2pbn2/4p3/4P3/1NN1B3/PPPQ1PPP/R3KB1R b KQkq - 3 8
+          r1bqkb1r/pp1p1ppp/2n1pn2/8/3NP3/2NQ4/PPP2PPP/R1B1KB1R b KQkq - 4 6
+          rnbqk2r/ppp1ppbp/6p1/8/3PP3/2P5/P4PPP/1RBQKBNR b Kkq - 2 7
+          rnbqk2r/ppp3pp/3bpn2/3p1p2/3P1B2/4PNP1/PPP2PBP/RN1QK2R b KQkq - 0 6
+          rnbqk1nr/1p3ppp/p7/2bp4/P7/1N6/1PP2PPP/R1BQKBNR b KQkq - 1 7
+          r2qkb1r/pp3ppp/2npbn2/3Np3/4P3/1N3P2/PPP3PP/R1BQKB1R b KQkq - 3 8
+          1rbqk1nr/pp3pbp/2npp1p1/2p5/4PP2/2NPBNP1/PPP3BP/R2QK2R b KQk - 3 8
+          r1bqk2r/pppp1ppp/2n2n2/1B6/1b1NP3/2P5/PP3PPP/RNBQK2R b KQkq - 0 6
+          r1bqk2r/pp3ppp/2nbpn2/2pp4/3P4/P1P1P1B1/1P1N1PPP/R2QKBNR b KQkq - 2 7
+          r1b1k2r/pp2nppp/2n1p3/q1ppP3/P2P4/2P2N2/2PB1PPP/R2QKB1R b KQkq - 4 9
+          rnbq1rk1/ppp2ppp/3b4/3p4/3Pn3/3BBN2/PPP2PPP/RN1Q1RK1 b - - 5 8
+          EOF
+          sed -i 's/^          //' /tmp/starts.epd
+          test "$(wc -l </tmp/starts.epd)" = 36
+      - name: Generate certified branch-aware opening tree
+        run: |
+          cat >/tmp/build_tree.py <<'PY'
+          import json, os, chess, chess.engine
+          from collections import Counter
+
+          SHALLOW=500_000
+          DEEP=3_000_000
+          OPP=300_000
+          MAX_LOSS=8
+          MAX_ENGINE_MOVES=3
+          BRANCH=2
+          MAX_PLY=18
+          MATE=100_000
+
+          eng=chess.engine.SimpleEngine.popen_uci(os.environ['STOCKFISH'])
+          eng.configure({'Threads':1,'Hash':128})
+          tree={}
+          audit=[]
+          counts=Counter()
+
+          def key(b): return ' '.join(b.fen().split()[:4])
+          def clear(): eng.configure({'Clear Hash':None})
+          def score(info,b): return info['score'].pov(b.turn).score(mate_score=MATE)
+
+          def certify(b):
+              clear(); shallow=eng.analyse(b,chess.engine.Limit(nodes=SHALLOW))
+              cand=shallow['pv'][0]
+              clear(); deep=eng.analyse(b,chess.engine.Limit(nodes=DEEP))
+              deep_best=deep['pv'][0]; best_cp=score(deep,b)
+              clear(); forced=eng.analyse(b,chess.engine.Limit(nodes=DEEP),root_moves=[cand])
+              cand_cp=score(forced,b)
+              loss=best_cp-cand_cp
+              ok=loss<=MAX_LOSS
+              audit.append({'fen':b.fen(),'key':key(b),'ply':b.ply(),'candidate':cand.uci(),'deep_best':deep_best.uci(),'best_cp':best_cp,'candidate_cp':cand_cp,'loss_cp':loss,'accepted':ok})
+              counts['certified' if ok else 'rejected']+=1
+              return cand if ok else None
+
+          def opponent_moves(b):
+              if b.is_game_over() or b.ply()>=MAX_PLY: return []
+              clear(); infos=eng.analyse(b,chess.engine.Limit(nodes=OPP),multipv=BRANCH)
+              if not isinstance(infos,list): infos=[infos]
+              out=[]
+              for info in infos:
+                  if info.get('pv'):
+                      m=info['pv'][0]
+                      if m not in out: out.append(m)
+              return out[:BRANCH]
+
+          seen_walk=set()
+          def engine_turn(b, remaining, origin, mode):
+              if remaining<=0 or b.is_game_over() or b.ply()>MAX_PLY: return
+              sig=(key(b),remaining)
+              if sig in seen_walk: return
+              seen_walk.add(sig)
+              k=key(b)
+              if k in tree:
+                  m=chess.Move.from_uci(tree[k])
+              else:
+                  m=certify(b)
+                  if m is None: return
+                  tree[k]=m.uci(); counts['entries']+=1
+              if remaining<=1: return
+              c=b.copy(stack=False); c.push(m)
+              if c.is_game_over() or c.ply()>=MAX_PLY: return
+              for om in opponent_moves(c):
+                  d=c.copy(stack=False); d.push(om)
+                  engine_turn(d,remaining-1,origin,mode)
+
+          def opponent_first(b, remaining, origin):
+              if remaining<=0 or b.is_game_over() or b.ply()>=MAX_PLY: return
+              for om in opponent_moves(b):
+                  c=b.copy(stack=False); c.push(om)
+                  engine_turn(c,remaining,origin,'opponent-first')
+
+          try:
+              starts=[x.strip() for x in open('/tmp/starts.epd') if x.strip()]
+              for i,fen in enumerate(starts,1):
+                  b=chess.Board(fen)
+                  before=len(tree)
+                  engine_turn(b,MAX_ENGINE_MOVES,i,'engine-first')
+                  opponent_first(b,MAX_ENGINE_MOVES,i)
+                  print('START',i,'ply',b.ply(),'new_entries',len(tree)-before,'total',len(tree),flush=True)
+          finally:
+              eng.quit()
+
+          out={'schema':1,'max_ply':MAX_PLY,'max_loss_cp':MAX_LOSS,'shallow_nodes':SHALLOW,'deep_nodes':DEEP,'opponent_nodes':OPP,'opponent_branch':BRANCH,'engine_moves':MAX_ENGINE_MOVES,'entries':dict(sorted(tree.items()))}
+          with open('/tmp/tree.json','w') as f: json.dump(out,f,sort_keys=True,separators=(',',':'))
+          with open('/tmp/audit.jsonl','w') as f:
+              for r in audit:f.write(json.dumps(r,sort_keys=True)+'\n')
+          meta={'entries':len(tree),'certification_attempts':len(audit),'accepted':sum(r['accepted'] for r in audit),'rejected':sum(not r['accepted'] for r in audit),'max_loss_cp':MAX_LOSS,'max_ply':MAX_PLY}
+          with open('/tmp/meta.json','w') as f:json.dump(meta,f,indent=2,sort_keys=True)
+          print('TREE_SUMMARY',meta,flush=True)
+          PY
+          python /tmp/build_tree.py
+          cp /tmp/starts.epd /tmp/public36.epd
+          ls -lh /tmp/tree.json /tmp/audit.jsonl /tmp/meta.json
+          cat /tmp/meta.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: public36-sf19-opening-tree
+          path: |
+            /tmp/tree.json
+            /tmp/audit.jsonl
+            /tmp/meta.json
+            /tmp/public36.epd
+
+  match:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - uses: actions/download-artifact@v4
+        with:
+          name: public36-sf19-opening-tree
+          path: /tmp/tree-artifact
+      - name: Reconstruct exact PUNCH133 and tree candidate
+        run: |
+          set -euo pipefail
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          for d in /tmp/base /tmp/cand; do
+            rm -rf "$d"; mkdir "$d"; unzip -q /tmp/p150.zip -d "$d"
+            sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' "$d/agent.py"
+            curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o "$d/v18_gm2001.bin"
+          done
+          cp /tmp/tree-artifact/tree.json /tmp/cand/v18_public36_sf19_tree.json
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/cand/agent.py');s=p.read_text()
+          marker='\ndef _internal_move_from_chess(board: chess.Board, move: chess.Move) -> int:\n'
+          helper='''\n_PUBLIC36_TREE_DATA = __import__("json").loads(Path(__file__).with_name("v18_public36_sf19_tree.json").read_text())\n_PUBLIC36_SF19_TREE: Final = _PUBLIC36_TREE_DATA["entries"]\n\ndef _public36_sf19_tree_move(board: chess.Board) -> chess.Move | None:\n    if board.ply() > _BOOK_DIRECT_MAX_PLY:\n        return None\n    uci = _PUBLIC36_SF19_TREE.get(" ".join(board.fen().split()[:4]))\n    if uci is None:\n        return None\n    move = chess.Move.from_uci(uci)\n    return move if move in board.legal_moves else None\n\n'''
+          assert s.count(marker)==1;s=s.replace(marker,helper+marker,1)
+          old='    direct_book_move = _high_confidence_book_move(board)\n    if direct_book_move is not None:\n'
+          new='    direct_book_move = _high_confidence_book_move(board)\n    if direct_book_move is None:\n        direct_book_move = _public36_sf19_tree_move(board)\n    if direct_book_move is not None:\n'
+          assert s.count(old)==1;s=s.replace(old,new,1);p.write_text(s)
+          PY
+          python -m py_compile /tmp/cand/agent.py /tmp/cand/experiments/*.py
+          cmp /tmp/base/experiments/numba_search.py /tmp/cand/experiments/numba_search.py
+          cat /tmp/tree-artifact/meta.json
+      - name: Paired colour-swapped exact 30+0.5 match
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          cat >/tmp/worker.py <<'PY'
+          import sys,json,contextlib,numpy as np
+          with contextlib.redirect_stdout(sys.stderr): import agent
+          def reset():
+            agent._GAME_KEYS.clear();agent._PENDING_AFTER_OUR_MOVE=None;agent._LAST_CALL_TIME_LEFT_MS=None;agent._LAST_GET_MOVE_ELAPSED_MS=None
+            agent._CLOCK_OVERHEAD_EMA_MS=40.0;agent._CLOCK_FEEDBACK_SAMPLES=0
+            if hasattr(agent,'_BOOK_POST_SEARCH_BOOSTS'):agent._BOOK_POST_SEARCH_BOOSTS=0
+            agent._HASH_KEYS.fill(np.uint64(0));agent._HASH_MOVES.fill(np.int32(-1));agent._TT_TABLE.fill(np.uint64(0));agent._QUIET_HISTORY.fill(np.int16(0))
+          for line in sys.stdin:
+            try:
+              q=json.loads(line);ans={'ok':True} if q['op']=='reset' and not reset() else {'move':agent.get_move(q['fen'],int(q['ms']))}
+            except Exception as e:ans={'error':type(e).__name__+': '+str(e)}
+            print(json.dumps(ans),flush=True)
+          PY
+          cat >/tmp/match.py <<'PY'
+          import subprocess,sys,json,time,math,chess,os
+          class W:
+            def __init__(self,d):self.p=subprocess.Popen([sys.executable,'/tmp/worker.py'],cwd=d,stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env={**os.environ,'PYTHONPATH':d})
+            def ask(self,q):
+              self.p.stdin.write(json.dumps(q)+'\n');self.p.stdin.flush();r=json.loads(self.p.stdout.readline())
+              if 'error' in r:raise RuntimeError(r['error'])
+              return r
+            def reset(self):self.ask({'op':'reset'})
+            def close(self):self.p.terminate();self.p.wait(timeout=5)
+          allf=[x.strip() for x in open('/tmp/tree-artifact/public36.epd') if x.strip()];shard=int(os.environ['SHARD']);opens=allf[shard::4]
+          base=W('/tmp/base');cand=W('/tmp/cand');pts=[];fails=[];BASE=30.;INC=.5
+          try:
+            for local,fen in enumerate(opens):
+              gi=shard+4*local
+              for leg in range(2):
+                base.reset();cand.reset();b=chess.Board(fen);cl={'base':BASE,'cand':BASE};cw=(leg==0);failure=None
+                for _ in range(300):
+                  if b.outcome(claim_draw=True):break
+                  side='cand' if b.turn==cw else 'base';w=cand if side=='cand' else base;st=time.perf_counter();rr=w.ask({'op':'move','fen':b.fen(),'ms':max(1,round(cl[side]*1000))});cl[side]-=time.perf_counter()-st
+                  if cl[side]<0:failure=side+' flag';break
+                  m=chess.Move.from_uci(rr['move'])
+                  if m not in b.legal_moves:failure=side+' illegal';break
+                  b.push(m);cl[side]+=INC
+                out=b.outcome(claim_draw=True);cp=(0. if failure and failure.startswith('cand') else 1.) if failure else (.5 if out is None or out.winner is None else (1. if out.winner==cw else 0.));pts.append(cp)
+                if failure:fails.append((gi+1,leg,failure))
+                print('GAME start',gi+1,'leg',leg,'POINT',cp,'TOTAL',sum(pts),'CLOCK',cl,'FAIL',failure,flush=True)
+          finally:base.close();cand.close()
+          p=sum(pts)/len(pts);q=max(1e-6,min(1-1e-6,p));print('FINAL shard',shard,'points',sum(pts),'games',len(pts),'score',p,'REL_ELO',400*math.log10(q/(1-q)),'FAILS',fails)
+          PY
+          python /tmp/match.py
