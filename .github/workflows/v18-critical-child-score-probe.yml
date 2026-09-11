@@ -1,0 +1,50 @@
+name: V18 critical child score probe
+
+on:
+  push:
+    branches: [analysis/v18-root-quality-fastfilter-20260911]
+    paths: ['.github/workflows/v18-critical-child-score-probe.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Build SEE engine
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/engine; mkdir -p /tmp/engine
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          unzip -q /tmp/p150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+          curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/engine/v18_gm2001.bin
+          python scripts/apply_v18_see_capture_ordering.py /tmp/engine/experiments/numba_search.py
+          python -m py_compile /tmp/engine/agent.py /tmp/engine/experiments/numba_search.py
+      - name: Compare forced child scores
+        env:
+          PYTHONPATH: /tmp/engine
+        run: |
+          python - <<'PY'
+          import chess, numpy as np
+          import agent
+          from experiments.numba_core import encode_position
+          from experiments.numba_search import iterative_search_stateful
+          fen='rn1r2k1/ppq2ppp/2b1pn2/6B1/1b1P4/1BNQ1N1P/PP3PP1/R4RK1 b - - 8 13'
+          root=chess.Board(fen)
+          for nodes in (50_000, 200_000, 1_000_000, 5_000_000):
+              print('BUDGET',nodes,flush=True)
+              for uci in ('h7h6','b8d7'):
+                  b=root.copy(stack=False); m=chess.Move.from_uci(uci); assert m in b.legal_moves; b.push(m)
+                  e=encode_position(b)
+                  bm, child_score, depth, used=iterative_search_stateful(e.board,e.side,e.castling,e.ep_square,b.halfmove_clock,np.empty(0,dtype=np.uint64),0,nodes)
+                  print('FORCED',uci,'root_score',-int(child_score),'child_score',int(child_score),'depth',int(depth),'nodes',int(used),flush=True)
+          print('GET_MOVE',agent.get_move(fen,122968),flush=True)
+          PY
