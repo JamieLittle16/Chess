@@ -3,7 +3,9 @@ name: V18 classical-root seed filter
 on:
   push:
     branches: [analysis/v18-root-quality-fastfilter-20260911]
-    paths: ['.github/workflows/v18-classical-root-seed-filter.yml']
+    paths:
+      - '.github/workflows/v18-classical-root-seed-filter.yml'
+      - 'scripts/apply_v18_classical_root_seed.py'
   workflow_dispatch:
 
 permissions:
