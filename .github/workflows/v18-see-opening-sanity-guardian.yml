@@ -1,0 +1,210 @@
+name: V18 SEE opening sanity guardian
+
+on:
+  push:
+    branches: [analysis/v18-see-opening-sanity-guardian-20260911]
+
+permissions:
+  contents: read
+
+jobs:
+  paired:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Build exact SEE baseline and generic guardian
+        run: |
+          set -euo pipefail
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          for d in /tmp/base /tmp/cand; do
+            rm -rf "$d"; mkdir "$d"; unzip -q /tmp/p150.zip -d "$d"
+            sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' "$d/agent.py"
+            curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o "$d/v18_gm2001.bin"
+            python scripts/apply_v18_see_capture_ordering.py "$d/experiments/numba_search.py"
+          done
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/cand/agent.py'); s=p.read_text()
+          marker='\ndef _internal_move_from_chess(board: chess.Board, move: chess.Move) -> int:\n'
+          helper=r'''
+
+_OPENING_GUARD_VALUE: Final = {
+    chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3,
+    chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 100,
+}
+
+
+def _opening_guard_safe_destination(board: chess.Board, move: chess.Move) -> bool:
+    b = board.copy(stack=False)
+    b.push(move)
+    moved_sq = move.to_square
+    opponent = b.turn
+    return not b.is_attacked_by(opponent, moved_sq)
+
+
+def _opening_guard_long_castle_exposed(board: chess.Board, move: chess.Move) -> bool:
+    if not board.is_queenside_castling(move):
+        return False
+    us = board.turn
+    pawn_rank = 1 if us == chess.WHITE else 6
+    cover = 0
+    for file_index in (1, 2, 3):
+        sq = chess.square(file_index, pawn_rank)
+        if board.piece_type_at(sq) == chess.PAWN and board.color_at(sq) == us:
+            cover += 1
+    return cover < 2
+
+
+def _opening_sanity_prior(board: chess.Board, baseline: chess.Move | None) -> chess.Move | None:
+    """Generic early root-ordering guardian. Never returns a score or bypasses search."""
+    if board.ply() > 22 or board.is_check():
+        return baseline
+    us = board.turn
+    them = not us
+
+    # If a non-pawn piece is attacked by an equal/lower-value piece, first inspect safe escapes.
+    best_escape = None
+    best_escape_score = -1
+    for sq, piece in board.piece_map().items():
+        if piece.color != us or piece.piece_type in (chess.PAWN, chess.KING):
+            continue
+        attackers = board.attackers(them, sq)
+        if not attackers:
+            continue
+        victim_value = _OPENING_GUARD_VALUE[piece.piece_type]
+        min_attacker = min(_OPENING_GUARD_VALUE[board.piece_type_at(a)] for a in attackers)
+        if min_attacker > victim_value:
+            continue
+        for move in board.legal_moves:
+            if move.from_square != sq:
+                continue
+            if not _opening_guard_safe_destination(board, move):
+                continue
+            captured = board.piece_type_at(move.to_square)
+            score = 100 + 8 * victim_value
+            if captured is not None:
+                score += 5 * _OPENING_GUARD_VALUE[captured]
+            if score > best_escape_score:
+                best_escape_score = score
+                best_escape = move
+    if best_escape is not None:
+        return best_escape
+
+    # Suppress a root prior to long-castle when the b/c/d pawn cover is already stripped.
+    if baseline is not None and _opening_guard_long_castle_exposed(board, baseline):
+        baseline = None
+
+    legal_castles = [m for m in board.legal_moves if board.is_castling(m)]
+    if legal_castles:
+        safe_castles = [m for m in legal_castles if not _opening_guard_long_castle_exposed(board, m)]
+        # A legal short castle is a strong root hint when no sounder book prior exists.
+        if baseline is None and safe_castles:
+            short = [m for m in safe_castles if board.is_kingside_castling(m)]
+            return short[0] if short else safe_castles[0]
+        # Never prefer a non-castling king walk over a legal, covered castle.
+        if baseline is not None and board.piece_type_at(baseline.from_square) == chess.KING and not board.is_castling(baseline) and safe_castles:
+            short = [m for m in safe_castles if board.is_kingside_castling(m)]
+            return short[0] if short else safe_castles[0]
+
+    if baseline is not None:
+        return baseline
+
+    # On true book misses, pay obvious development debt before inventing flank pawn moves.
+    home_rank = 0 if us == chess.WHITE else 7
+    best_dev = None
+    best_dev_score = -1
+    for move in board.legal_moves:
+        pt = board.piece_type_at(move.from_square)
+        if pt not in (chess.KNIGHT, chess.BISHOP):
+            continue
+        if chess.square_rank(move.from_square) != home_rank or chess.square_rank(move.to_square) == home_rank:
+            continue
+        if not _opening_guard_safe_destination(board, move):
+            continue
+        center = 3 - min(abs(chess.square_file(move.to_square) - 3), abs(chess.square_file(move.to_square) - 4))
+        score = 30 + center
+        if board.gives_check(move):
+            score += 8
+        if score > best_dev_score:
+            best_dev_score = score
+            best_dev = move
+    return best_dev
+'''
+          assert s.count(marker)==1; s=s.replace(marker,helper+marker,1)
+          old='    book_move = _book_prior(board)\n    root_prior_move = -1 if book_move is None else _internal_move_from_chess(board, book_move)\n'
+          new='    book_move = _opening_sanity_prior(board, _book_prior(board))\n    root_prior_move = -1 if book_move is None else _internal_move_from_chess(board, book_move)\n'
+          assert s.count(old)==1; p.write_text(s.replace(old,new,1))
+          PY
+          python -m py_compile /tmp/base/agent.py /tmp/base/experiments/numba_search.py /tmp/cand/agent.py /tmp/cand/experiments/numba_search.py
+      - name: Reconstruct 18-start screen
+        run: |
+          set -euo pipefail
+          cat match/benchmarks/top-engine-recent-20260911/chunk_00.b64 match/benchmarks/top-engine-recent-20260911/chunk_01.b64 match/benchmarks/top-engine-recent-20260911/chunk_02.b64 match/benchmarks/top-engine-recent-20260911/chunk_03a.b64 match/benchmarks/top-engine-recent-20260911/chunk_03b.b64 match/benchmarks/top-engine-recent-20260911/chunk_03c.b64 match/benchmarks/top-engine-recent-20260911/chunk_03d.b64 match/benchmarks/top-engine-recent-20260911/chunk_04.b64 | base64 -d | gzip -dc > /tmp/recent.pgn
+          echo 'dbac26e0f2b451eb7bf80994ca48fdd6b1abbc9f133e528d3e968f007f7aa264  /tmp/recent.pgn' | sha256sum -c -
+          python - <<'PY'
+          import chess.pgn
+          seen=[];keys=set()
+          with open('/tmp/recent.pgn',encoding='utf-8') as f:
+              while True:
+                  g=chess.pgn.read_game(f)
+                  if g is None: break
+                  x=g.board().fen()
+                  if x not in keys: keys.add(x); seen.append(x)
+          assert len(seen)==36
+          screen=seen[::2]; assert len(screen)==18
+          open('/tmp/starts.epd','w').write('\n'.join(screen)+'\n')
+          PY
+      - name: Paired exact 30+0.5
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          cat >/tmp/worker.py <<'PY'
+          import contextlib,json,sys,numpy as np
+          with contextlib.redirect_stdout(sys.stderr):import agent
+          def reset():
+              agent._GAME_KEYS.clear();agent._PENDING_AFTER_OUR_MOVE=None;agent._LAST_CALL_TIME_LEFT_MS=None;agent._LAST_GET_MOVE_ELAPSED_MS=None;agent._CLOCK_OVERHEAD_EMA_MS=40.0;agent._CLOCK_FEEDBACK_SAMPLES=0
+              if hasattr(agent,'_BOOK_POST_SEARCH_BOOSTS'):agent._BOOK_POST_SEARCH_BOOSTS=0
+              agent._HASH_KEYS.fill(np.uint64(0));agent._HASH_MOVES.fill(np.int32(-1));agent._TT_TABLE.fill(np.uint64(0));agent._QUIET_HISTORY.fill(np.int16(0))
+          for line in sys.stdin:
+              try:
+                  q=json.loads(line)
+                  if q['op']=='reset':reset();r={'ok':1}
+                  else:r={'move':agent.get_move(q['fen'],int(q['ms']))}
+              except Exception as e:r={'error':type(e).__name__+': '+str(e)}
+              print(json.dumps(r),flush=True)
+          PY
+          cat >/tmp/match.py <<'PY'
+          import chess,json,math,os,subprocess,sys,time
+          class W:
+              def __init__(self,d):self.p=subprocess.Popen([sys.executable,'/tmp/worker.py'],cwd=d,stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env={**os.environ,'PYTHONPATH':d})
+              def ask(self,q):self.p.stdin.write(json.dumps(q)+'\n');self.p.stdin.flush();r=json.loads(self.p.stdout.readline());assert 'error' not in r,r;return r
+              def reset(self):self.ask({'op':'reset'})
+              def close(self):self.p.terminate();self.p.wait(timeout=5)
+          allf=[x.strip() for x in open('/tmp/starts.epd') if x.strip()];sh=int(os.environ['SHARD']);starts=allf[sh::4]
+          base=W('/tmp/base');cand=W('/tmp/cand');pts=[];fails=[];BASE=30.;INC=.5
+          try:
+              for fen in starts:
+                  for leg in range(2):
+                      base.reset();cand.reset();b=chess.Board(fen);cl={'base':BASE,'cand':BASE};cw=(leg==0);failure=None
+                      for _ in range(300):
+                          if b.outcome(claim_draw=True):break
+                          side='cand' if b.turn==cw else 'base';w=cand if side=='cand' else base;st=time.perf_counter();rr=w.ask({'op':'move','fen':b.fen(),'ms':max(1,round(cl[side]*1000))});cl[side]-=time.perf_counter()-st
+                          if cl[side]<0:failure=side+' flag';break
+                          m=chess.Move.from_uci(rr['move'])
+                          if m not in b.legal_moves:failure=side+' illegal';break
+                          b.push(m);cl[side]+=INC
+                      out=b.outcome(claim_draw=True);cp=(0. if failure and failure.startswith('cand') else 1.) if failure else (.5 if out is None or out.winner is None else (1. if out.winner==cw else 0.));pts.append(cp)
+                      if failure:fails.append(failure)
+                      print('GAME point',cp,'TOTAL',sum(pts),'failure',failure,flush=True)
+          finally:base.close();cand.close()
+          p=sum(pts)/len(pts);q=max(1e-6,min(1-1e-6,p));print('FINAL shard',sh,'points',sum(pts),'games',len(pts),'score',p,'REL_ELO',400*math.log10(q/(1-q)),'FAILS',fails)
+          PY
+          python /tmp/match.py
