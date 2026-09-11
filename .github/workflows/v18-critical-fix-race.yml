@@ -1,0 +1,69 @@
+name: V18 critical fix race
+
+on:
+  push:
+    branches: [analysis/v18-root-quality-fastfilter-20260911]
+    paths: ['.github/workflows/v18-critical-fix-race.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [see, nonull, nofutility, nolmr, reg2, reg3, reg4]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Build candidate
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/engine; mkdir -p /tmp/engine
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          unzip -q /tmp/p150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+          curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/engine/v18_gm2001.bin
+          python scripts/apply_v18_see_capture_ordering.py /tmp/engine/experiments/numba_search.py
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          v=os.environ['VARIANT']; p=Path('/tmp/engine/experiments/numba_search.py'); s=p.read_text()
+          if v == 'nonull':
+              old='''    if (\n        depth >= NULL_MIN_DEPTH\n        and scout_node\n'''; new='''    if (\n        False\n        and depth >= NULL_MIN_DEPTH\n        and scout_node\n'''; assert s.count(old)==1; s=s.replace(old,new,1)
+          elif v == 'nofutility':
+              old='''    if (\n        depth <= 3\n        and beta == alpha + 1\n'''; new='''    if (\n        False\n        and depth <= 3\n        and beta == alpha + 1\n'''; assert s.count(old)==1; s=s.replace(old,new,1)
+          elif v == 'nolmr':
+              old='''        reduction = (\n            _history_adjusted_lmr_reduction(depth, index, move_history_score)\n            if lmr_candidate else 0\n        )\n'''; new=old+'''        reduction = 0\n'''; assert s.count(old)==1; s=s.replace(old,new,1)
+          p.write_text(s)
+          PY
+          if [[ "$VARIANT" == reg2 || "$VARIANT" == reg3 || "$VARIANT" == reg4 ]]; then
+            python scripts/apply_v18_root_value.py /tmp/engine/experiments/numba_search.py 4
+            D="${VARIANT#reg}"
+            python scripts/apply_v18_root_static_regularizer.py /tmp/engine/experiments/numba_search.py "$D"
+          fi
+          python -m py_compile /tmp/engine/agent.py /tmp/engine/experiments/numba_search.py
+      - name: Critical probe
+        env:
+          VARIANT: ${{ matrix.variant }}
+          PYTHONPATH: /tmp/engine
+        run: |
+          python - <<'PY'
+          import os,time,numpy as np
+          import agent
+          fen='rn1r2k1/ppq2ppp/2b1pn2/6B1/1b1P4/1BNQ1N1P/PP3PP1/R4RK1 b - - 8 13'
+          def reset():
+              agent._GAME_KEYS.clear(); agent._PENDING_AFTER_OUR_MOVE=None; agent._LAST_CALL_TIME_LEFT_MS=None; agent._LAST_GET_MOVE_ELAPSED_MS=None
+              agent._HASH_KEYS.fill(np.uint64(0)); agent._HASH_MOVES.fill(np.int32(-1)); agent._TT_TABLE.fill(np.uint64(0)); agent._QUIET_HISTORY.fill(np.int16(0))
+          for ms in (122968,240000):
+              reset(); t=time.perf_counter(); m=agent.get_move(fen,ms); dt=time.perf_counter()-t
+              print('FIX_RACE',os.environ['VARIANT'],'clock',ms,'move',m,'seconds',round(dt,3),flush=True)
+          PY
