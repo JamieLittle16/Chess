@@ -1,0 +1,56 @@
+name: V18 ROOT-VALUE4 cold-TT qualification
+on:
+  push:
+    branches: [analysis/v18-benchmark-driven-search-audit-20260911]
+    paths: [.github/workflows/v18-rootvalue4-coldtt.yml]
+  workflow_dispatch:
+permissions: {contents: read}
+jobs:
+  bench:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ['Ryan Vincent', 'Emile Andrieu', 'Lightning Tree']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Reconstruct exact PUNCH133 plus ROOT-VALUE4
+        run: |
+          set -euo pipefail
+          (for f in match/benchmarks/top-engine-recent-20260911/chunk_*.b64; do base64 -d "$f"; done) | gzip -dc > /tmp/top.pgn
+          echo 'dbac26e0f2b451eb7bf80994ca48fdd6b1abbc9f133e528d3e968f007f7aa264  /tmp/top.pgn' | sha256sum -c -
+          rm -rf /tmp/engine /tmp/out; mkdir -p /tmp/engine /tmp/out
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip; unzip -q /tmp/p150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+          curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/engine/v18_gm2001.bin
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/engine/experiments/numba_search.py'); s=p.read_text()
+          old='''    _order_moves_with_killers(\n        board, moves, count, preferred, score_stack[0], -1, -1, side, -1, quiet_history\n    )\n\n    _pick_next_scored_move(moves, score_stack[0], 0, count)'''
+          new='''    _order_moves_with_killers(\n        board, moves, count, preferred, score_stack[0], -1, -1, side, -1, quiet_history\n    )\n    root_static = _evaluate_state(side, eval_stack[0])\n    for policy_index in range(count):\n        packed_policy = int(score_stack[0, policy_index])\n        if (packed_policy & 2) == 0 and int(moves[policy_index]) != preferred:\n            policy_move = int(moves[policy_index])\n            _advance_eval_state_into(board, side, policy_move, eval_stack[0], eval_stack[1])\n            child_static = -_evaluate_state(-side, eval_stack[1])\n            policy_delta = child_static - root_static\n            if policy_delta > 300: policy_delta = 300\n            elif policy_delta < -300: policy_delta = -300\n            score_stack[0, policy_index] = ((packed_policy >> 2) + policy_delta * 4) * 4 + (packed_policy & 3)\n\n    _pick_next_scored_move(moves, score_stack[0], 0, count)'''
+          assert s.count(old)==1; p.write_text(s.replace(old,new,1))
+          p=Path('scripts/stockfish_lab.py'); s=p.read_text()
+          old='        root_moves = None if root_move is None else [root_move]\n        info = self.engine.analyse(\n'
+          new='        root_moves = None if root_move is None else [root_move]\n        if "Clear Hash" in self.engine.options:\n            self.engine.configure({"Clear Hash": None})\n        info = self.engine.analyse(\n'
+          assert s.count(old)==1; p.write_text(s.replace(old,new,1))
+          PY
+          python -m py_compile /tmp/engine/agent.py /tmp/engine/experiments/*.py
+      - name: Fetch verified Stockfish 19
+        run: |
+          mkdir /tmp/sf; curl -L --fail --retry 3 -sS -o /tmp/sf.tgz https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  /tmp/sf.tgz' | sha256sum -c -
+          tar -xzf /tmp/sf.tgz -C /tmp/sf; SF=$(find /tmp/sf -type f -name 'stockfish*' | head -1); chmod +x "$SF"; echo "SF=$SF" >> "$GITHUB_ENV"
+      - name: 48-position cold-TT benchmark
+        run: |
+          PYTHONPATH=scripts python scripts/v18_competitor_move_benchmark_v2.py --pgn /tmp/top.pgn --engine-dir /tmp/engine --stockfish "$SF" --target '${{ matrix.target }}' --positions 48 --nodes 200000 --threads 1 --hash-mb 64 --pairwise-margin-cp 8 --seed 20260911 --output-dir /tmp/out
+          python - <<'PY'
+          import json
+          x=json.load(open('/tmp/out/summary.json')); print('ROOT4_COLD_RESULT','${{ matrix.target }}','cpl',x['candidate']['mean_cp_loss'],'hist',x['historical']['mean_cp_loss'],'pair',x['pairwise']['score'],'sfmatch',x['candidate']['best_move_match_rate'],'mist80',x['candidate']['mistakes_cp_ge_80'],'blund150',x['candidate']['blunders_cp_ge_150'])
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: {name: 'rootvalue4-cold-${{ matrix.target }}', path: /tmp/out, retention-days: 3}
