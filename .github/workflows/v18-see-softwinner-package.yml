@@ -1,0 +1,60 @@
+name: V18 SEE soft-winner candidate package
+
+on:
+  push:
+    branches: [analysis/v18-see-ordering-scratch-20260911]
+    paths: ['.github/workflows/v18-see-softwinner-package.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Build exact candidate
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/leader; mkdir /tmp/leader
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          unzip -q /tmp/p150.zip -d /tmp/leader
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/leader/agent.py
+          python scripts/apply_v18_see_capture_ordering.py /tmp/leader/experiments/numba_search.py
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/leader/agent.py');s=p.read_text()
+          # Intentionally reproduce the exact transform that won the prior A/B.
+          assert s.count('soft_fraction = 0.58') == 1
+          assert s.count('soft_fraction = 0.64') == 1
+          s=s.replace('soft_fraction = 0.58','soft_fraction = 0.64',1)
+          s=s.replace('soft_fraction = 0.64','soft_fraction = 0.70',1)
+          p.write_text(s)
+          assert s.count('soft_fraction = 0.70') == 1
+          assert s.count('soft_fraction = 0.64') == 1
+          print('EXACT_PRIOR_WINNING_SOFT_TRANSFORM_OK')
+          PY
+          curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/leader/v18_gm2001.bin
+          python -m py_compile /tmp/leader/agent.py /tmp/leader/experiments/*.py
+          (cd /tmp/leader && python - <<'PY'
+          import agent
+          assert agent._ENGINE_READY
+          print('CANDIDATE_READY')
+          PY
+          )
+          find /tmp/leader -type d -name __pycache__ -prune -exec rm -rf {} +
+          cd /tmp/leader
+          zip -q -r /tmp/Little-Gambit-V18-PUNCH133-SEE-SOFTWIN-CANDIDATE.zip .
+          unzip -t /tmp/Little-Gambit-V18-PUNCH133-SEE-SOFTWIN-CANDIDATE.zip
+          sha256sum /tmp/Little-Gambit-V18-PUNCH133-SEE-SOFTWIN-CANDIDATE.zip | tee /tmp/SHA256.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Little-Gambit-V18-PUNCH133-SEE-SOFTWIN-CANDIDATE
+          path: |
+            /tmp/Little-Gambit-V18-PUNCH133-SEE-SOFTWIN-CANDIDATE.zip
+            /tmp/SHA256.txt
+          if-no-files-found: error
+          retention-days: 7
