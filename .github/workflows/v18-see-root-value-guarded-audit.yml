@@ -1,0 +1,122 @@
+name: V18 guarded ROOT-VALUE opening audit
+
+on:
+  push:
+    branches: [analysis/v18-see-root-value-guarded-audit-20260911]
+    paths:
+      - '.github/workflows/v18-see-root-value-guarded-audit.yml'
+      - 'scripts/apply_v18_root_value_guarded.py'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [depth2, depth4cap80, globalcap40]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Fetch certified tree and baseline opening records
+        uses: actions/download-artifact@v4
+        with:
+          pattern: swiss-tree-v2-*
+          path: /tmp/trees
+          merge-multiple: true
+          repository: JamieLittle16/Chess
+          run-id: 34554618285
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: repair80-*
+          path: /tmp/repairs
+          merge-multiple: true
+          repository: JamieLittle16/Chess
+          run-id: 34578886557
+          github-token: ${{ github.token }}
+      - name: Merge exact opening metadata
+        run: |
+          python - <<'PY'
+          import glob,json
+          entries={}; ply={}; baseline={}; gm=set()
+          for p in sorted(glob.glob('/tmp/trees/tree-*.json')):
+              d=json.load(open(p))
+              for k,v in d['entries'].items():
+                  if k in entries: assert entries[k]==v
+                  entries[k]=v
+              for a in d['audit']:
+                  if a['stable'] and a['key'] in entries:
+                      if a['key'] in ply: assert ply[a['key']]==a['ply']
+                      ply[a['key']]=int(a['ply'])
+          for p in sorted(glob.glob('/tmp/repairs/repair-*.json')):
+              for r in json.load(open(p))['records']:
+                  k=r['key']
+                  if r.get('skip')=='gm_direct': gm.add(k); continue
+                  if r.get('skip')=='agree': baseline[k]=0
+                  else: baseline[k]=max(0,int(r['delta']))
+          assert len(entries)==170 and len(ply)==170 and len(baseline)+len(gm)==170
+          json.dump({'entries':entries,'ply':ply,'baseline':baseline,'gm':sorted(gm)},open('/tmp/meta.json','w'),sort_keys=True,separators=(',',':'))
+          print('BASE positions',len(baseline),'loss',sum(baseline.values()),'ge35',sum(v>=35 for v in baseline.values()),'ge80',sum(v>=80 for v in baseline.values()))
+          PY
+      - name: Build exact SEE candidate
+        env:
+          ROOT_VALUE_VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          rm -rf /tmp/cand; mkdir /tmp/cand; unzip -q /tmp/p150.zip -d /tmp/cand
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/cand/agent.py
+          curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/cand/v18_gm2001.bin
+          python scripts/apply_v18_see_capture_ordering.py /tmp/cand/experiments/numba_search.py
+          python scripts/apply_v18_root_value_guarded.py /tmp/cand/experiments/numba_search.py
+          python -m py_compile /tmp/cand/agent.py /tmp/cand/experiments/numba_search.py
+      - name: Fetch Stockfish 19
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 3 -o /tmp/sf19.tgz https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  /tmp/sf19.tgz' | sha256sum -c -
+          mkdir /tmp/sf19; tar -xzf /tmp/sf19.tgz -C /tmp/sf19
+          SF=$(find /tmp/sf19 -type f -name 'stockfish*' | head -n1); chmod +x "$SF"; echo "STOCKFISH=$SF" >> "$GITHUB_ENV"
+      - name: Audit all 161 non-direct nodes
+        env:
+          PYTHONPATH: /tmp/cand
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          cat >/tmp/audit.py <<'PY'
+          import contextlib,json,os,sys,chess,chess.engine,numpy as np
+          meta=json.load(open('/tmp/meta.json')); keys=sorted(meta['baseline'])
+          with contextlib.redirect_stdout(sys.stderr): import agent
+          def reset():
+              agent._GAME_KEYS.clear(); agent._PENDING_AFTER_OUR_MOVE=None; agent._LAST_CALL_TIME_LEFT_MS=None; agent._LAST_GET_MOVE_ELAPSED_MS=None; agent._CLOCK_OVERHEAD_EMA_MS=40.; agent._CLOCK_FEEDBACK_SAMPLES=0
+              if hasattr(agent,'_BOOK_POST_SEARCH_BOOSTS'): agent._BOOK_POST_SEARCH_BOOSTS=0
+              agent._HASH_KEYS.fill(np.uint64(0)); agent._HASH_MOVES.fill(np.int32(-1)); agent._TT_TABLE.fill(np.uint64(0)); agent._QUIET_HISTORY.fill(np.int16(0))
+          def board_for(k):
+              p=int(meta['ply'][k]); b=chess.Board(k+' 0 '+str(p//2+1)); assert b.ply()==p; return b
+          def cp(info,turn):
+              x=info['score'].pov(turn).score(mate_score=100000); assert x is not None; return int(x)
+          eng=chess.engine.SimpleEngine.popen_uci(os.environ['STOCKFISH']); eng.configure({'Threads':1,'Hash':64})
+          base_loss=sum(int(meta['baseline'][k]) for k in keys); cand_loss=0; c35=c80=agree=0; regress80=improve80=0; worst=[]
+          try:
+              for i,k in enumerate(keys,1):
+                  b=board_for(k); sf=chess.Move.from_uci(meta['entries'][k]); bl=int(meta['baseline'][k]); reset(); move=agent.search_position(b,30000).move
+                  if move==sf: loss=0; agree+=1
+                  else:
+                      eng.configure({'Clear Hash':None}); infos=eng.analyse(b,chess.engine.Limit(nodes=200000),multipv=2,root_moves=[sf,move]); infos=infos if isinstance(infos,list) else [infos]
+                      scores={x['pv'][0]:cp(x,b.turn) for x in infos if x.get('pv')}; assert sf in scores and move in scores,(k,sf,move,scores)
+                      loss=max(0,scores[sf]-scores[move])
+                  cand_loss+=loss; c35+=loss>=35; c80+=loss>=80; regress80+=(bl<80 and loss>=80); improve80+=(bl>=80 and loss<80)
+                  worst.append((loss-bl,loss,bl,k,sf.uci(),move.uci()))
+                  if i%20==0: print('PROGRESS',os.environ['VARIANT'],i,'/',len(keys),'candLoss',cand_loss,flush=True)
+          finally: eng.quit()
+          worst.sort(reverse=True)
+          print('FINAL_GUARDED',os.environ['VARIANT'],'POSITIONS',len(keys),'BASE_LOSS',base_loss,'CAND_LOSS',cand_loss,'BASE35',sum(int(meta['baseline'][k])>=35 for k in keys),'CAND35',c35,'BASE80',sum(int(meta['baseline'][k])>=80 for k in keys),'CAND80',c80,'SF_AGREE',agree,'NEW80',regress80,'FIXED80',improve80,flush=True)
+          for row in worst[:10]: print('WORST_DELTA',row,flush=True)
+          PY
+          python /tmp/audit.py
