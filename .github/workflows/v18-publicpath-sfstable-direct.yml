@@ -1,0 +1,186 @@
+name: V18 public-path SF-stable DIRECT A/B
+
+on:
+  push:
+    branches: [analysis/v18-publicpath-sfstable-direct-20260911]
+    paths: [.github/workflows/v18-publicpath-sfstable-direct.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+
+      - name: Reconstruct exact PUNCH133 and public corpus
+        run: |
+          set -euo pipefail
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          for d in /tmp/base /tmp/cand; do
+            rm -rf "$d"; mkdir "$d"; unzip -q /tmp/p150.zip -d "$d"
+            sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' "$d/agent.py"
+            curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o "$d/v18_gm2001.bin"
+          done
+          cat match/benchmarks/top-engine-recent-20260911/chunk_*.b64 | base64 -d | gzip -dc > /tmp/public.pgn
+          echo 'dbac26e0f2b451eb7bf80994ca48fdd6b1abbc9f133e528d3e968f007f7aa264  /tmp/public.pgn' | sha256sum -c -
+          test "$(sha256sum /tmp/base/experiments/numba_search.py | cut -d' ' -f1)" = f74f46499cc0fdef8fba53c2ba77652414463b0a68e7a3fac1e3764f70f94032
+
+      - name: Fetch verified Stockfish 19
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/sf
+          curl -L --fail --retry 3 -o /tmp/sf.tar.gz https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  /tmp/sf.tar.gz' | sha256sum -c -
+          tar -xzf /tmp/sf.tar.gz -C /tmp/sf
+          SF=$(find /tmp/sf -type f -name 'stockfish*' -perm /111 | head -n1); cp "$SF" /tmp/stockfish19; chmod +x /tmp/stockfish19
+
+      - name: Mine only public opening positions through ply 18 and certify stable roots
+        run: |
+          python - <<'PY'
+          import chess,chess.pgn,chess.polyglot,chess.engine,struct
+          from pathlib import Path
+          S=struct.Struct('>QHHI')
+          positions={}; games=0
+          with open('/tmp/public.pgn',encoding='utf-8-sig') as f:
+              while True:
+                  g=chess.pgn.read_game(f)
+                  if g is None: break
+                  games+=1; b=g.board()
+                  for m in g.mainline_moves():
+                      if b.ply()<=18:
+                          positions.setdefault(chess.polyglot.zobrist_hash(b),b.fen())
+                      b.push(m)
+                      if b.ply()>18: break
+          print('PUBLIC_GAMES',games,'UNIQUE_OPENING_KEYS_LE18',len(positions))
+          gm=chess.polyglot.open_reader('/tmp/base/v18_gm2001.bin')
+          def gm_direct(b):
+              es=[e for e in gm.find_all(b) if e.move in b.legal_moves and int(e.weight)>0]
+              if not es or b.ply()>18:return None
+              es.sort(key=lambda e:(-int(e.weight),e.move.uci()));tw=int(es[0].weight);tot=sum(int(e.weight) for e in es);sh=tw/tot
+              return es[0].move if tw>=16 and (sh>=.70 or (tw>=96 and sh>=.60)) else None
+          eng=chess.engine.SimpleEngine.popen_uci('/tmp/stockfish19');eng.configure({'Threads':1,'Hash':128})
+          accepted=[];unstable=[];oldhits=[]
+          def raw_move(b,m):
+              to=m.to_square
+              if b.is_castling(m):to={chess.G1:chess.H1,chess.C1:chess.A1,chess.G8:chess.H8,chess.C8:chess.A8}[m.to_square]
+              promo=0 if m.promotion is None else m.promotion-1
+              return int(to | (m.from_square<<6) | (promo<<12))
+          try:
+              for j,(key,fen) in enumerate(sorted(positions.items()),1):
+                  b=chess.Board(fen); old=gm_direct(b)
+                  if old is not None:
+                      oldhits.append((key,fen,old.uci()));continue
+                  shallow=eng.analyse(b,chess.engine.Limit(nodes=500_000)); deep=eng.analyse(b,chess.engine.Limit(nodes=5_000_000))
+                  m1=shallow['pv'][0];m2=deep['pv'][0]
+                  if m1!=m2:
+                      unstable.append((key,fen,m1.uci(),m2.uci()));continue
+                  accepted.append((key,raw_move(b,m2),65535,0,fen,m2.uci()))
+                  if len(accepted)%20==0: print('PROGRESS accepted',len(accepted),'checked',j,'/',len(positions),flush=True)
+          finally:gm.close();eng.quit()
+          with open('/tmp/cand/v18_publicpath_sf19_stable.bin','wb') as f:
+              for r in sorted(x[:4] for x in accepted):f.write(S.pack(*r))
+          Path('/tmp/accepted.tsv').write_text(''.join(f'{uci}\t{fen}\n' for _,_,_,_,fen,uci in accepted))
+          print('SUMMARY total',len(positions),'old_gm_direct',len(oldhits),'stable_new',len(accepted),'unstable',len(unstable),'overlay_bytes',len(accepted)*16)
+          assert len(oldhits)+len(accepted)+len(unstable)==len(positions)
+          assert accepted
+          with chess.polyglot.open_reader('/tmp/cand/v18_publicpath_sf19_stable.bin') as rd:
+              for key,raw,w,l,fen,uci in accepted:
+                  b=chess.Board(fen);es=list(rd.find_all(b));assert len(es)==1 and es[0].move.uci()==uci,(fen,uci,[e.move.uci() for e in es])
+          PY
+
+      - name: Patch candidate and verify search/evaluator identity
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/cand/agent.py');s=p.read_text()
+          needle='_BOOK_READER = chess.polyglot.open_reader(_BOOK_PATH)\n_BOOK_PRIOR_MAX_PLY: Final = 22\n'
+          repl='_BOOK_READER = chess.polyglot.open_reader(_BOOK_PATH)\n_PUBLIC_BOOK_PATH = Path(__file__).with_name("v18_publicpath_sf19_stable.bin")\nif not _PUBLIC_BOOK_PATH.is_file():\n    raise ValueError("missing V18 public-path opening overlay")\n_PUBLIC_BOOK_READER = chess.polyglot.open_reader(_PUBLIC_BOOK_PATH)\n_BOOK_PRIOR_MAX_PLY: Final = 22\n'
+          assert needle in s;s=s.replace(needle,repl,1)
+          marker='def _internal_move_from_chess(board: chess.Board, move: chess.Move) -> int:\n'
+          helper='''def _public_path_book_move(board: chess.Board) -> chess.Move | None:\n    # Public historical opening positions only; never extends beyond DIRECT ply 18.\n    if board.ply() > _BOOK_DIRECT_MAX_PLY:\n        return None\n    try:\n        for entry in _PUBLIC_BOOK_READER.find_all(board):\n            move = entry.move\n            if int(entry.weight) > 0 and move in board.legal_moves:\n                return move\n    except (IndexError, ValueError):\n        return None\n    return None\n\n\n'''
+          assert marker in s;s=s.replace(marker,helper+marker,1)
+          old='    direct_book_move = _high_confidence_book_move(board)\n    if direct_book_move is not None:\n'
+          new='    direct_book_move = _high_confidence_book_move(board)\n    if direct_book_move is None:\n        direct_book_move = _public_path_book_move(board)\n    if direct_book_move is not None:\n'
+          assert old in s;s=s.replace(old,new,1);p.write_text(s)
+          PY
+          python -m py_compile /tmp/cand/agent.py /tmp/cand/experiments/*.py
+          cmp /tmp/base/experiments/numba_search.py /tmp/cand/experiments/numba_search.py
+          cmp /tmp/base/experiments/numba_core.py /tmp/cand/experiments/numba_core.py
+          cmp /tmp/base/experiments/v14_student_h64.npz /tmp/cand/experiments/v14_student_h64.npz
+          cmp /tmp/base/experiments/v13_residual.i16 /tmp/cand/experiments/v13_residual.i16
+          cmp /tmp/base/v14_kpk.u8 /tmp/cand/v14_kpk.u8
+
+      - name: 32-game paired activation screen exact +0.5
+        run: |
+          python - <<'PY'
+          import random
+          rows=[x.rstrip().split('\t',1) for x in open('/tmp/accepted.tsv') if x.strip()]
+          random.Random(31092026).shuffle(rows);rows=rows[:16]
+          open('/tmp/testfens.txt','w').write('\n'.join(f for _,f in rows)+'\n')
+          print('TEST_POSITIONS',len(rows));assert len(rows)>=8
+          PY
+          cat >/tmp/worker.py <<'PY'
+          import sys,json,contextlib,numpy as np
+          with contextlib.redirect_stdout(sys.stderr):import agent
+          def reset():
+            agent._GAME_KEYS.clear();agent._PENDING_AFTER_OUR_MOVE=None;agent._LAST_CALL_TIME_LEFT_MS=None;agent._LAST_GET_MOVE_ELAPSED_MS=None;agent._CLOCK_OVERHEAD_EMA_MS=40.;agent._CLOCK_FEEDBACK_SAMPLES=0
+            if hasattr(agent,'_BOOK_POST_SEARCH_BOOSTS'):agent._BOOK_POST_SEARCH_BOOSTS=0
+            agent._HASH_KEYS.fill(np.uint64(0));agent._HASH_MOVES.fill(np.int32(-1));agent._TT_TABLE.fill(np.uint64(0));agent._QUIET_HISTORY.fill(np.int16(0))
+          for line in sys.stdin:
+            try:
+              q=json.loads(line);ans={'ok':True} if q['op']=='reset' and not reset() else {'move':agent.get_move(q['fen'],int(q['ms']))}
+            except Exception as e:ans={'error':type(e).__name__+': '+str(e)}
+            print(json.dumps(ans),flush=True)
+          PY
+          cat >/tmp/match.py <<'PY'
+          import subprocess,sys,json,time,math,chess,os
+          class W:
+            def __init__(self,d):self.p=subprocess.Popen([sys.executable,'/tmp/worker.py'],cwd=d,stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env={**os.environ,'PYTHONPATH':d})
+            def ask(self,q):self.p.stdin.write(json.dumps(q)+'\n');self.p.stdin.flush();r=json.loads(self.p.stdout.readline());(_ for _ in ()).throw(RuntimeError(r['error'])) if 'error' in r else None;return r
+            def reset(self):self.ask({'op':'reset'})
+            def close(self):self.p.terminate();self.p.wait(timeout=5)
+          opens=[x.strip() for x in open('/tmp/testfens.txt') if x.strip()];base=W('/tmp/base');cand=W('/tmp/cand');pts=[];fails=[];BASE=15.;INC=.5
+          try:
+            for pi,fen in enumerate(opens):
+              for leg in range(2):
+                base.reset();cand.reset();b=chess.Board(fen);cl={'base':BASE,'cand':BASE};cw=leg==0;fail=None
+                for _ in range(260):
+                  if b.outcome(claim_draw=True):break
+                  side='cand' if b.turn==cw else 'base';w=cand if side=='cand' else base;st=time.perf_counter();r=w.ask({'op':'move','fen':b.fen(),'ms':max(1,round(cl[side]*1000))});cl[side]-=time.perf_counter()-st
+                  if cl[side]<0:fail=side+' flag';break
+                  m=chess.Move.from_uci(r['move'])
+                  if m not in b.legal_moves:fail=side+' illegal';break
+                  b.push(m);cl[side]+=INC
+                out=b.outcome(claim_draw=True);cp=(0. if fail and fail.startswith('cand') else 1.) if fail else (.5 if out is None or out.winner is None else (1. if out.winner==cw else 0.));pts.append(cp)
+                if fail:fails.append((pi,leg,fail));print('GAME',len(pts),'/',2*len(opens),'POINT',cp,'TOTAL',sum(pts),'FAIL',fail,flush=True)
+          finally:base.close();cand.close()
+          p=sum(pts)/len(pts);q=max(1e-6,min(1-1e-6,p));print('FINAL points',sum(pts),'games',len(pts),'score',p,'REL_ELO',400*math.log10(q/(1-q)),'FAILS',fails)
+          PY
+          python /tmp/match.py
+
+      - name: Package candidate
+        if: success()
+        run: |
+          find /tmp/cand -type d -name __pycache__ -prune -exec rm -rf {} +
+          (cd /tmp/cand && zip -qr /tmp/Little-Gambit-V18-PUNCH133-PUBLICPATH-SFSTABLE-CANDIDATE.zip .)
+          unzip -t /tmp/Little-Gambit-V18-PUNCH133-PUBLICPATH-SFSTABLE-CANDIDATE.zip
+          sha256sum /tmp/Little-Gambit-V18-PUNCH133-PUBLICPATH-SFSTABLE-CANDIDATE.zip
+          python - <<'PY'
+          import zipfile
+          p='/tmp/Little-Gambit-V18-PUNCH133-PUBLICPATH-SFSTABLE-CANDIDATE.zip'
+          with zipfile.ZipFile(p) as z:
+              total=sum(i.file_size for i in z.infolist());print('UNCOMPRESSED_BYTES',total);assert 'agent.py' in z.namelist() and total<50_000_000
+          PY
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: Little-Gambit-V18-PUNCH133-PUBLICPATH-SFSTABLE-CANDIDATE
+          path: /tmp/Little-Gambit-V18-PUNCH133-PUBLICPATH-SFSTABLE-CANDIDATE.zip
+          retention-days: 7
