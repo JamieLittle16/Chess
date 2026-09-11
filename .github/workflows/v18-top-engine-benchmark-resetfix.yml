@@ -1,0 +1,102 @@
+name: V18 corrected top-engine benchmark
+
+on:
+  push:
+    branches: [analysis/v18-top-engine-benchmark-resetfix-20260911]
+    paths: [.github/workflows/v18-top-engine-benchmark-resetfix.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  BENCH_POSITIONS: '48'
+  BENCH_NODES: '200000'
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: 'Ryan Vincent'
+            slug: ryan-vincent
+          - target: 'Emile Andrieu'
+            slug: emile-andrieu
+          - target: 'Lightning Tree'
+            slug: lightning-tree
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install exact competition runtime
+        run: python -m pip install 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Patch static-position reset and verify syntax
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('scripts/v18_competitor_move_benchmark.py')
+          s=p.read_text()
+          needle='    if hasattr(agent, "_CLOCK_FEEDBACK_SAMPLES"):\n        agent._CLOCK_FEEDBACK_SAMPLES = 0\n'
+          assert s.count(needle)==1
+          repl=needle+'    if hasattr(agent, "_BOOK_POST_SEARCH_BOOSTS"):\n        agent._BOOK_POST_SEARCH_BOOSTS = 0\n'
+          p.write_text(s.replace(needle,repl,1))
+          PY
+          python -m py_compile scripts/v18_competitor_move_benchmark.py scripts/stockfish_lab.py
+      - name: Reconstruct frozen recent-game corpus
+        run: |
+          set -euo pipefail
+          cat match/benchmarks/top-engine-recent-20260911/chunk_*.b64 | base64 -d | gzip -dc > /tmp/top-engine-recent.pgn
+          printf '%s  %s\n' 'dbac26e0f2b451eb7bf80994ca48fdd6b1abbc9f133e528d3e968f007f7aa264' '/tmp/top-engine-recent.pgn' | sha256sum -c -
+      - name: Reconstruct exact PUNCH133 engine
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/engine /tmp/bench
+          mkdir -p /tmp/engine /tmp/bench/${{ matrix.slug }}
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/postbook150.zip
+          unzip -q /tmp/postbook150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+          curl --fail --location --retry 5 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/engine/v18_gm2001.bin
+          cat >/tmp/exact.sha256 <<'EOF'
+          0306e8145a453d91b9b5ac92e9980931510d9e18f8ba598a7548d08b85165c35  /tmp/engine/experiments/numba_core.py
+          e38876e2a37193639f9b8b559b02bc064d820c4cdeda44579c9f88e5bd4468b1  /tmp/engine/experiments/v14_student_h64.npz
+          7d0fc5f7a186e79317cf12a2ff285d7716c651fbd045c53d65a3cc6eb1b15319  /tmp/engine/experiments/v13_residual.i16
+          f74f46499cc0fdef8fba53c2ba77652414463b0a68e7a3fac1e3764f70f94032  /tmp/engine/experiments/numba_search.py
+          cb9540d5ea2a7074ae0c3b5894babecc2fb01de94b102420d8a65e159325ada6  /tmp/engine/experiments/v14_student_single_runtime.py
+          6422eb8eb8713e02e6d62d33ef230f37cf707188e864b575226802aead128b2f  /tmp/engine/experiments/__init__.py
+          c2cc0534a984124c5a75e250bab65f2756ade47341bbca84d6b6871fdb2977f2  /tmp/engine/v14_kpk.u8
+          0ab496524b077f3c8f3778634f46b2bd79ed1c44ad4d89cf96857890396d1424  /tmp/engine/agent.py
+          fb6e9f3f27bb19a5b2fdefcc441c88ddeae48db61d5f00ad83973abb9f939c87  /tmp/engine/v18_gm2001.bin
+          EOF
+          sha256sum -c /tmp/exact.sha256
+      - name: Download pinned Stockfish 19
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 'https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz' -o /tmp/sf.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  /tmp/sf.tar.gz' | sha256sum -c -
+          mkdir -p /tmp/sf && tar -xzf /tmp/sf.tar.gz -C /tmp/sf
+          SF="$(find /tmp/sf -type f -name 'stockfish*' -perm /111 | head -n1)"
+          cp "$SF" /tmp/stockfish19 && chmod +x /tmp/stockfish19
+      - name: Score PUNCH133 against ${{ matrix.target }}
+        run: |
+          python scripts/v18_competitor_move_benchmark.py \
+            --pgn /tmp/top-engine-recent.pgn \
+            --engine-dir /tmp/engine \
+            --stockfish /tmp/stockfish19 \
+            --target '${{ matrix.target }}' \
+            --positions "$BENCH_POSITIONS" \
+            --nodes "$BENCH_NODES" \
+            --threads 1 --hash-mb 64 --pairwise-margin-cp 8 --seed 20260911 \
+            --output-dir /tmp/bench/${{ matrix.slug }}
+          echo BENCHMARK_SUMMARY_BEGIN
+          cat /tmp/bench/${{ matrix.slug }}/summary.json
+          echo BENCHMARK_SUMMARY_END
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: corrected-top-engine-${{ matrix.slug }}
+          path: /tmp/bench/${{ matrix.slug }}
+          retention-days: 7
