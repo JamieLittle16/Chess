@@ -1,0 +1,40 @@
+name: V18 export exact PUNCH133 source
+
+on:
+  push:
+    branches: [analysis/v18-benchmark-driven-search-audit-20260911]
+    paths: [.github/workflows/v18-export-punch133-source.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Reconstruct exact PUNCH133
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/engine && mkdir /tmp/engine
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          unzip -q /tmp/p150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+          python -m py_compile /tmp/engine/agent.py /tmp/engine/experiments/*.py
+          sha256sum /tmp/engine/agent.py /tmp/engine/experiments/numba_search.py
+          grep -nEi 'aspiration|lmr|late move|futility|razor|null|qsearch|quies|soft_fraction|stable|history|singular|extension|see|probcut|delta|reverse futility|russian|root' /tmp/engine/experiments/numba_search.py | head -n 400 || true
+          grep -nEi 'soft_fraction|deadline|stable|book|root|time|search' /tmp/engine/agent.py | head -n 300 || true
+      - name: Export exact source
+        uses: actions/upload-artifact@v4
+        with:
+          name: exact-punch133-source
+          path: |
+            /tmp/engine/agent.py
+            /tmp/engine/experiments/numba_search.py
+            /tmp/engine/experiments/numba_core.py
+            /tmp/engine/experiments/v14_student_single_runtime.py
+          retention-days: 2
