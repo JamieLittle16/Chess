@@ -44,12 +44,17 @@ jobs:
           rm -rf /tmp/engine /tmp/run
           mkdir -p /tmp/engine /tmp/run
 
-          # Rebuild the exact PUNCH150 core, calibrate it to PUNCH133, then apply the isolated
-          # ordering-only main-search SEE patch that produced the uploaded SEE leader.
+          # Rebuild every unchanged file from the frozen PUNCH150 payload, calibrate the
+          # post-book multiplier to 1.33, then overlay the exact uploaded SEE search source.
+          # The all-file SHA gate below is authoritative; no game is played unless all nine
+          # extracted files match the user's uploaded ZIP byte-for-byte.
           cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
           unzip -q /tmp/p150.zip -d /tmp/engine
           sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
-          python scripts/apply_v18_main_see_staging.py /tmp/engine/experiments/numba_search.py
+          cat ci/v18_punch133_see_exact/numba_search.py.gz.b64.* \
+            | base64 -d \
+            | gzip -dc \
+            > /tmp/engine/experiments/numba_search.py
           curl --fail --location --retry 5 -sS \
             'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' \
             -o /tmp/engine/v18_gm2001.bin
