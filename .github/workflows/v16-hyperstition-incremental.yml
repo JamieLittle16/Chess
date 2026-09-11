@@ -1,0 +1,84 @@
+name: V16 Hyperstition incremental
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  incremental:
+    if: github.head_ref == 'v16/hyperstition-eval-lab'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RUSTFLAGS: -C target-cpu=native
+      NETWORK_URL: https://github.com/cosmobobak/viridithas-networks/releases/download/v92/hyperstition-b400.nnue.zst
+      RAW_BYTES: '50616896'
+      RAW_SHA256: 36bcc6b3354ecbdb88fb95a341e494558b052223143f38ff6e6387aed99ab193
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: Strict repository gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --all-features --release
+
+      - name: Fetch exact Hyperstition v92 network
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/hyperstition-incremental
+          curl --fail --location --retry 5 "$NETWORK_URL" \
+            --output .qualification/hyperstition-incremental/network.nnue.zst
+          if ! command -v zstd >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y zstd
+          fi
+          zstd --decompress --force \
+            .qualification/hyperstition-incremental/network.nnue.zst \
+            -o .qualification/hyperstition-incremental/network.nnue
+          test "$(stat -c%s .qualification/hyperstition-incremental/network.nnue)" = "$RAW_BYTES"
+          echo "$RAW_SHA256  .qualification/hyperstition-incremental/network.nnue" \
+            | sha256sum --check --strict
+
+      - name: Certify incremental apply and restore against full refresh
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --release -p chess-eval --example hyperstition_incremental_check -- \
+            .qualification/hyperstition-incremental/network.nnue \
+            | tee .qualification/hyperstition-incremental/report.txt
+
+      - name: Record identity
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/hyperstition-incremental
+          {
+            echo "candidate_commit=$(git rev-parse HEAD)"
+            echo "network_release=v92"
+            echo "network_asset=hyperstition-b400.nnue.zst"
+            echo "network_url=$NETWORK_URL"
+            echo "raw_bytes=$RAW_BYTES"
+            echo "raw_sha256=$RAW_SHA256"
+          } > .qualification/hyperstition-incremental/identity.txt
+
+      - name: Upload incremental evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v16-hyperstition-incremental-${{ github.sha }}
+          path: |
+            .qualification/hyperstition-incremental/report.txt
+            .qualification/hyperstition-incremental/identity.txt
+          retention-days: 30
