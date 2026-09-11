@@ -43,20 +43,17 @@ jobs:
           from experiments.numba_core import encode_position
           fen='rn1r2k1/ppq2ppp/2b1pn2/6B1/1b1P4/1BNQ1N1P/PP3PP1/R4RK1 b - - 8 13'
           root=chess.Board(fen)
-          # Warm compiled eval path.
           for uci in ('h7h6','b8d7'):
               b=root.copy(stack=False); b.push(chess.Move.from_uci(uci)); e=encode_position(b)
               state=np.empty(s.EVAL_WIDTH,dtype=np.int32); s._build_eval_state_into(e.board,state)
-              classical=int(s._evaluate_state_classical(e.side,state))
-              v13=int(s._evaluate_state_v13_only(e.side,state))
-              full=int(s._evaluate_state(e.side,state))
+              classical=int(s._evaluate_state_classical(e.side,state)); v13=int(s._evaluate_state_v13_only(e.side,state)); full=int(s._evaluate_state(e.side,state))
               print('LG_EVAL',uci,'child_side',e.side,'root_classical',-classical,'root_v13',-v13,'root_full',-full,'student_delta_root',-(full-v13),flush=True)
-          eng=chess.engine.SimpleEngine.popen_uci('/tmp/stockfish19')
-          eng.configure({'Threads':1,'Hash':64})
+          eng=chess.engine.SimpleEngine.popen_uci('/tmp/stockfish19'); eng.configure({'Threads':1,'Hash':64})
           try:
               for uci in ('h7h6','b8d7'):
                   b=root.copy(stack=False); b.push(chess.Move.from_uci(uci)); eng.configure({'Clear Hash':None})
                   info=eng.analyse(b,chess.engine.Limit(nodes=2_000_000),multipv=1)
+                  if isinstance(info,list): info=info[0]
                   sc=info['score'].pov(chess.BLACK).score(mate_score=100000)
                   pv=' '.join(m.uci() for m in info.get('pv',[])[:12])
                   print('SF_AFTER',uci,'black_cp',sc,'depth',info.get('depth'),'pv',pv,flush=True)
