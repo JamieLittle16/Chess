@@ -1,0 +1,152 @@
+name: V18 ASP40 ROOT4 qualification
+
+on:
+  push:
+    branches: [analysis/v18-root-quality-fastfilter-20260911]
+    paths: ['.github/workflows/v18-asp40-root4-qualification.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rival:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: 'Ryan Vincent'
+            slug: ryan
+          - target: 'Lightning Tree'
+            slug: lightning
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Reconstruct corpus
+        run: |
+          cat match/benchmarks/top-engine-recent-20260911/chunk_00.b64 match/benchmarks/top-engine-recent-20260911/chunk_01.b64 match/benchmarks/top-engine-recent-20260911/chunk_02.b64 match/benchmarks/top-engine-recent-20260911/chunk_03a.b64 match/benchmarks/top-engine-recent-20260911/chunk_03b.b64 match/benchmarks/top-engine-recent-20260911/chunk_03c.b64 match/benchmarks/top-engine-recent-20260911/chunk_03d.b64 match/benchmarks/top-engine-recent-20260911/chunk_04.b64 | base64 -d | gzip -dc > /tmp/recent.pgn
+          echo 'dbac26e0f2b451eb7bf80994ca48fdd6b1abbc9f133e528d3e968f007f7aa264  /tmp/recent.pgn' | sha256sum -c -
+      - name: Build ASP40 ROOT4
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/engine /tmp/bench; mkdir -p /tmp/engine /tmp/bench
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          unzip -q /tmp/p150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+          curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/engine/v18_gm2001.bin
+          python scripts/apply_v18_see_capture_ordering.py /tmp/engine/experiments/numba_search.py
+          python scripts/apply_v18_root_value.py /tmp/engine/experiments/numba_search.py 4
+          python scripts/apply_v18_aspiration40.py /tmp/engine/experiments/numba_search.py
+          python -m py_compile /tmp/engine/agent.py /tmp/engine/experiments/numba_search.py
+          (cd /tmp/engine && python -c 'import agent; assert agent._ENGINE_READY; print("ASP40_ROOT4_READY")')
+      - name: Cold Stockfish
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('scripts/stockfish_lab.py'); s=p.read_text()
+          old='''        root_moves = None if root_move is None else [root_move]\n        info = self.engine.analyse(\n'''
+          new='''        self.engine.configure({"Clear Hash": None})\n        root_moves = None if root_move is None else [root_move]\n        info = self.engine.analyse(\n'''
+          assert s.count(old)==1; p.write_text(s.replace(old,new,1))
+          PY
+      - name: Fetch Stockfish 19
+        run: |
+          curl --fail --location --retry 5 -sS 'https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz' -o /tmp/sf.tar.gz
+          echo '9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f  /tmp/sf.tar.gz' | sha256sum -c -
+          mkdir -p /tmp/sf && tar -xzf /tmp/sf.tar.gz -C /tmp/sf
+          SF="$(find /tmp/sf -type f -name 'stockfish*' -perm /111 | head -n1)"; cp "$SF" /tmp/stockfish19; chmod +x /tmp/stockfish19
+      - name: Score rival
+        run: |
+          python scripts/v18_competitor_move_benchmark_v2.py --pgn /tmp/recent.pgn --engine-dir /tmp/engine --stockfish /tmp/stockfish19 --target '${{ matrix.target }}' --positions 48 --nodes 200000 --threads 1 --hash-mb 64 --pairwise-margin-cp 8 --seed 20260911 --output-dir /tmp/bench
+          cat /tmp/bench/summary.json
+
+  paired:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0,1,2,3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Build ROOT4 baseline and ASP40 ROOT4 candidate
+        run: |
+          set -euo pipefail
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          for d in /tmp/base /tmp/cand; do
+            rm -rf "$d"; mkdir -p "$d"; unzip -q /tmp/p150.zip -d "$d"
+            sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' "$d/agent.py"
+            curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o "$d/v18_gm2001.bin"
+            python scripts/apply_v18_see_capture_ordering.py "$d/experiments/numba_search.py"
+            python scripts/apply_v18_root_value.py "$d/experiments/numba_search.py" 4
+          done
+          python scripts/apply_v18_aspiration40.py /tmp/cand/experiments/numba_search.py
+          python -m py_compile /tmp/base/agent.py /tmp/base/experiments/numba_search.py /tmp/cand/agent.py /tmp/cand/experiments/numba_search.py
+      - name: Build 18-start screen
+        run: |
+          cat match/benchmarks/top-engine-recent-20260911/chunk_00.b64 match/benchmarks/top-engine-recent-20260911/chunk_01.b64 match/benchmarks/top-engine-recent-20260911/chunk_02.b64 match/benchmarks/top-engine-recent-20260911/chunk_03a.b64 match/benchmarks/top-engine-recent-20260911/chunk_03b.b64 match/benchmarks/top-engine-recent-20260911/chunk_03c.b64 match/benchmarks/top-engine-recent-20260911/chunk_03d.b64 match/benchmarks/top-engine-recent-20260911/chunk_04.b64 | base64 -d | gzip -dc > /tmp/recent.pgn
+          python - <<'PY'
+          import chess.pgn
+          seen=[]; keys=set()
+          with open('/tmp/recent.pgn',encoding='utf-8') as f:
+              while True:
+                  g=chess.pgn.read_game(f)
+                  if g is None: break
+                  fen=g.board().fen()
+                  if fen not in keys: keys.add(fen); seen.append(fen)
+          assert len(seen)==36
+          screen=seen[::2]; assert len(screen)==18
+          open('/tmp/starts.epd','w').write('\n'.join(screen)+'\n')
+          PY
+      - name: Paired exact 30+0.5
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          cat >/tmp/worker.py <<'PY'
+          import contextlib,json,sys,numpy as np
+          with contextlib.redirect_stdout(sys.stderr): import agent
+          def reset():
+              agent._GAME_KEYS.clear(); agent._PENDING_AFTER_OUR_MOVE=None; agent._LAST_CALL_TIME_LEFT_MS=None; agent._LAST_GET_MOVE_ELAPSED_MS=None; agent._CLOCK_OVERHEAD_EMA_MS=40.0; agent._CLOCK_FEEDBACK_SAMPLES=0
+              if hasattr(agent,'_BOOK_POST_SEARCH_BOOSTS'): agent._BOOK_POST_SEARCH_BOOSTS=0
+              agent._HASH_KEYS.fill(np.uint64(0)); agent._HASH_MOVES.fill(np.int32(-1)); agent._TT_TABLE.fill(np.uint64(0)); agent._QUIET_HISTORY.fill(np.int16(0))
+          for line in sys.stdin:
+              try:
+                  q=json.loads(line)
+                  if q['op']=='reset': reset(); r={'ok':1}
+                  else: r={'move':agent.get_move(q['fen'],int(q['ms']))}
+              except Exception as e: r={'error':type(e).__name__+': '+str(e)}
+              print(json.dumps(r),flush=True)
+          PY
+          cat >/tmp/match.py <<'PY'
+          import chess,json,math,os,subprocess,sys,time
+          class W:
+              def __init__(self,d): self.p=subprocess.Popen([sys.executable,'/tmp/worker.py'],cwd=d,stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,bufsize=1,env={**os.environ,'PYTHONPATH':d})
+              def ask(self,q): self.p.stdin.write(json.dumps(q)+'\n'); self.p.stdin.flush(); r=json.loads(self.p.stdout.readline()); assert 'error' not in r,r; return r
+              def reset(self): self.ask({'op':'reset'})
+              def close(self): self.p.terminate(); self.p.wait(timeout=5)
+          allf=[x.strip() for x in open('/tmp/starts.epd') if x.strip()]; sh=int(os.environ['SHARD']); starts=allf[sh::4]
+          base=W('/tmp/base'); cand=W('/tmp/cand'); pts=[]; fails=[]; BASE=30.; INC=.5
+          try:
+              for fen in starts:
+                  for leg in range(2):
+                      base.reset(); cand.reset(); b=chess.Board(fen); cl={'base':BASE,'cand':BASE}; cw=(leg==0); failure=None
+                      for _ in range(300):
+                          if b.outcome(claim_draw=True): break
+                          side='cand' if b.turn==cw else 'base'; w=cand if side=='cand' else base; st=time.perf_counter(); rr=w.ask({'op':'move','fen':b.fen(),'ms':max(1,round(cl[side]*1000))}); cl[side]-=time.perf_counter()-st
+                          if cl[side]<0: failure=side+' flag'; break
+                          m=chess.Move.from_uci(rr['move'])
+                          if m not in b.legal_moves: failure=side+' illegal'; break
+                          b.push(m); cl[side]+=INC
+                      out=b.outcome(claim_draw=True); cp=(0. if failure and failure.startswith('cand') else 1.) if failure else (.5 if out is None or out.winner is None else (1. if out.winner==cw else 0.)); pts.append(cp)
+                      if failure: fails.append(failure)
+                      print('GAME point',cp,'TOTAL',sum(pts),'failure',failure,flush=True)
+          finally: base.close(); cand.close()
+          p=sum(pts)/len(pts); q=max(1e-6,min(1-1e-6,p)); print('FINAL shard',sh,'points',sum(pts),'games',len(pts),'score',p,'REL_ELO',400*math.log10(q/(1-q)),'FAILS',fails)
+          PY
+          python /tmp/match.py
