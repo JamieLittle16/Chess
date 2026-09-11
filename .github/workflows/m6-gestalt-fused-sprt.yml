@@ -1,0 +1,133 @@
+name: M6 fused gestalt equal-time SPRT
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  sprt:
+    if: github.head_ref == 'm6/gestalt-fused-sprt-v1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      RUSTFLAGS: -C target-cpu=native
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Build exact classical reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .qualification/bin .qualification/gestalt-sprt
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/bin/classical
+
+      - name: Materialize exact fused mature-evaluator candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/apply_gestalt_avx2_probe.py
+          python scripts/apply_gestalt_search_probe.py
+          cargo fmt --all
+          git diff --check
+          git diff -- crates/chess-eval/src/gestalt.rs crates/chess-search/src/lib.rs crates/chess-search/src/quiescence.rs > .qualification/gestalt-sprt/candidate.patch
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --release
+          cargo build --release -p chess-uci
+          cp target/release/chess-uci .qualification/bin/gestalt-fused
+          chmod +x .qualification/bin/*
+
+      - name: Download exact certified network
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 'https://github.com/cosmobobak/viridithas-networks/releases/download/v85/gestalt-b840.nnue' --output .qualification/gestalt-sprt/gestalt-b840.nnue
+          echo '956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6  .qualification/gestalt-sprt/gestalt-b840.nnue' | sha256sum --check --strict
+
+      - name: Reproduce certified 5000-root suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 'https://raw.githubusercontent.com/official-stockfish/books/65815ccdbc7727cd4f6aee252ba8f67fb740e92f/UHO_Lichess_4852_v1.epd.zip' --output /tmp/UHO_Lichess_4852_v1.epd.zip
+          echo '4e298f11e8acfa106babe02968f2e61582145e7874c59284690b20b9650e0e07  /tmp/UHO_Lichess_4852_v1.epd.zip' | sha256sum --check --strict
+          mkdir -p .qualification/m6-openings
+          python scripts/build_m6_opening_suite.py --archive /tmp/UHO_Lichess_4852_v1.epd.zip --output-dir .qualification/m6-openings
+          echo '5445819229270140036023a507c41edffc9307ac2cca1ca2efd20e1ddb8d670e  .qualification/m6-openings/m6-uho-lichess-5000-v1.epd' | sha256sum --check --strict
+
+      - name: Build pinned Fastchess
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/Disservin/fastchess.git .qualification/fastchess-src
+          git -C .qualification/fastchess-src checkout --quiet f618e34540f94f4719ad3817950618dabe441318
+          make -C .qualification/fastchess-src -j2
+
+      - name: Create network launcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$PWD"
+          cat > .qualification/bin/gestalt-launcher <<EOF
+          #!/usr/bin/env bash
+          export CHESS_GESTALT_NETWORK='$ROOT/.qualification/gestalt-sprt/gestalt-b840.nnue'
+          exec '$ROOT/.qualification/bin/gestalt-fused'
+          EOF
+          chmod +x .qualification/bin/gestalt-launcher
+
+      - name: Run frozen M6 equal-time SPRT
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/sprt_match_harness.py \
+            --candidate .qualification/bin/gestalt-launcher \
+            --reference .qualification/bin/classical \
+            --candidate-name gestalt-fused \
+            --reference-name classical-main \
+            --candidate-option Hash=32 \
+            --reference-option Hash=32 \
+            --fastchess .qualification/fastchess-src/fastchess \
+            --openings .qualification/m6-openings/m6-uho-lichess-5000-v1.epd \
+            --protocol match/protocols/m6-sprt-arch-v1.json \
+            --output-dir .qualification/gestalt-sprt/match
+
+      - name: Record experiment identity
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum .qualification/bin/classical .qualification/bin/gestalt-fused scripts/apply_gestalt_avx2_probe.py scripts/apply_gestalt_search_probe.py > .qualification/gestalt-sprt/hashes.txt || true
+          cat > .qualification/gestalt-sprt/evidence.txt <<'EOF'
+          purpose=current-safe-fused mature gestalt equal-time floor
+          network_sha256=956a6afcce5de1cdbc953ae3817ff760f3e6036441f34dcd524d6e2e7d0e71f6
+          equal_node_prior=49W-43D-8L,+151.35+-54.58 Elo
+          known_fixed_node_time_ratio_vs_classical=3.7519x
+          sprt_protocol=m6-sprt-arch-v1
+          production_switch=none
+          EOF
+
+      - name: Upload complete SPRT evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m6-gestalt-fused-sprt-${{ github.sha }}
+          path: |
+            .qualification/gestalt-sprt/candidate.patch
+            .qualification/gestalt-sprt/hashes.txt
+            .qualification/gestalt-sprt/evidence.txt
+            .qualification/gestalt-sprt/match/
+          retention-days: 30
