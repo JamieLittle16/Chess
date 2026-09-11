@@ -1,0 +1,77 @@
+name: V18 fast SEE parity and startup
+
+on:
+  push:
+    branches: [analysis/v18-benchmark-driven-search-audit-20260911]
+    paths: [.github/workflows/v18-fast-see-parity.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  parity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ['Ryan Vincent', 'Emile Andrieu', 'Lightning Tree']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Reconstruct fast SEE
+        run: |
+          set -euo pipefail
+          (for f in match/benchmarks/top-engine-recent-20260911/chunk_*.b64; do base64 -d "$f"; done) | gzip -dc > /tmp/top.pgn
+          echo 'dbac26e0f2b451eb7bf80994ca48fdd6b1abbc9f133e528d3e968f007f7aa264  /tmp/top.pgn' | sha256sum -c -
+          rm -rf /tmp/engine; mkdir /tmp/engine
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          unzip -q /tmp/p150.zip -d /tmp/engine
+          sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' /tmp/engine/agent.py
+          curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o /tmp/engine/v18_gm2001.bin
+          python scripts/apply_v18_full_see_ordering.py /tmp/engine/experiments/numba_search.py
+          python -m py_compile /tmp/engine/agent.py /tmp/engine/experiments/*.py
+      - name: Stockfish 19
+        run: |
+          curl -L --fail --retry 3 -sS -o /tmp/sf.tgz https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+          mkdir /tmp/sf; tar -xzf /tmp/sf.tgz -C /tmp/sf
+          SF=$(find /tmp/sf -type f -name 'stockfish*' | head -1); chmod +x "$SF"; echo "SF=$SF" >> "$GITHUB_ENV"
+      - name: Reproduce 12-position SEE smoke
+        run: |
+          mkdir -p /tmp/out
+          PYTHONPATH=scripts python scripts/v18_competitor_move_benchmark_v2.py --pgn /tmp/top.pgn --engine-dir /tmp/engine --stockfish "$SF" --target '${{ matrix.target }}' --positions 12 --nodes 100000 --threads 1 --hash-mb 64 --pairwise-margin-cp 8 --seed 20260911 --output-dir /tmp/out
+          echo FAST_SEE_BEGIN; cat /tmp/out/summary.json; echo FAST_SEE_END
+
+  startup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install -q 'numba==0.67.0' 'numpy==2.5.2' 'chess==1.11.2'
+      - name: Cold baseline versus fast SEE
+        run: |
+          set -euo pipefail
+          cat ci/v18_postbook_payload/chunk_*.b64 | base64 -d > /tmp/p150.zip
+          for d in /tmp/base /tmp/fast; do
+            rm -rf "$d"; mkdir "$d"; unzip -q /tmp/p150.zip -d "$d"
+            sed -i 's/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.50/_BOOK_POST_SEARCH_BOOST_MULT: Final = 1.33/' "$d/agent.py"
+            curl --fail --location --retry 5 -sS 'https://raw.githubusercontent.com/michaeldv/donna_opening_books/master/gm2001.bin' -o "$d/v18_gm2001.bin"
+          done
+          python scripts/apply_v18_full_see_ordering.py /tmp/fast/experiments/numba_search.py
+          python - <<'PY'
+          import subprocess,sys,time,os
+          fen='rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1'
+          for name,d in [('base','/tmp/base'),('fast','/tmp/fast')]:
+            vals=[]
+            for i in range(3):
+              t=time.perf_counter()
+              p=subprocess.run([sys.executable,'-c',f"import agent; print(agent.get_move('{fen}',30000))"],cwd=d,env={**os.environ,'PYTHONPATH':d},capture_output=True,text=True,timeout=90)
+              dt=time.perf_counter()-t; vals.append(dt)
+              print('COLD',name,i,dt,'rc',p.returncode,'tail',p.stdout.strip()[-100:])
+            print('COLD_MEAN',name,sum(vals)/len(vals))
+          PY
