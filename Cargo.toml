@@ -17,6 +17,10 @@ license = "MIT OR Apache-2.0"
 authors = ["Jamie Little"]
 repository = "https://github.com/JamieLittle16/Chess"
 
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
